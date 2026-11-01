@@ -45,12 +45,14 @@ import {
   SPAWN_HARNESS_HEALTH_TIMEOUT_MS,
   spawnHarness,
   startInProcessServer,
+  STARTUP_BACKSTOP_FLOOR_MS,
   startupBackstopMs,
   waitForChromeProfileUnused,
   withChrome,
   writeEvidenceReadme,
 } from "../scripts/proof-helper.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "../scripts/harness-port.ts";
+import { HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
 import { GENERATED_BEGIN, GENERATED_END } from "../scripts/evidence-readme.ts";
 
 Deno.test("proof-helper: newestChrome resolves Chrome binary path or throws descriptive error", () => {
@@ -286,6 +288,15 @@ const NEVER_READY_CHILD = `// Never prints READY, never binds, never answers /he
 setInterval(() => {}, 1000);
 `;
 
+const BINDS_ANSWERS_CHILD = `// Binds an ephemeral port, logs its READY line, and answers every path
+// with 200: a healthy harness child for positive-path wiring rows
+// (audio-feed-v0o7k).
+Deno.serve(
+  { port: 0, onListen: ({ port }) => console.log(\`READY port=\${port}\`) },
+  () => new Response("ok"),
+);
+`;
+
 const BINDS_NEVER_ANSWERS_CHILD =
   `// Binds an ephemeral port and logs its READY line, but accepts every
 // request and NEVER answers: pins the second named timeout case in
@@ -388,54 +399,106 @@ Deno.test(
     // under eight busy loops - so a FIXED 15s window failed a HEALTHY child and
     // reddened whichever proof row happened to spawn it. These assertions are the ones
     // that redden by NAME if a constant is returned from startupBackstopMs again:
-    // every one of them is false for 15_000.
-    assertEquals(startupBackstopMs(500), 30_000);
-    assertEquals(startupBackstopMs(900), 54_000);
-    assertEquals(startupBackstopMs(100), 6_000);
-    // Proportional in both directions - a fixed window cannot be: 1.8x the measured
-    // boot is 1.8x the window, which is exactly the load change that produced the
-    // 12.0s -> 19.0s measurement above.
-    assertEquals(startupBackstopMs(900), Math.round(1.8 * startupBackstopMs(500)));
-    assertEquals(startupBackstopMs(1_800), Math.round(2 * startupBackstopMs(900)));
+    // every one of them is false for 15_000. audio-feed-v0o7k: the derivation also
+    // has a FLOOR (asserted in the row below), so the pins pair a floored baseline
+    // with above-floor baselines - every value here differs from 15_000 and no two
+    // are equal, so a constant is still red by name.
+    assertEquals(startupBackstopMs(500), STARTUP_BACKSTOP_FLOOR_MS); // 30_000 would-be derivation is below the floor
+    assertEquals(startupBackstopMs(3_000), 180_000);
+    assertEquals(startupBackstopMs(6_000), 360_000);
+    // Proportional ABOVE the floor - a fixed window cannot be: 2x the measured
+    // boot is 2x the window, which is exactly the load change that produced the
+    // 12.0s -> 19.0s measurement above. (Both baselines sit above the floor; below
+    // it the floor dominates and proportionality is intentionally suspended.)
+    assertEquals(startupBackstopMs(6_000), Math.round(2 * startupBackstopMs(3_000)));
     // The failure in one assertion: a host measured 1.8x slower than the first sample
     // needs MORE than the 19.0s its healthy harness actually took, and now gets it,
     // where the fixed window gave it 15s.
     assert(
-      startupBackstopMs(900) > 19_000,
-      `a 899ms measured boot baseline must derive more than the 19.0s READY measured on that host, got ${
-        startupBackstopMs(900)
+      startupBackstopMs(3_000) > 19_000,
+      `a 3000ms measured boot baseline must derive more than the 19.0s READY measured on that host, got ${
+        startupBackstopMs(3_000)
       }ms`,
     );
   },
 );
 
+Deno.test(
+  "proof-helper: the derived startup window is FLOORED at the repo's measured hang bound, never below it (audio-feed-v0o7k)",
+  () => {
+    // THE MULTIPLICATION IS NOT A BOUND (audio-feed-v0o7k): 60x a bare-Deno-boot
+    // probe inherits the probe's luck. A fast probe on a momentarily idle box
+    // (8ms measured in the wiring row above, 100ms plausible on a quiet host)
+    // would derive 480ms/6s - BELOW the 12.0s/19.0s READY this repo measured at
+    // load, i.e. a healthy harness reported as never-ready. The floor is the
+    // repo's own measured starvation bound, IMPORTED, not redefined: a window
+    // smaller than HANG_BOUND_MS (15 x the 8s measured starved poll) claims a
+    // Deno compile fails faster than the repo has measured a starved host to
+    // take for ONE poll. What the multiplier still buys: proportionality above
+    // the floor - a genuinely slow host (3s probe) gets a genuinely larger
+    // window (180s), where a bare floor would starve it again.
+    assertEquals(
+      STARTUP_BACKSTOP_FLOOR_MS,
+      HANG_BOUND_MS,
+      "the floor must BE the repo's measured hang bound (15 x MEASURED_STARVED_POLL_MS), imported from proof-cdp.ts",
+    );
+    assertEquals(HANG_BOUND_MS, 15 * MEASURED_STARVED_POLL_MS);
+    // A fast/implausible probe CANNOT produce a backstop below the floor:
+    assertEquals(startupBackstopMs(8), STARTUP_BACKSTOP_FLOOR_MS); // bare 60x would give 480ms
+    assertEquals(startupBackstopMs(100), STARTUP_BACKSTOP_FLOOR_MS); // bare 60x would give 6_000ms
+    assertEquals(startupBackstopMs(1_000), STARTUP_BACKSTOP_FLOOR_MS); // bare 60x would give 60_000ms
+    assertEquals(startupBackstopMs(0), STARTUP_BACKSTOP_FLOOR_MS); // degenerate probe
+    // A slow probe still raises the value ABOVE the floor:
+    assert(
+      startupBackstopMs(3_000) > STARTUP_BACKSTOP_FLOOR_MS,
+      `a 3000ms probe must derive above the ${STARTUP_BACKSTOP_FLOOR_MS}ms floor, got ${
+        startupBackstopMs(3_000)
+      }ms`,
+    );
+    assertEquals(startupBackstopMs(3_000), 180_000);
+    assertEquals(startupBackstopMs(6_000), 360_000);
+  },
+);
+
 Deno.test({
   name:
-    "proof-helper: spawnHarness bounds READY by the boot-baseline-derived window, not a fixed 15s (audio-feed-3n0xs)",
+    "proof-helper: spawnHarness bounds READY by the boot-baseline-derived window, floored, and names both in its report (audio-feed-3n0xs, audio-feed-v0o7k)",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   async fn() {
-    // The WIRING: the row injects the measured baseline (docs/speed.md rule 1 - the
-    // test decides the window, not the host) so 8ms of measured boot derives a 480ms
-    // window. The row therefore reddens in under a second, BY NAME, if spawnHarness
-    // ever waits on a fixed window again: the report then names 15000 instead of 480.
+    // The WIRING, split by audio-feed-v0o7k: the derivation itself is pinned at
+    // unit level above (8ms derives 480ms, floored to the hang bound). What a
+    // spawn can still prove fast is (a) the report machinery on an explicit
+    // small bound, and (b) that a floored DERIVED window still starts a healthy
+    // child - the 8ms baseline derives a floored 120s window, the child readies
+    // in under a second, and the run returns. If spawnHarness ever waited on a
+    // fixed 15s window again, (b) still passes but the unit pins redden by name.
     await withScratchRoot(async (scratch) => {
       const child = await writeHarnessChild(
         scratch,
         "never_ready_harness_child.ts",
         NEVER_READY_CHILD,
       );
-      const derived = startupBackstopMs(8);
-      assertEquals(derived, 480, "8ms of measured boot must derive a 480ms startup window");
       const err = await assertRejects(
-        () => spawnHarness(child, [], { bootBaselineMs: 8 }),
+        () => spawnHarness(child, [], { startupTimeoutMs: 480 }),
         Error,
-        `timed out after ${derived}ms waiting for the harness to log READY`,
+        "timed out after 480ms waiting for the harness to log READY",
       );
-      // The report says the window was DERIVED, so no reader reads 480ms as a
-      // production constant, and it still names the condition that never became true.
-      assertStringIncludes(err.message, "derived from the measured boot baseline");
+      // The report says the window was EXPLICIT here, so no reader reads 480ms
+      // as a derived or production constant, and it still names the condition
+      // that never became true.
       assertStringIncludes(err.message, "the child never logged its READY line");
       assertStringIncludes(err.message, "Assigned port: null");
+
+      const readyChild = await writeHarnessChild(
+        scratch,
+        "ready_harness_child.ts",
+        BINDS_ANSWERS_CHILD,
+      );
+      // A floored derived window must not wedge a healthy startup: the child
+      // answers long before even the floor expires.
+      const harness = await spawnHarness(readyChild, [], { bootBaselineMs: 8 });
+      assert(harness.port > 0, "the floored derived window must still let a healthy child bind");
+      harness.kill();
     });
   },
 });
