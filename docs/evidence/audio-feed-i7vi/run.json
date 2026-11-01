@@ -1,0 +1,18 @@
+{
+  "script": "scripts/verify_i7vi_browser.ts",
+  "sha": "625d123257e229d875d4d64819d1bf986a7b4133",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T04:25:19.979Z",
+  "endedAt": "2026-11-01T04:27:13.778Z",
+  "exit": 1,
+  "marker": true,
+  "artefacts": {
+    "verify-browser-count.txt": "sha256:66fba9d024f20ec59d5cd9e300253b222f12cbf76b0fc9ceea1ebf984fd1cb1d",
+    "verify-browser-cwv.txt": "sha256:34370b8da4dbbf8ed70aabb2e24b6ddafa077c0343975add1e0b5c018632a484",
+    "verify-browser-real-input.txt": "sha256:b00c9346b942ee07c8a51a9a93ff0445f823b8859f78e6c79feac5e848a5a0f7",
+    "verify-events.txt": "sha256:5dbf85179f415d556033ee1348a1f502e8a110674c75b8b6c4c16f1cad77f57e"
+  }
+}
