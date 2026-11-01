@@ -1,17 +1,17 @@
 {
   "script": "scripts/bookmarklet-browser-proof.ts",
-  "sha": "25c7eb4845a91f2cd318dbf87c593f5b11031d0f",
+  "sha": "6ebf1f386a14d432498ef493c255fa645f0d128e",
   "bound": {
     "ms": 420000,
     "provenance": "flag"
   },
-  "startedAt": "2026-11-01T06:19:43.032Z",
-  "endedAt": "2026-11-01T06:24:11.533Z",
-  "exit": 1,
+  "startedAt": "2026-11-01T09:24:21.940Z",
+  "endedAt": "2026-11-01T09:27:40.576Z",
+  "exit": 0,
   "marker": true,
   "artefacts": {
-    "01-unified-card-no-feed.png": "sha256:8456ede908316423369e86239c8b3d39e5972248c0216eb765b840bedc4e2e2e",
-    "02-unified-card-discovered-feed.png": "sha256:7deb442ad0c88d30881ae841e9d77ff1574a038c3214ed7c339f6dbf69a32276",
-    "03-unified-card-subscribed.png": "sha256:6ce4621b230de337b034c76ad3f18ee2d03e6d6b0631fa33a84415023d0f20a9"
+    "01-unified-card-no-feed.png": "sha256:32a30d479d49e1c3e90e5bb71b89a12f14996f79356cbd15921855e7679fcb3b",
+    "02-unified-card-discovered-feed.png": "sha256:35444d82ef15a7d1d312b579ab79725032379560b382a3485befd891532e3965",
+    "03-unified-card-subscribed.png": "sha256:c70bd5ff029518dce335d7b85eff82036f7990ba7d38569c13f78b244c7acec5"
   }
 }
