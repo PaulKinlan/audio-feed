@@ -29,13 +29,13 @@ PASS  the summary offers the code as the fallback  summary: 'Can’t drag it? Ge
 PASS  the open disclosure's snippet is the SAME payload as the anchor href (one builder)  snippet matches href (616 chars)
 PASS  rendered account bookmarklet uses the selected proof port  selected port 8133; rendered port 8133
 PASS  the wording names the Content Security Policy and tells the user to drag or paste  wording: 'Browsers refuse javascript: links when clicked directly on a...'
-PASS  the disclosure's code is fully visible inside its box (no horizontal clipping)  scrollWidth 1231 vs clientWidth 1231, white-space: pre-wrap, rendered height 82px
+PASS  the disclosure's code is fully visible inside its box (no horizontal clipping)  scrollWidth 820 vs clientWidth 820, white-space: pre-wrap, rendered height 123px
 PASS  clicking the anchor is REFUSED by the CSP, and the refusal is asserted rather than collected  console: '[error] Running the JavaScript URL violates the following Content Security Policy directive 'sc...'
 PASS  the refusal leaves the page and the open disclosure intact  pathname: /account, disclosure open: true
-PASS  the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)  scrollWidth 1231 vs clientWidth 1231, rendered height 82px
+PASS  the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)  scrollWidth 820 vs clientWidth 820, rendered height 123px
 ```
 
 ## Screenshot
 
 - `01-account-bookmarklet-disclosure-open.png`: the bookmarklet box with the disclosure expanded, clipped to the box so the evidence is legible and the PNG stays inside the evidence size budget.
-- SHA-256 (`01-account-bookmarklet-disclosure-open.png`): `660b9c6e8ad36da8ea5cba7e1cc45c108879f57f166e6e00c60ba9a571f2eba2`
+- SHA-256 (`01-account-bookmarklet-disclosure-open.png`): `9602911832a5ae51be526c8f0a040e3a2bc549b5fa8ea94d01b2e69643b8b61d`
