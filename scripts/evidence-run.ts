@@ -222,9 +222,9 @@ export const RECORD_MAX_AGE_DAYS = 30;
  * decides. fleet/arm-records carries the rest of the arming (the reasoned exemption map below and
  * the rows in tests/evidence_run_test.ts) so a yes is a merge, not a queue position. The decision it
  * pre-stages: the seed at d6a968ed carries valid records for the runnable dirs except the ones named
- * below - 4 live-TTS dirs that need GEMINI_API_KEY, audio-feed-8fc excluded on measured COST, and
- * audio-feed-exww + audio-feed-l7m1 still owed a heavy browser seed (pinned as PENDING_RECORD_SEED
- * in tests/evidence_run_test.ts). Suite-owned dirs are exempt through the `- Executed by:` skip
+ * below - 4 live-TTS dirs that each need a real PAID provider call, audio-feed-8fc excluded on
+ * measured COST, and audio-feed-exww + audio-feed-l7m1 still owed a heavy browser seed (pinned as
+ * PENDING_RECORD_SEED in tests/evidence_run_test.ts). Suite-owned dirs are exempt through the `- Executed by:` skip
  * (audio-feed-8u4x1, audio-feed-np5). Arming adds NO reads, NO hashing and NO proof re-runs: the
  * record pre-flight below runs identically armed or not, so the only change is that a MISSING record
  * stops being a seeded note and becomes a non-zero exit.
@@ -266,9 +266,16 @@ export function resolveRecordsEnforced(
  * measured reason, never for convenience.
  *
  * Each reason below was checked against the dir's own README.md and its declared proof script, not
- * carried over: the four live-TTS dirs declare scripts that read GEMINI_API_KEY
- * (verify_live_e2e_tts.ts, repro_tts_brittleness_9yu8.ts, repro_tts_failure_bp6r.ts,
- * verify_live_tts.ts), and audio-feed-8fc's COST is the duration in its own run.json
+ * carried over. The two credential shapes are DIFFERENT and the reasons say which one applies:
+ *   - KEY-READING (audio-feed-9vns, 9yu8, bp6r): their declared scripts read GEMINI_API_KEY from
+ *     the environment (verify_live_e2e_tts.ts, repro_tts_brittleness_9yu8.ts,
+ *     repro_tts_failure_bp6r.ts).
+ *   - KEYLESS-PROXY-PAID (audio-feed-u60a): its declared script verify_live_tts.ts reads NO
+ *     credential - `grep -c GEMINI_API_KEY scripts/verify_live_tts.ts` is 0 and it sends no auth
+ *     header (scripts/verify_live_tts.ts:109 sets only Content-Type). It still spends money: it
+ *     targets the fleet proxy at `https://gemini.int.exe.xyz/v1beta` (line 99), which injects the
+ *     key server-side. Same cost, no key.
+ * audio-feed-8fc's COST is the duration in its own run.json
  * (2026-11-01T01:20:45.807Z -> 01:28:36.645Z = 470.8s for 32 full-page captures).
  */
 export const EVIDENCE_RECORD_EXEMPTIONS: Record<string, string> = {
@@ -279,7 +286,7 @@ export const EVIDENCE_RECORD_EXEMPTIONS: Record<string, string> = {
   "audio-feed-bp6r":
     "live TTS failure proof - its proof reads GEMINI_API_KEY, so a refresh needs a paid provider call the tier cannot demand as a refresh condition",
   "audio-feed-u60a":
-    "live TTS verify (verify_live_tts.ts, the dir KNOWN_UNRUN already pins for the live gap) - its proof reads GEMINI_API_KEY, so a refresh needs a paid provider call the tier cannot demand as a refresh condition",
+    "live TTS verify (verify_live_tts.ts, the dir KNOWN_UNRUN already pins for the live gap) - KEYLESS but PAID: the script reads no credential and sends no auth header (scripts/verify_live_tts.ts:109 sets only Content-Type), calling the provider through the fleet proxy at https://gemini.int.exe.xyz/v1beta (line 99), which injects the key server-side - so a refresh still spends against Paul's provider and the tier cannot demand it as a refresh condition",
   "audio-feed-8fc":
     "exempt on COST, not correctness: its own run.json measures 470.8s per run (2026-11-01T01:20:45.807Z -> 01:28:36.645Z) for 32 sequential full-page captures (8 pages x 2 widths x 2 schemes), so the 30-day freshness rule would schedule an ~8-minute browser proof on every lane",
 };
