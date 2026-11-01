@@ -34,6 +34,9 @@ below is **one observed gate run**, not a median, target or guaranteed duration.
 caches by commit tree (`~/fleet/bin/fleet-check:14,158-190`): a later run on the same tree can
 supersede an earlier status and log, so cite a record that still resolves. The repo tasks in
 `deno.json` define no wall-time target. A runner timeout is a ceiling, not a measured speed budget.
+Rule, local to this file: every number here names the run that produced it (job record, log or
+timing file) and what that run measured, or it is marked UNVERIFIED — and the two durations of one
+run are labelled by scope, never merged into one figure.
 
 | Gate | Exact cached record and reproduction                                                                                              | Observed execution |        Queue | Coverage  |
 | ---- | --------------------------------------------------------------------------------------------------------------------------------- | -----------------: | -----------: | --------- |
@@ -125,15 +128,28 @@ ratio suggests.
 ### Gate wall time cannot detect a cost regression below roughly 4x
 
 Four full gates over the same ~2400-test suite set, all between 15:07Z and 16:57Z on 2026-10-29.
-Each figure is the test-phase duration in that gate's own summary line, and each resolves to its own
-job record:
+Each row is one run and resolves to one job record; the two time columns are two SCOPES of that same
+run, not two estimates of one figure:
 
-| Test-phase time | Job record                                                                    | Same summary line in that log      |
-| --------------- | ----------------------------------------------------------------------------- | ---------------------------------- |
-| 10m32s          | `f8fc0472e2d4dd9fb39d713d84f3e65a74e8eb58` (run_s 660, sha `ff19542d`, PASS)  | 2402 passed / 0 failed / 2 ignored |
-| 14m44s          | `d2f1e1011cd2d58e312673a188b57a326aeff36a` (run_s 958, sha `4efecfae`, PASS)  | 2400 passed / 0 failed / 2 ignored |
-| 34m35s          | `b94f4b4eb9fc1bd9d55168fe87413104c97b8d3b` (run_s 2147, sha `7d0445cb`, FAIL) | 2399 passed / 1 failed / 2 ignored |
-| 43m35s          | `f301171b4acacac9dbcdf9de30a9d18216b08a18` (run_s 2761, sha `ed00fa6b`, PASS) | 2400 passed / 0 failed / 2 ignored |
+| `deno test` phase, s (the run's own summary line) | `run_s`, s (the whole `deno task gate` command) | Job record `~/.fleet/checks/<job>.json` (sha, state, `wait_s`)    | Suite outcome in that record's `tail` |
+| ------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
+| 10m32s (632)                                      | 660                                             | `f8fc0472e2d4dd9fb39d713d84f3e65a74e8eb58` (sha `ff19542d`, PASS) | 2402 passed / 0 failed / 2 ignored    |
+| 14m44s (884)                                      | 958                                             | `d2f1e1011cd2d58e312673a188b57a326aeff36a` (sha `4efecfae`, PASS) | 2400 passed / 0 failed / 2 ignored    |
+| 34m35s (2075)                                     | 2147                                            | `b94f4b4eb9fc1bd9d55168fe87413104c97b8d3b` (sha `7d0445cb`, FAIL) | 2399 passed / 1 failed / 2 ignored    |
+| 43m35s (2615)                                     | 2761                                            | `f301171b4acacac9dbcdf9de30a9d18216b08a18` (sha `ed00fa6b`, PASS) | 2400 passed / 0 failed / 2 ignored    |
+
+What each column is, with the record field it comes from. **`run_s` = 660 / 958 / 2147 / 2761 s is
+the execution time of the whole `deno task gate` command** — it starts when the check takes the
+heavy slot (`wait_s` is 0 in all four records, so no queue is charged to it; `secs`, 661 / 959 /
+2149 / 2764, is the worker's total wall time and is NOT this number). **The parenthesised 632 / 884
+/ 2075 / 2615 s is Deno's own duration for the `deno test` invocation**, quoted verbatim from the
+same run's last line, and that invocation is the LAST step of the task (`deno.json:53`: hooks
+install, hooks verify, `test-selection --prove-discovery`, `fmt --check`, `lint`, `check`, then
+`deno test`). The gap (28 / 74 / 72 / 146 s) is that non-test work in its run — it is not a stale
+copy of a wall time and it is not rounded away here, because the two columns measure different
+things and are meant to differ. Re-derive a row without the log: the logs are pruned (26 `.log`
+files against 1642 `.json` records in `~/.fleet/checks`), while the record keeps the summary line in
+`tail` — `jq -r '.sha, .state, .run_s, .wait_s, .tail' ~/.fleet/checks/<job>.json`.
 
 That is a 4x spread on identical work: host and hypervisor contention dominates wall time, and the
 difference is not in the suite set the four runs carried. The ten-run table above shows the same
@@ -202,12 +218,24 @@ locale matching cannot hide a high byte), and against a direct non-ASCII probe.
 
 ### Parallel execution: 1.92x wall at equal CPU (`fleet/parallel`, tip `8bd44611`)
 
-Before this branch the gate ran ONE `deno test` invocation, sequential across files. Over a
-~10-suite closure slice: **sequential 5:34.29 wall / user 300.94 s vs `--parallel` 2:54.09 wall /
-user 318.73 s, both exit 0** — ~1.92x wall at equal CPU, so the win is overlap, not less work
-(commit body `8bd44611`; the branch's own source comment records the same pair as 5m34s vs 2m54s on
-8 CPUs). Deno 2.9.7 `--parallel` parallelises across test MODULES only; rows inside a file stay
-serial. The two suites that mutate process-global state — `tests/verify_live_e2e_tts_output_test.ts`
+Before this branch the gate ran ONE `deno test` invocation, sequential across files. Over the same
+10-suite closure slice (its exact command line is the first line of each timing file below):
+**sequential 5:34.29 wall / user 300.94 s, exit 0 vs `--parallel` 2:54.09 wall / user 318.73 s, exit
+0** — 334.29 / 174.09 = 1.92x wall at equal CPU, so the win is overlap, not less work.
+
+Provenance of that pair, and it is weaker than every other number in this file: it was measured with
+`time -v` on this 8-CPU host on 2026-10-30 (14:55Z and 14:58Z) by the `fleet/parallel` lane, into
+`/tmp/seq.time` and `/tmp/par.time` — files outside the repo, from a lane that hit its wall and died
+before committing. So there is **no gate record and no log to cite**, and the two timing files are
+the whole of the raw evidence (both still present on this host on 2026-11-01). If they are gone the
+pair is re-derived only by re-running both commands from those files —
+`time -v deno test <the flags those files carry> --no-check <the ten suites>`, once plain and once
+with `--parallel` — on a quiet host. Commit `8bd44611`'s body and the comment at
+`scripts/fast-check.ts:205` (`5m34s` vs `2m54s` on 8 CPUs) both restate this one pair; neither is a
+measurement, and they are not a second, independent experiment.
+
+Deno 2.9.7 `--parallel` parallelises across test MODULES only; rows inside a file stay serial. The
+two suites that mutate process-global state — `tests/verify_live_e2e_tts_output_test.ts`
 (`Deno.chdir`) and `tests/temporal_test.ts` (`Deno.env` TZ) — are carved into a second sequential
 batch in the same run loop and skipped entirely when not selected (`splitProcessGlobalSuites` over
 `PROCESS_GLOBAL_SUITES`, `scripts/fast-check.ts` on that branch).
