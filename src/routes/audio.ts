@@ -81,16 +81,59 @@ export function isCorsConstrained(req: Request): boolean {
 }
 
 /**
- * Headers that let a browser actually READ the bytes it was sent.
+ * Whether the requester is a page on OUR origin.
  *
- * `access-control-expose-headers` is not optional here: without it a CORS
- * response hands the page only the safelisted headers, so `content-range` and
- * `content-length` are invisible and a seeking player cannot tell what it got.
+ * `sec-fetch-site` is authoritative when the browser sends it: `same-origin`
+ * (and `none`, a user-typed navigation) is us, anything else is not. Falling
+ * back to `Origin` covers clients that omit `sec-fetch-site`; the comparison is
+ * against `req.url`'s origin, which is the request line rather than a header,
+ * so it cannot be spoofed by the caller. No `Origin` at all means the request
+ * is not subject to CORS — a podcast client, or a same-origin `no-cors` media
+ * load — and there is nothing to withhold from it.
  */
-function corsHeaders(): Record<string, string> {
+export function isSameOriginRequest(req: Request): boolean {
+  const site = req.headers.get("sec-fetch-site")?.toLowerCase();
+  if (site) return site === "same-origin" || site === "none";
+  const origin = req.headers.get("origin");
+  if (!origin) return true;
+  try {
+    return new URL(origin).origin === new URL(req.url).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Headers that let a browser actually READ the bytes it was sent — for our own
+ * origin only (audio-feed-cf0hi).
+ *
+ * `access-control-allow-origin: *` used to be on every isolate-served response.
+ * The capability URL is a non-expiring bearer secret, so a holder could always
+ * fetch the bytes out of band; what `*` added was in-browser programmatic reads
+ * by ANY page that knew the URL. Nothing first-party needs that grant: the
+ * player is a `no-cors` media load (src/routes/listen.ts keeps `crossorigin` off
+ * the element) and the offline download is a same-origin fetch, which is not
+ * subject to CORS whatever its mode. Cross-origin callers still get their bytes
+ * — this withholds the READ permission, not the response.
+ *
+ * `access-control-expose-headers` is not optional where the grant applies:
+ * without it a CORS response hands the page only the safelisted headers, so
+ * `content-range` and `content-length` are invisible and a seeking player cannot
+ * tell what it got.
+ *
+ * `vary: origin` is required because the response now depends on the requester:
+ * these responses are `cache-control: public, immutable`, so without it a shared
+ * cache could hand the granted variant to a cross-origin caller and quietly
+ * restore the hole.
+ */
+function corsHeaders(req: Request): Record<string, string> {
+  if (!isSameOriginRequest(req)) {
+    return { vary: "origin" };
+  }
   return {
     "access-control-allow-origin": "*",
     "access-control-expose-headers": "accept-ranges, content-length, content-range, etag",
+    vary: "origin",
   };
 }
 
@@ -323,7 +366,7 @@ export async function handleAudio(
       "content-type": info.contentType,
       "accept-ranges": "bytes",
       "cache-control": "public, max-age=31536000, immutable",
-      ...corsHeaders(),
+      ...corsHeaders(req),
       ...(info.etag ? { etag: info.etag } : {}),
     });
   }
@@ -431,11 +474,9 @@ export async function handleAudio(
     "accept-ranges": "bytes",
     // Episode ids are unguessable and audio is immutable once written.
     "cache-control": "public, max-age=31536000, immutable",
-    // Unconditional: these bytes are already reachable by anyone holding the
-    // key, so the header grants nothing new, and setting it only for requests
-    // that carried an `Origin` would make the response vary by request in a way
-    // a shared cache must then be told about.
-    ...corsHeaders(),
+    // Granting READ permission only to our own origin, with `vary: origin` so a
+    // shared cache cannot re-serve the granted variant (audio-feed-cf0hi).
+    ...corsHeaders(req),
   });
   if (object.etag) headers.set("etag", object.etag);
 

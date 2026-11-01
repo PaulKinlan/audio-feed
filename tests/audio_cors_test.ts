@@ -172,3 +172,39 @@ Deno.test("range semantics survive the CORS path (audio-feed-cors)", async () =>
   assertEquals(res.headers.get("content-length"), "4");
   assertEquals(new Uint8Array(await res.arrayBuffer()), BYTES.slice(2, 6));
 });
+
+// -- the grant stops at our own origin ------------------------------------
+
+Deno.test("a cross-origin page gets NO access-control-allow-origin (audio-feed-cf0hi)", async () => {
+  // The capability URL is a non-expiring bearer secret: anyone holding it can
+  // always fetch the bytes out of band (curl, a podcast client). What `*` added
+  // was in-browser programmatic READS — any page that knew the URL could fetch
+  // it and read the bytes. Nothing first-party needs that: the player is a
+  // no-cors media load and the offline download is a same-origin fetch, and a
+  // same-origin fetch is not subject to CORS whatever its mode.
+  const { fetch } = await app();
+  const res = await fetch(
+    audio({ origin: "https://evil.example", "sec-fetch-site": "cross-site" }),
+  );
+
+  assertEquals(res.status, 200);
+  assertEquals(
+    res.headers.get("access-control-allow-origin"),
+    null,
+    "a cross-origin page must not be granted a readable response",
+  );
+  assertEquals(res.headers.get("access-control-expose-headers"), null);
+  // The response now differs by Requester, so a shared cache must be told.
+  assertEquals((res.headers.get("vary") ?? "").toLowerCase().includes("origin"), true);
+  assertEquals(new Uint8Array(await res.arrayBuffer()), BYTES, "bytes still served");
+});
+
+Deno.test("our own origin still gets the grant and the bytes (audio-feed-cf0hi)", async () => {
+  const { fetch } = await app();
+  const res = await fetch(audio({ origin: BASE, "sec-fetch-site": "same-origin", range: "bytes=0-3" }));
+
+  assertEquals(res.status, 206);
+  assertEquals(res.headers.get("access-control-allow-origin"), "*");
+  assertEquals(res.headers.get("content-range"), `bytes 0-3/${BYTES.length}`);
+  assertEquals(new Uint8Array(await res.arrayBuffer()), BYTES.slice(0, 4));
+});
