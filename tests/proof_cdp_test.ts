@@ -18,6 +18,9 @@
  * - until() still lets a thrown expression through unwrapped and unretried
  * - withHangBound() bounds ONE raw cdp reply that never arrives as CdpHangBoundExceeded, naming
  *   the command, and passes a real reply's value - or its own error - through unchanged
+ * - REAL CLOCK: a raw cdp reply that never answers still SETTLES as CdpHangBoundExceeded when
+ *   the real deadline (2 x the measured starved floor) fires over a real round trip - asserting
+ *   settlement, deliberately never speed
  * - the exported MEASURED_STARVED_POLL_MS / HANG_BOUND_MS pair is still 8s and 15x it
  * - close() closes the WebSocket cleanly
  *
@@ -339,3 +342,102 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
     await server.finished;
   }
 });
+
+Deno.test(
+  "proof-cdp: REAL CLOCK - a raw cdp reply that never answers still settles as CdpHangBoundExceeded when the real deadline fires, with no upper bound on delivery",
+  async () => {
+    // WHY THIS ROW EXISTS: the rows above pin WHAT the bound says (class, message, sent-once)
+    // with 150-500ms waits. This row proves the wait actually SETTLES on the real clock at a
+    // ceiling scaled from the measured floor, end to end over a REAL raw cdp round trip: the
+    // command reaches the mock server, no reply is ever sent, and the only thing that can end
+    // the wait is proof-cdp.ts's real setTimeout firing. An implementation whose real timer
+    // never fires while a race is armed cannot pass here, whatever it claims about arithmetic.
+    //
+    // WHY NO UPPER BOUND ON REAL TIME IS DELIBERATE: the property under test is SETTLEMENT,
+    // not speed. A loaded host scheduler delivers a ready timer late in wall time, and the
+    // host scheduler is not the subject - an upper wall-clock assertion here would
+    // re-introduce exactly the load flake the derived bounds in this file exist to remove.
+    // This row can only fail if the wait never settles at all.
+    //
+    // WHY THE CEILING IS GENEROUS ENOUGH TO BE NON-FLAKY: settlement-only means no load level
+    // can fail it on speed, and the ceiling is 2 x MEASURED_STARVED_POLL_MS - twice the 8s
+    // starved-poll floor MEASURED on this fleet's host under eight-way saturation
+    // (audio-feed-6gst1) - so the wall time the row adds is bounded and predictable on a
+    // loaded gate box. No smaller number is on offer: shrinking it further would be a guess,
+    // and this file's bounds are measured, not guessed.
+    const realClockCeilingMs = 2 * MEASURED_STARVED_POLL_MS;
+
+    const ac = new AbortController();
+    let serverPort = 0;
+    let silentCount = 0;
+    let resolveListening!: () => void;
+    const listening = new Promise<void>((resolve) => resolveListening = resolve);
+    const server = Deno.serve({
+      port: 0,
+      signal: ac.signal,
+      onListen: ({ port }) => {
+        serverPort = port;
+        resolveListening();
+      },
+    }, (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/json/list") {
+        return new Response(
+          JSON.stringify([
+            { type: "page", webSocketDebuggerUrl: `ws://127.0.0.1:${serverPort}/page` },
+          ]),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/page") {
+        const { socket, response } = Deno.upgradeWebSocket(req);
+        socket.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.method === "Silent.method") {
+            // Counted and deliberately UNANSWERED: the raw reply this row waits for is one
+            // the server never sends, exactly the reply-never-comes hang the bound exists
+            // for (measured: a proof printed 11/11 PASS and never exited).
+            silentCount++;
+          }
+        };
+        return response;
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    try {
+      await listening;
+      const client = await connectCdp({ port: serverPort });
+      try {
+        // ONE raw command, ONE real-clock deadline. The row records elapsed only so a failure
+        // message could carry it; nothing asserts how fast the host delivered the deadline.
+        const startedAt = Date.now();
+        const err = await withHangBound(
+          "Silent.method",
+          client.cdp("Silent.method"),
+          realClockCeilingMs,
+        ).then(() => null, (e: unknown) => e);
+        const elapsed = Date.now() - startedAt;
+        assert(
+          err instanceof CdpHangBoundExceeded,
+          `a never-answered raw reply must SETTLE as CdpHangBoundExceeded when the real ` +
+            `${realClockCeilingMs}ms deadline fires (elapsed ${elapsed}ms), got ${String(err)}`,
+        );
+        assertStringIncludes(
+          (err as Error).message,
+          `never arrived within ${realClockCeilingMs}ms`,
+        );
+        assertEquals(
+          silentCount,
+          1,
+          `the raw command must have been sent exactly once; server saw ${silentCount}`,
+        );
+      } finally {
+        client.close();
+      }
+    } finally {
+      ac.abort();
+      await server.finished;
+    }
+  },
+);
