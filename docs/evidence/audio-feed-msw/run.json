@@ -1,0 +1,18 @@
+{
+  "script": "scripts/voice-audition-browser-proof.ts",
+  "sha": "9e5acd0569fe4b91281d2d62055905fd956f5f1e",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T06:10:44.619Z",
+  "endedAt": "2026-11-01T06:13:43.722Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-audition-grid.png": "sha256:e68167440431fac020155ef3ea0ee3fa3fdd759a14f1c384905ef00ae4efaa41",
+    "02-aoede-playing.png": "sha256:f9622e25108b7e1c0de77af81994384b0e81e5827cf1bb38204901e3ebfd1e21",
+    "03-kore-replaced-aoede.png": "sha256:343d5f25b5d0b027769f53cf87514534eb18b6e8dd94d6ee71e8acf749296a50",
+    "04-audition-mobile-390.png": "sha256:b7eade0900a319e3767e814895c9cbbdd69a445348c8c59073dd9cb158d74675"
+  }
+}
