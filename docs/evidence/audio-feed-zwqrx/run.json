@@ -1,0 +1,13 @@
+{
+  "script": "scripts/playback-csp-browser-proof.ts",
+  "sha": "625d123257e229d875d4d64819d1bf986a7b4133",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T04:23:42.376Z",
+  "endedAt": "2026-11-01T04:25:08.575Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {}
+}
