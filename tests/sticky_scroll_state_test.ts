@@ -22,12 +22,11 @@ import { assetBody, handleAsset } from "../src/routes/assets.ts";
 import type { RouteContext } from "../src/router.ts";
 import { makeEpisode } from "./fixtures.ts";
 import {
-  createTempChromeProfile,
-  killChromeAndWait,
-  newestChrome,
+  launchChrome,
   removeDirWhenQuiet,
   waitForChromeProfileUnused,
 } from "../scripts/proof-helper.ts";
+import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
 
 /** The listen page with enough episodes to scroll well past its sticky header. */
 function tallListenHtml(): string {
@@ -123,29 +122,23 @@ async function withChrome<T>(
   // deno-lint-ignore no-explicit-any
   fn: (evaluate: (expr: string) => Promise<any>) => Promise<T>,
 ): Promise<T> {
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   // audio-feed-w5f1: BEFORE the allocation, and restored in the finally below - see the helper above.
   const { root, restore } = await scratchRootForProfiles();
-  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-txcz-", root);
-  const chrome = new Deno.Command(newestChrome(), {
-    args: [
-      "--headless=new",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${profileDir}`,
-      "about:blank",
-    ],
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
-  let cdpPort = "";
-  for (let i = 0; i < 50 && !cdpPort; i++) {
-    await sleep(100);
-    cdpPort = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => "")).split(
-      "\n",
-    )[0]!;
-  }
+  // BOOT THROUGH THE SHARED LAUNCHER (audio-feed boot-bound sweep, mirroring the
+  // css_escape_guard fix in 2b4e8bab): the hand-rolled Deno.Command plus fixed 50x100ms
+  // DevToolsActivePort wait is a coin flip under load - on the union gate host at loadavg 5-10
+  // that 5s window expired while a healthy Chrome was merely starved. launchChrome polls the
+  // port file event-by-event, and its failure names the OWNER: "exited prematurely with code N"
+  // means the browser never started (flags/binary), "Timed out after <waited>ms" means it
+  // started slowly (host starvation). The bound is the fleet-wide derivation, not a widened
+  // constant: HANG_BOUND_MS = 15 x the 8s measured starved-poll floor (scripts/proof-cdp.ts).
+  const chrome = await launchChrome({
+    prefix: "audiofeed-txcz-",
+    profileRoot: root,
+    portTimeoutMs: HANG_BOUND_MS,
+  });
+  const { profileDir } = chrome;
+  const cdpPort = String(chrome.port);
   try {
     // deno-lint-ignore no-explicit-any
     const targets = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json() as any[];
@@ -184,8 +177,9 @@ async function withChrome<T>(
     };
     return await fn(evaluate);
   } finally {
-    await killChromeAndWait(chrome);
-    await cleanup();
+    // close() is the launcher's own kill-and-reap: SIGTERM, await the exit, then remove the
+    // profile it allocated - the same two steps this teardown used to spell out by hand.
+    await chrome.close();
     await restore();
     assert(
       await removeDirWhenQuiet(root),

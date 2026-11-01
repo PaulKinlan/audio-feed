@@ -107,9 +107,22 @@ Deno.test("audio-feed-h7rhb: the narrow listen layout genuinely applies - the co
       });
       await cdp("Page.navigate", { url: dataUrl });
       // The navigation replaces the execution context; poll until the document is live and the
-      // style is readable (bounded - 2s, then the assertion reds on the empty read). NOTE:
+      // style is readable (bounded - then the assertion reds on the empty read). NOTE:
       // getComputedStyle returns USED pixel tracks ("7.1px 352.9px"), not the minmax() spelling.
-      for (let i = 0; i < 20; i++) {
+      //
+      // The bound is the fleet-wide HANG_BOUND_MS, not a fixed 20x100ms count (audio-feed
+      // boot-bound sweep, same family as the css_escape_guard boot wait in 2b4e8bab). This is a
+      // NAVIGATION SETTLE rather than a browser boot, so it takes the page-side bound instead of
+      // the boot waiver: it polls an observation the page produces (readyState complete plus a
+      // readable used-value grid), so the figure is a ceiling that never delays, and the
+      // assertion below still owns the verdict on "". A 2s ceiling assumed navigate -> parse ->
+      // first layout always completes in ~2s; this host has MEASURED a bare readyState evaluate
+      // legitimately exceeding the 8s starved-poll floor (scripts/proof-cdp.ts, and the same
+      // observation in anchor_positioning_test.ts), which is why until()/js() bound a page-side
+      // observation at 15 x that floor. The 100ms poll interval is unchanged - it is the
+      // CEILING that was an assumption, not the cadence.
+      const navDeadline = Date.now() + HANG_BOUND_MS;
+      while (Date.now() < navDeadline) {
         await sleep(100);
         const res = await cdp("Runtime.evaluate", {
           expression: `document.readyState === "complete" && document.querySelector("li.episode")
