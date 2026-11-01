@@ -1,0 +1,15 @@
+{
+  "script": "scripts/verify_kvnw_account_bookmarklet_browser.ts",
+  "sha": "064ee57179209d27b5d220ba54f1ff6baed55c00",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T04:29:47.679Z",
+  "endedAt": "2026-11-01T04:30:58.579Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-account-bookmarklet-disclosure-open.png": "sha256:9602911832a5ae51be526c8f0a040e3a2bc549b5fa8ea94d01b2e69643b8b61d"
+  }
+}
