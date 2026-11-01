@@ -26,7 +26,7 @@ import {
   removeDirWhenQuiet,
   waitForChromeProfileUnused,
 } from "../scripts/proof-helper.ts";
-import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
+import { HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
 
 /** The listen page with enough episodes to scroll well past its sticky header. */
 function tallListenHtml(): string {
@@ -263,11 +263,16 @@ const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolea
  * flake class this row exists to avoid. The monitor distinguishes:
  *   - PROGRESS: the page's published counter (window.__stuckWait.n) advances -> keep waiting,
  *     however slow (a starved renderer finishes transitions in fewer frames but more ms);
- *   - STALL: the counter is frozen > STALL_LIMIT_MS (20s) -> the renderer stopped painting ->
- *     throw, named, with the last observation. 20s is >1000 missed frames against a ~16ms frame
- *     and ~3x the entire worst measured green wait - the ~100x margin precedent
- *     (tests/grounded_script_test.ts:679) applied to the thing actually being bounded. It treats a
- *     total rAF pause as a hang: an assumption that fits this row, not a proven property.
+ *   - STALL: the counter is frozen > STALL_LIMIT_MS (20s) -> arm the CLASSIFIER below, never a
+ *     verdict on its own. 20s is >1000 missed frames against a ~16ms frame and ~3x the entire
+ *     worst measured green wait - the ~100x margin precedent
+ *     (tests/grounded_script_test.ts:679) applied to the thing actually being bounded.
+ *     audio-feed-vn72k: the previous round threw here on the ASSUMPTION that a total rAF pause
+ *     is a hang ("an assumption that fits this row, not a proven property", it admitted) - and
+ *     five prior fixes each patched one symptom of that same misread. Under gate load headless
+ *     Chrome stops scheduling BeginFrames, a healthy page freezes __stuckWait.n, and the STALL
+ *     throw reded a correct row. The classifier below now separates that environment condition
+ *     from a genuine hang IN CODE, at the moment the assumption would have fired.
  *   - ABSENCE: the counter may well be advancing - this is 45s from ENTRY, not a timer armed after
  *     progress stops - and the condition simply has not landed by ABSENCE_LIMIT_MS (45s) -> throw.
  *     45s is ~6.6x the worst measured green flip (6.8s) and ~20x the typical - stated so the number
@@ -278,6 +283,18 @@ const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolea
  * previous '"unavailable"' literal parsed truthy and printed scrollY=undefined.) */
 const STALL_LIMIT_MS = 20_000;
 const ABSENCE_LIMIT_MS = 45_000;
+// audio-feed-vn72k: classifier bounds, all DERIVED from the imported measured floor
+// (scripts/proof-cdp.ts), none invented. PAGE_ALIVE_PROBE_MS = MEASURED_STARVED_POLL_MS is the
+// MEASURED time one bare evaluate can legitimately take under eight-way saturation
+// (audio-feed-6gst1): a page that cannot answer `String(Date.now())` inside it is not servicing
+// its main thread at all -> genuine HANG. RAF_PROBE_MS applies the same measured floor to
+// BeginFrames: if the page answers evaluates but no frame fires within it, the compositor is
+// suppressing frames while the page is healthy -> renderer starvation, an ENVIRONMENT condition.
+// No stall window is widened by this change: STALL_LIMIT_MS still arms at 20s; what changed is
+// that arming it now CLASSIFIES instead of assuming.
+const PAGE_ALIVE_PROBE_MS = MEASURED_STARVED_POLL_MS;
+const RAF_PROBE_MS = MEASURED_STARVED_POLL_MS;
+const RAF_PROBE_RACE_MS = PAGE_ALIVE_PROBE_MS + RAF_PROBE_MS;
 async function stuckWithDeadline(
   url: string,
   phase: "flip" | "restore",
@@ -301,13 +318,126 @@ async function stuckWithDeadline(
   const started = Date.now();
   let lastN = -1;
   let lastProgress = started;
+  // audio-feed-vn72k (defect two fixed): per-poll accounting. `obsReads` counts polls that saw a
+  // numeric observation; `nullReads` counts polls whose read was null, unparseable, or lost the
+  // 2s CDP race. A null read used to SKIP the STALL check silently - reads lost to the same
+  // starvation being diagnosed looked identical to "no observation published yet" and coasted to
+  // the 45s ABSENCE bound. Nulls are now counted AND still feed stall accounting below.
+  let obsReads = 0;
+  let nullReads = 0;
+  // n progression with timestamps, one entry per advance, capped so the one-line summary below
+  // stays a single bounded line even in a gate log.
+  const nTrace: string[] = [];
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // audio-feed-vn72k (defect three): every throw prints ONE compact line first, because the gate
+  // row truncates messages - this line is what a gate reader gets. Branch, phase, verdict,
+  // observation accounting, and the n trace with timestamps.
+  const summaryLine = (branch: string, verdict: string) =>
+    `audio-feed-vn72k ONE-LINE: url=${url} branch=${branch} phase=${phase} verdict=${verdict} obsReads=${obsReads} nullReads=${nullReads} lastN=${lastN} n-trace=[${
+      nTrace.join(" ") || "none"
+    }]`;
+  // The STALL verdict is a CLASSIFICATION, not an assumption (audio-feed-vn72k): when n has been
+  // frozen for STALL_LIMIT_MS, probe (1) whether the page's main thread is alive at all, and
+  // (2) whether the compositor is scheduling frames, then name exactly one of three outcomes.
+  const classifyStall = async (lastObs: unknown): Promise<never> => {
+    const base =
+      `${url}: STUCK-WAIT branch=STALL phase=${phase} - __stuckWait.n frozen at ${lastN} for >${
+        STALL_LIMIT_MS / 1000
+      }s ` +
+      `(observations read=${obsReads}, null/lost reads=${nullReads}; n-trace: ${
+        nTrace.join(" ") || "none"
+      }); ` +
+      `last observation=${JSON.stringify(lastObs ?? null)}`;
+    // Probe 1 - is the main thread alive? A trivial evaluate inside the measured starved-poll
+    // floor (PAGE_ALIVE_PROBE_MS = MEASURED_STARVED_POLL_MS). The CDP promise itself never
+    // rejects on timeout, so the host must race it.
+    let alive: "yes" | "timeout" | "threw" = "timeout";
+    try {
+      alive = await Promise.race([
+        evaluate("String(Date.now())").then(
+          () => "yes" as const,
+          () => "threw" as const,
+        ),
+        sleep(PAGE_ALIVE_PROBE_MS).then(() => "timeout" as const),
+      ]);
+    } catch {
+      alive = "threw";
+    }
+    // Probe 2 - is rAF being scheduled at all? A single requestAnimationFrame raced against a
+    // bounded in-page timer (RAF_PROBE_MS, the same measured floor); the whole probe is raced
+    // host-side because a starved renderer may never service the evaluate either.
+    let raf: "frame" | "timer" | "timeout" | "threw" = "timeout";
+    if (alive === "yes") {
+      const rafExpr = `(async () => { return await Promise.race([` +
+        `new Promise((r) => requestAnimationFrame(() => r("frame"))), ` +
+        `new Promise((r) => setTimeout(() => r("timer"), ${RAF_PROBE_MS}))]); })()`;
+      try {
+        raf = await Promise.race([
+          evaluate(rafExpr).then(
+            (v) =>
+              v === "frame"
+                ? "frame" as const
+                : v === "timer"
+                ? "timer" as const
+                : "threw" as const,
+            () => "threw" as const,
+          ),
+          sleep(RAF_PROBE_RACE_MS).then(() => "timeout" as const),
+        ]);
+      } catch {
+        raf = "threw";
+      }
+    }
+    if (alive !== "yes") {
+      console.error(summaryLine("STALL", "HANG"));
+      throw new Error(
+        `${base} - VERDICT: HUNG. The page did not answer String(Date.now()) within ` +
+          `${PAGE_ALIVE_PROBE_MS}ms (the measured starved-poll floor, scripts/proof-cdp.ts; ` +
+          `probe ${alive === "threw" ? "threw" : "never returned"}) - the renderer is genuinely ` +
+          `wedged, a product FAIL (audio-feed-vn72k)`,
+      );
+    }
+    if (raf === "frame") {
+      console.error(summaryLine("STALL", "WEDGED-WAIT"));
+      throw new Error(
+        `${base} - VERDICT: the wait loop itself is wedged. The page answers evaluates AND frames ` +
+          `are still firing (the rAF probe won), so a frozen published counter means the ` +
+          `STUCK_STATE_WAIT loop stopped progressing - a product FAIL (audio-feed-vn72k)`,
+      );
+    }
+    // Page responsive + rAF never fired (or the probe evaluate itself was starved out): the
+    // compositor is suppressing BeginFrames under gate load. An ENVIRONMENT condition - reported
+    // by name with the measurement attached, never a green PASS and never a product FAIL. Deno
+    // has no skip-from-body API, so the honest surface is a NAMED UNKNOWN error, distinguishable
+    // from any product failure by name, verdict, and the one-line summary above.
+    console.error(summaryLine("STALL", "RENDERER-STARVED"));
+    const starved = new Error(
+      `${base} - VERDICT: RENDERER STARVATION, an environment condition, NOT a product failure. ` +
+        `The page answers evaluates but ${
+          raf === "timer"
+            ? `no BeginFrame fired within ${RAF_PROBE_MS}ms of the probe`
+            : `the frame probe itself went unanswered within ${RAF_PROBE_RACE_MS}ms`
+        } - under gate load headless Chrome stops scheduling BeginFrames, so a HEALTHY page ` +
+        `freezes its frame-coupled counter. Classified UNKNOWN, not PASS and not a hang ` +
+        `(audio-feed-vn72k)`,
+    );
+    starved.name = "StarvationUnknown";
+    throw starved;
+  };
   for (;;) {
     await sleep(250);
     if (done) {
       // (P2, review round two) test the flag, not the value: a rejection can CARRY undefined, and
       // `failure !== undefined` would then read as success and return undefined into JSON.parse.
-      if (failed) throw failure;
+      if (failed) {
+        console.error(summaryLine("PAGEWAIT", "PAGEWAIT-REJECTED"));
+        throw new Error(
+          `${url}: STUCK-WAIT branch=PAGEWAIT phase=${phase} - the in-page wait rejected ` +
+            `(observations read=${obsReads}, null/lost reads=${nullReads}, lastN=${lastN}): ` +
+            `${failure instanceof Error ? failure.message : String(failure)} (audio-feed-vn72k)`,
+          { cause: failure },
+        );
+      }
       return result!;
     }
     // Bounded observation read: even a starved renderer services CDP in milliseconds.
@@ -324,23 +454,35 @@ async function stuckWithDeadline(
         return null;
       }
     })();
+    // audio-feed-vn72k (defect two): BOTH arms below run the STALL check - the old code checked
+    // it only inside the `obs && typeof obs.n === "number"` branch, so every null read silently
+    // reset the stall clock to never. A stalled page whose CDP reads are ALSO being lost now
+    // reds by name through the classifier instead of coasting to ABSENCE.
     if (obs && typeof obs.n === "number") {
+      obsReads++;
       if (obs.n !== lastN) {
         lastN = obs.n;
         lastProgress = Date.now();
+        if (nTrace.length < 40) {
+          nTrace.push(`n=${obs.n}@+${((Date.now() - started) / 1000).toFixed(1)}s`);
+        }
       } else if (Date.now() - lastProgress > STALL_LIMIT_MS) {
-        throw new Error(
-          `${url}: the stuck ${phase} STALLED - the page stopped publishing observations for ` +
-            `${
-              STALL_LIMIT_MS / 1000
-            }s (last observed: scrollY=${obs.scrollY}, rectTop=${obs.rectTop}, ` +
-            `last styles=${obs.key}) - the renderer hung mid-wait (audio-feed-evhug)`,
-        );
+        await classifyStall(obs);
+      }
+    } else {
+      nullReads++;
+      if (Date.now() - lastProgress > STALL_LIMIT_MS) {
+        await classifyStall(null);
       }
     }
     if (Date.now() - started > ABSENCE_LIMIT_MS) {
+      console.error(summaryLine("ABSENCE", "ABSENCE"));
       throw new Error(
-        `${url}: the stuck ${phase} never landed within ${ABSENCE_LIMIT_MS / 1000}s of the wait ` +
+        `${url}: STUCK-WAIT branch=ABSENCE phase=${phase} - the stuck ${phase} never landed within ` +
+          `${
+            ABSENCE_LIMIT_MS / 1000
+          }s of the wait (observations read=${obsReads}, null/lost reads=${nullReads}; ` +
+          `n-trace: ${nTrace.join(" ") || "none"}) ` +
           // (review round two) the whole observation segment is conditional: with nothing ever
           // published, interpolating obs?.scrollY renders "scrollY=undefined" - nonsense in the
           // one message whose entire job is to be actionable.
@@ -351,7 +493,7 @@ async function stuckWithDeadline(
               }`
               : "no observation published"
           }) - the stuck block is inert or the transition ` +
-          `never started`,
+          `never started (audio-feed-vn72k)`,
       );
     }
   }
@@ -500,8 +642,13 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
               return state;
             }
             if (Date.now() > guardDeadline) {
+              // audio-feed-vn72k: name the branch for the gate reader + the one-line summary.
+              console.error(
+                `audio-feed-vn72k ONE-LINE: url=${url} branch=GUARD(3y5vv) phase=flip verdict=GUARD-EXPIRED lastRead=shadow=${state.shadow},bg=${state.bg},border=${state.border}`,
+              );
               throw new Error(
-                `${url}: the stuck styles never reached the flipped values within 20s of settle ` +
+                `${url}: STUCK-WAIT branch=GUARD(3y5vv) phase=flip - the stuck styles never ` +
+                  `reached the flipped values within 20s of settle ` +
                   `(last read: shadow=${state.shadow}, bg=${state.bg}, border=${state.border}) - ` +
                   `the transition either never landed or regressed after settle (audio-feed-3y5vv)`,
               );
@@ -527,8 +674,13 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
             const state = await probe();
             if (state.shadow === "none") return state;
             if (Date.now() > guardDeadline) {
+              // audio-feed-vn72k: name the branch for the gate reader + the one-line summary.
+              console.error(
+                `audio-feed-vn72k ONE-LINE: url=${url} branch=GUARD(3y5vv) phase=restore verdict=GUARD-EXPIRED lastRead=shadow=${state.shadow}`,
+              );
               throw new Error(
-                `${url}: the header never returned to the un-stuck styles within 20s of scrolling back ` +
+                `${url}: STUCK-WAIT branch=GUARD(3y5vv) phase=restore - the header never returned ` +
+                  `to the un-stuck styles within 20s of scrolling back ` +
                   `(last read: shadow=${state.shadow}) - the restore regressed after settle (audio-feed-3y5vv)`,
               );
             }
