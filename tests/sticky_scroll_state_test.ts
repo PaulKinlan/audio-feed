@@ -208,6 +208,22 @@ async function withChrome<T>(
  */
 const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolean) =>
   `(async () => {
+    // audio-feed-vn72k (follow-up): publish the page's OWN uncaught-error state, because the STALL
+    // classifier's starvation verdict is an environment claim - "no BeginFrame fired, the page is
+    // healthy" - and a product bug that pegs the main thread while still answering trivial
+    // evaluates looks identical from the host. Reset per wait (each wait is its own phase); the
+    // two listeners are installed once, so re-entering the wait cannot double-register them.
+    window.__stuckErr = null;
+    if (!window.__stuckErrHooked) {
+      window.__stuckErrHooked = true;
+      addEventListener("error", (e) => {
+        window.__stuckErr = String((e && (e.message || e.type)) || "error");
+      });
+      addEventListener("unhandledrejection", (e) => {
+        const reason = e && e.reason;
+        window.__stuckErr = String((reason && reason.message) || reason || "unhandledrejection");
+      });
+    }
     const el = document.querySelector(${JSON.stringify(surfaceSel)});
     const keyOf = () => {
       const cs = getComputedStyle(el);
@@ -284,17 +300,60 @@ const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolea
 const STALL_LIMIT_MS = 20_000;
 const ABSENCE_LIMIT_MS = 45_000;
 // audio-feed-vn72k: classifier bounds, all DERIVED from the imported measured floor
-// (scripts/proof-cdp.ts), none invented. PAGE_ALIVE_PROBE_MS = MEASURED_STARVED_POLL_MS is the
-// MEASURED time one bare evaluate can legitimately take under eight-way saturation
-// (audio-feed-6gst1): a page that cannot answer `String(Date.now())` inside it is not servicing
-// its main thread at all -> genuine HANG. RAF_PROBE_MS applies the same measured floor to
-// BeginFrames: if the page answers evaluates but no frame fires within it, the compositor is
-// suppressing frames while the page is healthy -> renderer starvation, an ENVIRONMENT condition.
-// No stall window is widened by this change: STALL_LIMIT_MS still arms at 20s; what changed is
-// that arming it now CLASSIFIES instead of assuming.
-const PAGE_ALIVE_PROBE_MS = MEASURED_STARVED_POLL_MS;
-const RAF_PROBE_MS = MEASURED_STARVED_POLL_MS;
-const RAF_PROBE_RACE_MS = PAGE_ALIVE_PROBE_MS + RAF_PROBE_MS;
+// (scripts/proof-cdp.ts), none invented. RAF_PROBE_MS applies the measured floor to BeginFrames:
+// if the page answers evaluates but no frame fires within it, the compositor is suppressing frames
+// while the page is healthy -> renderer starvation, an ENVIRONMENT condition. No stall window is
+// widened by this change: STALL_LIMIT_MS still arms at 20s; what changed is that arming it now
+// CLASSIFIES instead of assuming.
+//
+// THE ALIVE PROBE CARRIES DERIVED HEADROOM (audio-feed-vn72k review P2 #1). It used to race
+// `String(Date.now())` against MEASURED_STARVED_POLL_MS with ZERO headroom, and a zero-headroom
+// race here is a FALSE PRODUCT FAIL generator - the exact flake family this row exists to kill.
+// That floor (8s) is what ONE bare evaluate legitimately took under EIGHT-WAY saturation on this
+// host (audio-feed-6gst1). The classifier arms precisely when the machine is slow enough to have
+// frozen the published counter, so under heavier saturation than the measurement a HEALTHY page's
+// evaluate can return later than the floor - and the old verdict for a late answer is HUNG, a
+// product FAIL on a correct row. PAGE_ALIVE_PROBE_HEADROOM settles it: 4 x the floor, the same
+// shape as the repo's HANG_BOUND_MS = 15 x floor derivation (scripts/proof-cdp.ts) and
+// tests/fixtures/invocation_death_window.ts, deliberately BELOW 15 x because 15 x is the bound for
+// a page that will never answer at all, and a once-only discriminator should not spend the whole
+// hang bound before saying "hung".
+// WORST CASE ADDED LATENCY (stated so the number is a decision, not a leftover): the classifier
+// arms only after STALL_LIMIT_MS (20s) of a frozen counter, and from there it returns inside
+// PAGE_ALIVE_PROBE_MS (32s) + RAF_PROBE_RACE_MS (40s) = 72s - i.e. <= 92s from the freeze to a
+// throw it already had to make (20 + 32 + 40, pinned by a test below). The green path never arms
+// any of it, and neither bound waits on a page that answers.
+export const PAGE_ALIVE_PROBE_HEADROOM = 4;
+export const PAGE_ALIVE_PROBE_MS = PAGE_ALIVE_PROBE_HEADROOM * MEASURED_STARVED_POLL_MS;
+export const RAF_PROBE_MS = MEASURED_STARVED_POLL_MS;
+// The rAF probe's evaluate travels the same saturated CDP path the alive probe just measured, so
+// its host-side race is the alive bound PLUS the in-page frame timer - derived, never a literal.
+export const RAF_PROBE_RACE_MS = PAGE_ALIVE_PROBE_MS + RAF_PROBE_MS;
+
+/** The three outcomes the STALL classifier can reach (audio-feed-vn72k). */
+type StallVerdict = "HUNG" | "WEDGED-WAIT" | "RENDERER-STARVED";
+
+/**
+ * The classifier's DECISION, split out from the throws below so the verdict rule is provable
+ * without a browser, a frozen counter, or a 20s stall window.
+ *
+ * The starvation verdict is a claim about the ENVIRONMENT - the compositor stopped scheduling
+ * BeginFrames on a healthy page - so it additionally requires the page to have published NO
+ * uncaught error. A product fault that pegs the main thread but still answers trivial evaluates
+ * looks exactly like starvation from the host; the page's own error flag is the only evidence
+ * that separates them, and with it the verdict is HUNG, a product FAIL, never a mislabelled
+ * unknown (audio-feed-vn72k review P2 #2).
+ */
+function stallVerdict(
+  alive: "yes" | "timeout" | "threw",
+  raf: "frame" | "timer" | "timeout" | "threw",
+  pageErr: string | null,
+): StallVerdict {
+  if (alive !== "yes") return "HUNG";
+  if (raf === "frame") return "WEDGED-WAIT";
+  if (pageErr !== null) return "HUNG";
+  return "RENDERER-STARVED";
+}
 async function stuckWithDeadline(
   url: string,
   phase: "flip" | "restore",
@@ -348,16 +407,31 @@ async function stuckWithDeadline(
         nTrace.join(" ") || "none"
       }); ` +
       `last observation=${JSON.stringify(lastObs ?? null)}`;
-    // Probe 1 - is the main thread alive? A trivial evaluate inside the measured starved-poll
-    // floor (PAGE_ALIVE_PROBE_MS = MEASURED_STARVED_POLL_MS). The CDP promise itself never
-    // rejects on timeout, so the host must race it.
+    // Probe 1 - is the main thread alive? A trivial evaluate inside the derived alive bound
+    // (PAGE_ALIVE_PROBE_MS = 4 x MEASURED_STARVED_POLL_MS, headroom explained at the constants).
+    // The CDP promise itself never rejects on timeout, so the host must race it. The SAME round
+    // trip also reads the page's published uncaught-error flag, so the classification costs no
+    // extra latency; it is read HERE, at probe time, because an error that arrives after the
+    // probe is the ABSENCE path's business rather than the classifier's.
     let alive: "yes" | "timeout" | "threw" = "timeout";
+    let pageErr: string | null = null;
     try {
       alive = await Promise.race([
-        evaluate("String(Date.now())").then(
-          () => "yes" as const,
-          () => "threw" as const,
-        ),
+        evaluate(`JSON.stringify({ now: String(Date.now()), err: window.__stuckErr ?? null })`)
+          .then(
+            (raw: unknown) => {
+              try {
+                const parsed = JSON.parse(String(raw)) as { err?: unknown };
+                pageErr = parsed.err == null ? null : String(parsed.err);
+              } catch {
+                // An unparseable reply is proof of life and nothing more - it is not evidence
+                // that the page published an error, so the starvation verdict stays reachable.
+                pageErr = null;
+              }
+              return "yes" as const;
+            },
+            () => "threw" as const,
+          ),
         sleep(PAGE_ALIVE_PROBE_MS).then(() => "timeout" as const),
       ]);
     } catch {
@@ -388,16 +462,28 @@ async function stuckWithDeadline(
         raf = "threw";
       }
     }
-    if (alive !== "yes") {
+    const verdict = stallVerdict(alive, raf, pageErr);
+    if (verdict === "HUNG") {
       console.error(summaryLine("STALL", "HANG"));
+      if (alive !== "yes") {
+        throw new Error(
+          `${base} - VERDICT: HUNG. The page did not answer String(Date.now()) within ` +
+            `${PAGE_ALIVE_PROBE_MS}ms (${PAGE_ALIVE_PROBE_HEADROOM} x the measured starved-poll ` +
+            `floor, scripts/proof-cdp.ts; probe ${alive === "threw" ? "threw" : "never returned"}` +
+            `) - the renderer is genuinely wedged, a product FAIL (audio-feed-vn72k)`,
+        );
+      }
+      // Alive, no frame fired, and the page published its OWN uncaught error: a product fault has
+      // pegged the main thread (or thrown on it) and the missing frames are a symptom of that,
+      // not of compositor suppression. Reporting starvation here would label a real product
+      // failure as an environment unknown (audio-feed-vn72k review P2 #2).
       throw new Error(
-        `${base} - VERDICT: HUNG. The page did not answer String(Date.now()) within ` +
-          `${PAGE_ALIVE_PROBE_MS}ms (the measured starved-poll floor, scripts/proof-cdp.ts; ` +
-          `probe ${alive === "threw" ? "threw" : "never returned"}) - the renderer is genuinely ` +
-          `wedged, a product FAIL (audio-feed-vn72k)`,
+        `${base} - VERDICT: HUNG. The page answers evaluates but published its own uncaught ` +
+          `error ("${pageErr}") while no BeginFrame fired - a product fault on the main thread, ` +
+          `not renderer starvation, a product FAIL (audio-feed-vn72k)`,
       );
     }
-    if (raf === "frame") {
+    if (verdict === "WEDGED-WAIT") {
       console.error(summaryLine("STALL", "WEDGED-WAIT"));
       throw new Error(
         `${base} - VERDICT: the wait loop itself is wedged. The page answers evaluates AND frames ` +
@@ -405,7 +491,8 @@ async function stuckWithDeadline(
           `STUCK_STATE_WAIT loop stopped progressing - a product FAIL (audio-feed-vn72k)`,
       );
     }
-    // Page responsive + rAF never fired (or the probe evaluate itself was starved out): the
+    // Page responsive, rAF never fired (or the probe evaluate itself was starved out), and the
+    // page published NO uncaught error (a published one reached the HUNG verdict above): the
     // compositor is suppressing BeginFrames under gate load. An ENVIRONMENT condition - reported
     // by name with the measurement attached, never a green PASS and never a product FAIL. Deno
     // has no skip-from-body API, so the honest surface is a NAMED UNKNOWN error, distinguishable
@@ -413,7 +500,7 @@ async function stuckWithDeadline(
     console.error(summaryLine("STALL", "RENDERER-STARVED"));
     const starved = new Error(
       `${base} - VERDICT: RENDERER STARVATION, an environment condition, NOT a product failure. ` +
-        `The page answers evaluates but ${
+        `The page answers evaluates, published no uncaught error, but ${
           raf === "timer"
             ? `no BeginFrame fired within ${RAF_PROBE_MS}ms of the probe`
             : `the frame probe itself went unanswered within ${RAF_PROBE_RACE_MS}ms`
@@ -731,4 +818,61 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
   } finally {
     await server.shutdown();
   }
+});
+
+/**
+ * audio-feed-vn72k review P2 #1: the alive probe's bound must be DERIVED WITH HEADROOM, and the
+ * classifier's total must stay the number its comment claims. No browser, no stall window: this
+ * is the constants' own contract, and it reds the moment someone puts the probe back on the bare
+ * measured floor (headroom 1), which is the false-product-FAIL shape the row was reviewed for.
+ */
+Deno.test("txcz: the STALL classifier's bounds are derived from the measured floor, with headroom and a bounded total", () => {
+  // The floor itself is imported from scripts/proof-cdp.ts, never restated (audio-feed-6gst1).
+  assertEquals(MEASURED_STARVED_POLL_MS, 8_000);
+  // The alive probe is 4 x the floor, not the floor.
+  assertEquals(PAGE_ALIVE_PROBE_HEADROOM, 4);
+  assertEquals(PAGE_ALIVE_PROBE_MS, PAGE_ALIVE_PROBE_HEADROOM * MEASURED_STARVED_POLL_MS);
+  assertEquals(PAGE_ALIVE_PROBE_MS, 32_000);
+  assert(
+    PAGE_ALIVE_PROBE_HEADROOM > 1,
+    "the alive probe must carry headroom over the measured starved floor: at 1 x it labels a " +
+      "healthy page HUNG under saturation heavier than the measurement (a false product FAIL)",
+  );
+  // The frame probe keeps the raw floor (a missed frame is an environment UNKNOWN, not a product
+  // FAIL), and its host-side race is the alive bound plus that timer - still derived.
+  assertEquals(RAF_PROBE_MS, MEASURED_STARVED_POLL_MS);
+  assertEquals(RAF_PROBE_RACE_MS, PAGE_ALIVE_PROBE_MS + RAF_PROBE_MS);
+  // WORST CASE ADDED LATENCY, pinned to the comment above the constants: the classifier arms after
+  // STALL_LIMIT_MS, then bounds the alive probe and the frame race -> 20 + 32 + 40 = 92s from the
+  // freeze to a throw it already had to make. A widening of any bound has to restate this line.
+  assertEquals(STALL_LIMIT_MS + PAGE_ALIVE_PROBE_MS + RAF_PROBE_RACE_MS, 92_000);
+});
+
+/**
+ * audio-feed-vn72k review P2 #2: a page that published its OWN uncaught error is not starving.
+ * The same observations that read RENDERER-STARVED (an environment UNKNOWN) read HUNG (a product
+ * FAIL) once the page's error flag is set - reverting that clause in stallVerdict reds this test.
+ */
+Deno.test("txcz: a published page error flips the starvation verdict to HUNG", () => {
+  // Without an error flag, a page that answers evaluates and fires no frame is starving.
+  assertEquals(stallVerdict("yes", "timer", null), "RENDERER-STARVED");
+  assertEquals(stallVerdict("yes", "timeout", null), "RENDERER-STARVED");
+  // With one, the SAME observations are a product failure.
+  assertEquals(stallVerdict("yes", "timer", "TypeError: boom"), "HUNG");
+  assertEquals(stallVerdict("yes", "timeout", "unhandledrejection"), "HUNG");
+  // The other two branches keep their precedence: a dead page is hung either way, and a firing
+  // frame still means the wait loop itself is wedged.
+  assertEquals(stallVerdict("timeout", "timer", "TypeError: boom"), "HUNG");
+  assertEquals(stallVerdict("threw", "frame", null), "HUNG");
+  assertEquals(stallVerdict("yes", "frame", "TypeError: boom"), "WEDGED-WAIT");
+});
+
+/** The verdict rule is only reachable if the wait publishes the flag it reads - asserted on the
+ * emitted page expression, because a classifier that reads a global nobody sets can never fire. */
+Deno.test("txcz: the in-page wait publishes __stuckErr and installs both listeners once", () => {
+  const wait = STUCK_STATE_WAIT(".site-header", "base|key", true);
+  assertStringIncludes(wait, "window.__stuckErr = null;");
+  assertStringIncludes(wait, 'addEventListener("error"');
+  assertStringIncludes(wait, 'addEventListener("unhandledrejection"');
+  assertStringIncludes(wait, "if (!window.__stuckErrHooked)");
 });
