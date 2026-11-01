@@ -65,6 +65,7 @@ import {
   DEFAULT_MAX_UPLOAD_RETRIES,
   DEFAULT_VOICES,
   INBOX_SOURCE_ID,
+  isPreturnRefusalExhaustion,
   parseAudioBlobKey,
   segmentBlobKey,
   segmentTextHash,
@@ -159,6 +160,14 @@ export interface SegmentResume {
     /** The stage's abort signal: the segment put must be interruptible (audio-feed-y9kk). */
     signal?: AbortSignal,
   ) => Promise<void>;
+  /**
+   * Records that a paid turn was INITIATED — called by the synthesizer only AFTER the
+   * pre-turn budget preflight has passed and the provider request is about to be spent
+   * (audio-feed-preturn). Claim-level, so it survives the synthesizer's per-retry-attempt
+   * counter resets; the yield handler reads it to tell a pure pre-turn refusal (zero
+   * initiated turns, nothing spent) from a yield that follows real paid work.
+   */
+  noteTurnInitiated?: () => void;
 }
 
 export interface SynthesisWorkerOptions {
@@ -670,6 +679,11 @@ async function runScriptStage(
   estimateMs = ESTIMATED_SCRIPT_STAGE_DURATION_MS,
   defaultTimeoutMs = DEFAULT_SCRIPT_STAGE_TIMEOUT_MS,
   onFallback?: (info: GroundedScriptFallback) => void,
+  /** audio-feed-preturn: fired at the moment the generator is actually invoked — after
+   * withInvocationBudget's own stage-entry preflight has passed — so the claim-level spend
+   * counter sees the grounded script stage as real paid work, exactly like a TTS turn.
+   * A stage refused BEFORE its generator runs spends nothing and stays a pure refusal. */
+  onPaidStart?: () => void,
 ): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
   if (!generator) return undefined;
   // The unbounded fallback arms its own deadline, on the same clock the caller supplied so a test
@@ -684,7 +698,10 @@ async function runScriptStage(
     },
     flushMarginMs: budget?.maxDurationMs ? flushMarginMs : 0,
     worstCaseEstimateMs: budget?.maxDurationMs ? estimateMs : 0,
-    fn: (signal) => generator(input, { signal }),
+    fn: (signal) => {
+      onPaidStart?.();
+      return generator(input, { signal });
+    },
   });
   if (outcome.kind === "budget-yield") {
     if (budget?.maxDurationMs) {
@@ -848,6 +865,10 @@ export function createGeminiSynthesizer(
               }
             }
             initiatedTurnsCount++;
+            // audio-feed-preturn: the preflight PASSED and the provider request is about to
+            // be spent. Record it on the claim-level resume so a later yield handler can
+            // tell real spend from a pure pre-turn refusal.
+            resume.noteTurnInitiated?.();
           }
           return res;
         },
@@ -965,6 +986,11 @@ export function createGeminiSynthesizer(
             ? Math.min(deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS, remainingMs)
             : (deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS),
           onScriptFallback ?? deps.onScriptFallback,
+          // audio-feed-preturn: a started grounded script stage is real provider spend, so it
+          // must count as claim-level initiation exactly like a TTS turn — a script stage that
+          // starts and then yields with zero durable progress keeps burning attempts
+          // (audio-feed-zrkn/fsr3), while a stage refused before its generator runs does not.
+          () => resume?.noteTurnInitiated?.(),
         );
         turns = script?.turns;
         if (turns && turns.length > 0) {
@@ -1180,11 +1206,27 @@ export function buildSegmentResume(
   ctx: AppContext,
   episode: Episode,
   options: { owner: string; leaseMs: number; revision: () => string; nowMs?: number },
-): { resume: SegmentResume; sweep: (excludeAudioKey?: string) => Promise<void> } {
+): {
+  resume: SegmentResume;
+  sweep: (excludeAudioKey?: string) => Promise<void>;
+  /**
+   * Claim-level paid-turn initiation count (audio-feed-preturn).
+   *
+   * The synthesizer's own initiated/committed counts are per synthesize() call and reset on
+   * every inner retry attempt, so a pre-turn preflight refusal in retry attempt 2 is
+   * indistinguishable there from a refusal in a claim that never spent anything. The count
+   * is bumped by `resume.noteTurnInitiated()` — which the synthesizer calls only after the
+   * preflight has passed — so it covers the WHOLE claim and the yield handler can tell a
+   * pure pre-turn refusal (zero provider spend, free to retry without burning an attempt)
+   * from a yield that follows real paid work.
+   */
+  claimSpend: { initiatedTurns: number };
+} {
   const { metadata, blobs } = ctx.stores;
   const now = () => options.nowMs ?? Date.now();
   let listed: Promise<SynthesisSegmentRecord[]> | null = null;
   const records = () => listed ??= metadata.listSynthesisSegments(episode.userId, episode.id);
+  const claimSpend = { initiatedTurns: 0 };
 
   const prepare = async (segmentText: string, voice: string) => {
     const textHash = segmentTextHash(segmentText);
@@ -1330,7 +1372,15 @@ export function buildSegmentResume(
     await metadata.clearSynthesisSegments(episode.userId, episode.id);
   };
 
-  return { resume: { prepare, commit }, sweep };
+  return {
+    resume: {
+      prepare,
+      commit,
+      noteTurnInitiated: () => claimSpend.initiatedTurns++,
+    },
+    sweep,
+    claimSpend,
+  };
 }
 
 /**
@@ -2142,6 +2192,23 @@ async function runSynthesisBatchCore(
           episode.id,
           afterClaim.audioKey,
         );
+        // audio-feed-refcap: a refusal-exhausted episode was failed INSIDE claimEpisode, which
+        // cannot queue notifications, and no other notifyOnDemand caller runs for it — they all
+        // sit on paths this worker drove to a terminal state itself. Emit it here, in the tick
+        // that watched the episode cross the refusal cap, so it reaches `failed` WITH its
+        // notification instead of sitting in a state the admin failed list never sees.
+        if (isPreturnRefusalExhaustion(afterClaim.error)) {
+          const error = afterClaim.error ?? "episode exhausted its pre-turn refusal budget";
+          console.error(
+            `[audio-feed] synthesis failed for episode "${afterClaim.id}" ("${afterClaim.title}"): ${error}`,
+          );
+          result.failed.push({
+            episodeId: afterClaim.id,
+            error,
+            title: afterClaim.title,
+          });
+          await notifyOnDemand(afterClaim, "failed", error);
+        }
       }
       result.skipped.push({ episodeId: episode.id, reason: "claimed elsewhere or exhausted" });
       continue;
@@ -2362,8 +2429,20 @@ async function runSynthesisBatchCore(
           // 3. Provenance: Only our explicit InvocationBudgetAbortError sentinel yields; provider/lease aborts take retry/failure.
           // 4. Progress: DURABLE PROGRESS = observable on the next tick after a restart; anything else is not progress.
           //    Every yield must either make durable progress (finalized segments committed or scriptTurns checkpointed)
-          //    resetting attempts to 0, or count against opts.maxAttempts. Zero-progress budget yields advance attempts
-          //    and fail once maxAttempts is exhausted, preventing infinite livelocks and unbounded paid spend across cron ticks.
+          //    resetting attempts and refusals to 0, or count against opts.maxAttempts — EXCEPT the pure pre-turn
+          //    refusal (audio-feed-preturn): a yield raised by the pre-turn preflight before THIS CLAIM
+          //    initiated any paid turn has spent nothing, so burning one of three claims on it produced
+          //    permanent "claim 3/3; zero durable progress" deaths for episodes whose pre-turn stage
+          //    (e.g. slow script work or slow store reads) ate the invocation budget. The cap still
+          //    burns for every claim that initiated at least one paid turn: real spend with zero durable
+          //    result remains bounded at opts.maxAttempts claims (audio-feed-zrkn's livelock guard), so
+          //    a genuinely doomed episode still terminates. A pure-refusal loop costs zero provider
+          //    spend per tick and is bounded by the refusals counter (audio-feed-refcap): each pure
+          //    refusal increments episode.refusals and returns only its own claim's attempt increment,
+          //    and claimEpisode fails the episode with a distinct reason once refusals reaches
+          //    preturnRefusalCap(maxClaims) — lease expiry and the pre-claim batch gate do NOT bound
+          //    this loop (the gate sees a fresh invocation budget every tick, and a clean yield
+          //    releases the lease before it could expire).
           const refreshed = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
           const finalScriptTurns = refreshed?.scriptTurns?.length ?? 0;
           const finalSegments =
@@ -2374,9 +2453,17 @@ async function runSynthesisBatchCore(
             { segments: initialSegments, scriptTurns: initialScriptTurns },
             { segments: finalSegments, scriptTurns: finalScriptTurns },
           );
+          // audio-feed-preturn: zero paid turns initiated across the WHOLE claim (all inner
+          // retry attempts) means the yield refused work that had not started; nothing was spent.
+          const claimInitiatedTurns = segmentResume.claimSpend.initiatedTurns;
+          const preTurnRefusal = !madeProgress && claimInitiatedTurns === 0;
 
-          if (!madeProgress && (claimed.attempts ?? 1) >= opts.maxAttempts) {
-            // Refuse infinite livelock: zero progress across maxAttempts must fail the episode.
+          if (
+            !madeProgress && claimInitiatedTurns > 0 &&
+            (claimed.attempts ?? 1) >= opts.maxAttempts
+          ) {
+            // Refuse infinite livelock: zero progress after real spend across maxAttempts must
+            // fail the episode.
             // audio-feed-zrkn: unlike every other failure on this path, this one is NOT a budget
             // problem - the episode is out of attempts, not out of slice - so it must not be
             // recorded with the deadline text that the progressful failures carry.
@@ -2384,7 +2471,9 @@ async function runSynthesisBatchCore(
             break;
           }
 
-          // Clean yield to respect invocation budget: resets attempts to 0 on progress, or advances attempts on zero progress.
+          // Clean yield to respect invocation budget: resets attempts to 0 on progress (or on a
+          // pure pre-turn refusal, which spent nothing), or advances attempts on zero progress
+          // after real spend.
           const yieldPhase = `synthesized_${finalSegments}_of_${
             observedPlanSize(yieldErr) ?? yieldErr.totalTurns
           }`;
@@ -2395,7 +2484,11 @@ async function runSynthesisBatchCore(
               opts.owner,
               {
                 phase: yieldPhase,
-                advanceAttempts: !madeProgress,
+                advanceAttempts: !madeProgress && !preTurnRefusal,
+                // audio-feed-refcap: a pure refusal is counted on its own counter and its claim's
+                // attempt increment is returned, so attempts never resets over earlier spend
+                // history — and claimEpisode's refusal cap bounds the zero-spend loop.
+                incrementRefusals: preTurnRefusal,
               },
             ), currentEpisode.id);
           if (yielded) {
@@ -2408,10 +2501,12 @@ async function runSynthesisBatchCore(
                   phase: yieldPhase,
                   attempt: currentEpisode.attempts ?? 1,
                   claimOutcome: "yielded",
-                  reason: `invocation budget reached with ${finalSegments} of ${
-                    observedPlanSize(yieldErr) ??
-                      yieldErr.totalTurns
-                  } segments committed; resuming on a later tick`,
+                  reason: preTurnRefusal
+                    ? `invocation budget reached before any paid turn (0 initiated in this claim); no attempt consumed; resuming on a later tick`
+                    : `invocation budget reached with ${finalSegments} of ${
+                      observedPlanSize(yieldErr) ??
+                        yieldErr.totalTurns
+                    } segments committed; resuming on a later tick`,
                 }),
               );
             } catch {

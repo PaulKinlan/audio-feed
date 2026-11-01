@@ -822,7 +822,12 @@ Deno.test("audio-feed-uet6: resumed invocation advancing scriptTurns from N>0 to
   // Control: if a subsequent resumed invocation with initialScriptTurns=4 yields WITHOUT adding
   // any script turns or segments (finalScriptTurns === initialScriptTurns === 4), madeProgress
   // is false and attempts advance until failing at maxAttempts.
-  const stalledScriptSynth: Synthesizer = ({ episode }) => {
+  // audio-feed-preturn: attempts advance here only because the stalled invocation represents
+  // real paid work — the fake records turn initiation on the claim-level resume exactly as
+  // the real synthesizer does after its pre-turn preflight passes. A yield with ZERO
+  // initiated paid work is a pure refusal and no longer burns attempts.
+  const stalledScriptSynth: Synthesizer = ({ episode, resume }) => {
+    resume?.noteTurnInitiated?.();
     throw new SynthesisYieldError(
       0,
       episode.scriptTurns?.length ?? 4,
