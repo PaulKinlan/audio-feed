@@ -201,7 +201,9 @@ Deno.test("a cross-origin page gets NO access-control-allow-origin (audio-feed-c
 
 Deno.test("our own origin still gets the grant and the bytes (audio-feed-cf0hi)", async () => {
   const { fetch } = await app();
-  const res = await fetch(audio({ origin: BASE, "sec-fetch-site": "same-origin", range: "bytes=0-3" }));
+  const res = await fetch(
+    audio({ origin: BASE, "sec-fetch-site": "same-origin", range: "bytes=0-3" }),
+  );
 
   assertEquals(res.status, 206);
   assertEquals(res.headers.get("access-control-allow-origin"), "*");
