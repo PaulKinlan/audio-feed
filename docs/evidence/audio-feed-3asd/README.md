@@ -32,4 +32,4 @@ PASS  page and disclosure remain open and stable after link click
 ## Screenshots
 
 - `01-bookmarklet-disclosure-open.png`: Homepage with bookmarklet box and expanded fallback disclosure showing snippet code.
-- SHA-256 (`01-bookmarklet-disclosure-open.png`): `e8108df9f3f193fd3985ca13158022a36bf67462ca73caf01dfed05b51b87e55`
+- SHA-256 (`01-bookmarklet-disclosure-open.png`): `29c8414fc737c2bc8239fcd62fee508860b1089c3b5cf1a1a1f2b71998b3fc6c`

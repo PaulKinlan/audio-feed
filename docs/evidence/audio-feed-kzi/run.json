@@ -1,0 +1,15 @@
+{
+  "script": "scripts/playback-position-browser-proof.ts",
+  "sha": "9e25774f2437d49e4bf674d4905491a746104c20",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T02:19:24.520Z",
+  "endedAt": "2026-11-01T02:19:33.829Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-resume-playback-position.png": "sha256:668e58bf14848b4c76fd8f8fe2d30feca2bc14c39bdcc1d022ef5602869b9adb"
+  }
+}
