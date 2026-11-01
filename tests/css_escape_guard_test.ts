@@ -11,7 +11,8 @@
  */
 
 import { assert } from "@std/assert";
-import { createTempChromeProfile, newestChrome } from "../scripts/proof-helper.ts";
+import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
+import { type ChromeHandle, launchChrome } from "../scripts/proof-helper.ts";
 
 const ASSETS = new URL("../src/assets/", import.meta.url);
 const LISTEN_CSS = new URL("../src/assets/listen.css", import.meta.url);
@@ -52,32 +53,30 @@ Deno.test("audio-feed-h7rhb: the narrow listen layout genuinely applies - the co
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const { root, restore } = await scratchRootForProfiles();
-  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-h7rhb-", root);
-  const chrome = new Deno.Command(newestChrome(), {
-    args: [
-      "--headless=new",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${profileDir}`,
-      "about:blank",
-    ],
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
-  let cdpPort = "";
-  for (let i = 0; i < 50 && !cdpPort; i++) {
-    await sleep(100);
-    cdpPort = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => "")).split(
-      "\n",
-    )[0]!;
-  }
+  // Launch through the shared launcher instead of hand-rolling Deno.Command + a fixed 50x100ms
+  // port-file wait: that bare count reddened a HEALTHY launch on the loaded gate host (union
+  // gate at loadavg 5-10, 74 minutes in, while the same tree passed this row in 32s in
+  // isolation) - a fixed window under load is a coin flip, and a red at the END of a long gate
+  // is the least trustworthy kind. launchChrome polls DevToolsActivePort event-by-event and
+  // separates the two owners a boot failure can have: "exited prematurely with code N" means
+  // the browser NEVER STARTED (launch flags/binary defect), while "Timed out after <waited>ms
+  // waiting for DevToolsActivePort" reports the WAIT and means it STARTED SLOWLY (host
+  // starvation) - different owners, no more bare timeout. The bound is the fleet-wide
+  // derivation, not a widened constant: HANG_BOUND_MS = 15 x the 8s measured starved-poll
+  // floor (scripts/proof-cdp.ts, audio-feed-6gst1), the same derivation the until()/js()
+  // sweeps applied; nothing here asserts launch latency, so the figure is a ceiling only.
+  let chrome: ChromeHandle | undefined;
   try {
-    assert(cdpPort, "chrome must expose a DevTools port");
-    const targets = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json() as Array<{
-      type: string;
-      webSocketDebuggerUrl: string;
-    }>;
+    chrome = await launchChrome({
+      prefix: "audiofeed-h7rhb-",
+      profileRoot: root,
+      portTimeoutMs: HANG_BOUND_MS,
+    });
+    const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`))
+      .json() as Array<{
+        type: string;
+        webSocketDebuggerUrl: string;
+      }>;
     const pageWs = targets.find((t) => t.type === "page");
     assert(pageWs, "a page target must exist");
     const ws = new WebSocket(pageWs.webSocketDebuggerUrl);
@@ -108,9 +107,22 @@ Deno.test("audio-feed-h7rhb: the narrow listen layout genuinely applies - the co
       });
       await cdp("Page.navigate", { url: dataUrl });
       // The navigation replaces the execution context; poll until the document is live and the
-      // style is readable (bounded - 2s, then the assertion reds on the empty read). NOTE:
+      // style is readable (bounded - then the assertion reds on the empty read). NOTE:
       // getComputedStyle returns USED pixel tracks ("7.1px 352.9px"), not the minmax() spelling.
-      for (let i = 0; i < 20; i++) {
+      //
+      // The bound is the fleet-wide HANG_BOUND_MS, not a fixed 20x100ms count (audio-feed
+      // boot-bound sweep, same family as the css_escape_guard boot wait in 2b4e8bab). This is a
+      // NAVIGATION SETTLE rather than a browser boot, so it takes the page-side bound instead of
+      // the boot waiver: it polls an observation the page produces (readyState complete plus a
+      // readable used-value grid), so the figure is a ceiling that never delays, and the
+      // assertion below still owns the verdict on "". A 2s ceiling assumed navigate -> parse ->
+      // first layout always completes in ~2s; this host has MEASURED a bare readyState evaluate
+      // legitimately exceeding the 8s starved-poll floor (scripts/proof-cdp.ts, and the same
+      // observation in anchor_positioning_test.ts), which is why until()/js() bound a page-side
+      // observation at 15 x that floor. The 100ms poll interval is unchanged - it is the
+      // CEILING that was an assumption, not the cadence.
+      const navDeadline = Date.now() + HANG_BOUND_MS;
+      while (Date.now() < navDeadline) {
         await sleep(100);
         const res = await cdp("Runtime.evaluate", {
           expression: `document.readyState === "complete" && document.querySelector("li.episode")
@@ -138,8 +150,7 @@ Deno.test("audio-feed-h7rhb: the narrow listen layout genuinely applies - the co
     );
     ws.close();
   } finally {
-    chrome.kill("SIGKILL");
-    cleanup();
+    await chrome?.close();
     await restore();
   }
 });

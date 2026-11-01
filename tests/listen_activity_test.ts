@@ -25,12 +25,11 @@ import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { playerData } from "./listen_client.ts";
 import { applyRetryCeiling, LISTEN_RETRY_CEILING, renderListenPage } from "../src/routes/listen.ts";
 import {
-  createTempChromeProfile,
-  killChromeAndWait,
-  newestChrome,
+  launchChrome,
   removeDirWhenQuiet,
   waitForChromeProfileUnused,
 } from "../scripts/proof-helper.ts";
+import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -651,30 +650,22 @@ Deno.test({
     );
 
     const scratchTmp = await Deno.makeTempDir({ prefix: "rvy5n-scratch-" });
-    const { profileDir, cleanup } = await createTempChromeProfile(
-      "audiofeed-retry-labels-",
-      scratchTmp,
-    );
-    const chrome = new Deno.Command(newestChrome(), {
-      args: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--remote-debugging-port=0",
-        `--user-data-dir=${profileDir}`,
-        "about:blank",
-      ],
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
-
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    let devtoolsPort = "";
-    for (let i = 0; i < 50 && !devtoolsPort; i++) {
-      await sleep(100);
-      devtoolsPort = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => ""))
-        .split("\n")[0]!;
-    }
+    // BOOT THROUGH THE SHARED LAUNCHER (audio-feed boot-bound sweep, mirroring the
+    // css_escape_guard fix in 2b4e8bab): the hand-rolled Deno.Command plus fixed 50x100ms
+    // DevToolsActivePort wait is a coin flip under load - on the union gate host at loadavg 5-10
+    // that 5s window expired while a healthy Chrome was merely starved. launchChrome polls the
+    // port file event-by-event, and its failure names the OWNER: "exited prematurely with code N"
+    // means the browser never started (flags/binary), "Timed out after <waited>ms" means it
+    // started slowly (host starvation). The bound is the fleet-wide derivation, not a widened
+    // constant: HANG_BOUND_MS = 15 x the 8s measured starved-poll floor (scripts/proof-cdp.ts).
+    const chrome = await launchChrome({
+      prefix: "audiofeed-retry-labels-",
+      profileRoot: scratchTmp,
+      portTimeoutMs: HANG_BOUND_MS,
+    });
+    const { profileDir } = chrome;
+    const devtoolsPort = String(chrome.port);
 
     /**
      * Typed against the slice of the CDP reply these helpers read, not `any`: the repo lint
@@ -865,8 +856,9 @@ Deno.test({
       ws.close();
     } finally {
       await server.shutdown();
-      await killChromeAndWait(chrome);
-      await cleanup();
+      // close() is the launcher's own kill-and-reap: SIGTERM, await the exit, then remove the
+      // profile it allocated - the same two steps this teardown used to spell out by hand.
+      await chrome.close();
       assert(
         await removeDirWhenQuiet(scratchTmp),
         "the scratch root must be gone after teardown (audio-feed-wj8o2)",
@@ -953,31 +945,22 @@ Deno.test({
     // profile itself - not the environment - lives here.
     const scratchTmp = await Deno.makeTempDir({ prefix: "w5f1-scratch-" });
 
-    const { profileDir, cleanup } = await createTempChromeProfile(
-      "audiofeed-player-fix-proof-",
-      scratchTmp,
-    );
-    const chrome = new Deno.Command(newestChrome(), {
-      args: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--remote-debugging-port=0",
-        `--user-data-dir=${profileDir}`,
-        "about:blank",
-      ],
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
-
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    let port = "";
-    for (let i = 0; i < 50 && !port; i++) {
-      await sleep(100);
-      port = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => "")).split(
-        "\n",
-      )[0]!;
-    }
+    // BOOT THROUGH THE SHARED LAUNCHER (audio-feed boot-bound sweep, mirroring the
+    // css_escape_guard fix in 2b4e8bab): the hand-rolled Deno.Command plus fixed 50x100ms
+    // DevToolsActivePort wait is a coin flip under load - on the union gate host at loadavg 5-10
+    // that 5s window expired while a healthy Chrome was merely starved. launchChrome polls the
+    // port file event-by-event, and its failure names the OWNER: "exited prematurely with code N"
+    // means the browser never started (flags/binary), "Timed out after <waited>ms" means it
+    // started slowly (host starvation). The bound is the fleet-wide derivation, not a widened
+    // constant: HANG_BOUND_MS = 15 x the 8s measured starved-poll floor (scripts/proof-cdp.ts).
+    const chrome = await launchChrome({
+      prefix: "audiofeed-player-fix-proof-",
+      profileRoot: scratchTmp,
+      portTimeoutMs: HANG_BOUND_MS,
+    });
+    const { profileDir } = chrome;
+    const port = String(chrome.port);
 
     try {
       const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
@@ -1288,8 +1271,9 @@ Deno.test({
 
       ws.close();
     } finally {
-      await killChromeAndWait(chrome);
-      await cleanup();
+      // close() is the launcher's own kill-and-reap: SIGTERM, await the exit, then remove the
+      // profile it allocated - the same two steps this teardown used to spell out by hand.
+      await chrome.close();
       assert(
         await removeDirWhenQuiet(scratchTmp),
         "the scratch root must be gone after teardown: a dying browser's children must not recreate it (audio-feed-wj8o2)",
@@ -1333,30 +1317,22 @@ Deno.test({
     const hungUrl = `http://127.0.0.1:${port}/player`;
 
     const scratchTmp = await Deno.makeTempDir({ prefix: "hqtfo-scratch-" });
-    const { profileDir, cleanup } = await createTempChromeProfile(
-      "audiofeed-hqtfo-proof-",
-      scratchTmp,
-    );
-    const chrome = new Deno.Command(newestChrome(), {
-      args: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--remote-debugging-port=0",
-        `--user-data-dir=${profileDir}`,
-        "about:blank",
-      ],
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
-
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    let debugPort = "";
-    for (let i = 0; i < 50 && !debugPort; i++) {
-      await sleep(100);
-      debugPort = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => ""))
-        .split("\n")[0]!;
-    }
+    // BOOT THROUGH THE SHARED LAUNCHER (audio-feed boot-bound sweep, mirroring the
+    // css_escape_guard fix in 2b4e8bab): the hand-rolled Deno.Command plus fixed 50x100ms
+    // DevToolsActivePort wait is a coin flip under load - on the union gate host at loadavg 5-10
+    // that 5s window expired while a healthy Chrome was merely starved. launchChrome polls the
+    // port file event-by-event, and its failure names the OWNER: "exited prematurely with code N"
+    // means the browser never started (flags/binary), "Timed out after <waited>ms" means it
+    // started slowly (host starvation). The bound is the fleet-wide derivation, not a widened
+    // constant: HANG_BOUND_MS = 15 x the 8s measured starved-poll floor (scripts/proof-cdp.ts).
+    const chrome = await launchChrome({
+      prefix: "audiofeed-hqtfo-proof-",
+      profileRoot: scratchTmp,
+      portTimeoutMs: HANG_BOUND_MS,
+    });
+    const { profileDir } = chrome;
+    const debugPort = String(chrome.port);
 
     try {
       const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
@@ -1511,9 +1487,10 @@ Deno.test({
     } finally {
       // Kill the browser FIRST: its disconnect aborts the held handler (req.signal), which is
       // what lets server.shutdown() complete instead of hanging on the held connection.
-      await killChromeAndWait(chrome);
+      // close() is the launcher's own kill-and-reap: SIGTERM, await the exit, then remove the
+      // profile it allocated - the same steps this teardown used to spell out by hand.
+      await chrome.close();
       await server.shutdown();
-      await cleanup();
       assert(
         await removeDirWhenQuiet(scratchTmp),
         "the scratch root must be gone after teardown: a dying browser's children must not recreate it (audio-feed-wj8o2)",
