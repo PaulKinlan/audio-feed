@@ -1,0 +1,19 @@
+{
+  "script": "scripts/request-access-browser-proof.ts",
+  "sha": "1e372ce4a8aa8fe1c40468927497041d294d0ebf",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T05:13:21.779Z",
+  "endedAt": "2026-11-01T05:16:05.979Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-request-access-desktop.png": "sha256:b0e737e44147710f8728591e955726b3d6d9c49fb7638c948f1b3e69e7faf931",
+    "02-request-access-submitted-desktop.png": "sha256:1a247214f21c27b49182fe78f0cdf8849f3d414067e7468364fc2d0400f0cafa",
+    "03-request-access-mobile-390.png": "sha256:8bde369bdde18ce8ab6788719ce2ead61bdfcb98de61f3f7e2defc0606d430fc",
+    "04-request-access-submitted-mobile.png": "sha256:80a2e7425c919ec3d749950bd0fbd98f9c9a75950666838409b8b0b5f8c6c607",
+    "05-approved-player-unlocked.png": "sha256:8fc177b57327bbed125aa94b7f75f9012a5c0a07a935fab126873e652f392c1f"
+  }
+}
