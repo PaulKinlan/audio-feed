@@ -266,25 +266,29 @@ export function resolveRecordsEnforced(
  * measured reason, never for convenience.
  *
  * Each reason below was checked against the dir's own README.md and its declared proof script, not
- * carried over. The two credential shapes are DIFFERENT and the reasons say which one applies:
- *   - KEY-READING (audio-feed-9vns, 9yu8, bp6r): their declared scripts read GEMINI_API_KEY from
- *     the environment (verify_live_e2e_tts.ts, repro_tts_brittleness_9yu8.ts,
- *     repro_tts_failure_bp6r.ts).
- *   - KEYLESS-PROXY-PAID (audio-feed-u60a): its declared script verify_live_tts.ts reads NO
- *     credential - `grep -c GEMINI_API_KEY scripts/verify_live_tts.ts` is 0 and it sends no auth
- *     header (scripts/verify_live_tts.ts:109 sets only Content-Type). It still spends money: it
- *     targets the fleet proxy at `https://gemini.int.exe.xyz/v1beta` (line 99), which injects the
- *     key server-side. Same cost, no key.
+ * carried over. All four live-TTS dirs share ONE credential shape - a LIVE PAID PROXY CALL with the
+ * real key injected server-side, no credential read or transmitted by the caller:
+ *   - verify_live_tts.ts (u60a) sends no auth header at all (scripts/verify_live_tts.ts:109 sets
+ *     only Content-Type).
+ *   - verify_live_e2e_tts.ts (9vns) SETS the env var itself as a placeholder
+ *     (`Deno.env.set("GEMINI_API_KEY", "proxy-managed")`, scripts/verify_live_e2e_tts.ts:138) next
+ *     to the proxy base URL (:137) - it never reads a caller-supplied credential.
+ *   - repro_tts_brittleness_9yu8.ts (9yu8) and repro_tts_failure_bp6r.ts (bp6r) name GEMINI_API_KEY
+ *     only in a usage comment (`dummy-via-proxy`, :24 in each) and send a dummy key to the proxy
+ *     (their own note: "gemini.int.exe.xyz injects Paul's real API key; the client sends a dummy
+ *     key").
+ *   What a refresh genuinely needs for all four is a live PAID call through the fleet proxy at
+ *   `https://gemini.int.exe.xyz/v1beta`, which injects the key server-side - same cost, no key.
  * audio-feed-8fc's COST is the duration in its own run.json
  * (2026-11-01T01:20:45.807Z -> 01:28:36.645Z = 470.8s for 32 full-page captures).
  */
 export const EVIDENCE_RECORD_EXEMPTIONS: Record<string, string> = {
   "audio-feed-9vns":
-    "live end-to-end TTS verify - its proof reads GEMINI_API_KEY, so a refresh needs a paid provider call the tier cannot demand as a refresh condition",
+    "live end-to-end TTS verify - its proof SETS GEMINI_API_KEY itself as a placeholder ('proxy-managed', scripts/verify_live_e2e_tts.ts:138) and points at the key-injecting fleet proxy, so a refresh needs a live PAID proxy call the tier cannot demand as a refresh condition",
   "audio-feed-9yu8":
-    "live TTS brittleness proof - its proof reads GEMINI_API_KEY, so a refresh needs a paid provider call the tier cannot demand as a refresh condition",
+    "live TTS brittleness proof - its proof names GEMINI_API_KEY only in a usage comment ('dummy-via-proxy', scripts/repro_tts_brittleness_9yu8.ts:24) and sends a dummy key to the key-injecting fleet proxy, so a refresh needs a live PAID proxy call the tier cannot demand as a refresh condition",
   "audio-feed-bp6r":
-    "live TTS failure proof - its proof reads GEMINI_API_KEY, so a refresh needs a paid provider call the tier cannot demand as a refresh condition",
+    "live TTS failure proof - its proof names GEMINI_API_KEY only in a usage comment ('dummy-via-proxy', scripts/repro_tts_failure_bp6r.ts:24) and sends a dummy key to the key-injecting fleet proxy, so a refresh needs a live PAID proxy call the tier cannot demand as a refresh condition",
   "audio-feed-u60a":
     "live TTS verify (verify_live_tts.ts, the dir KNOWN_UNRUN already pins for the live gap) - KEYLESS but PAID: the script reads no credential and sends no auth header (scripts/verify_live_tts.ts:109 sets only Content-Type), calling the provider through the fleet proxy at https://gemini.int.exe.xyz/v1beta (line 99), which injects the key server-side - so a refresh still spends against Paul's provider and the tier cannot demand it as a refresh condition",
   "audio-feed-8fc":
