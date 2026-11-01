@@ -1,0 +1,17 @@
+{
+  "script": "scripts/account-mobile-layout-proof.ts",
+  "sha": "fffb67b34b0de7e51d44e0e902ad6a5b78719ad1",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T06:04:46.102Z",
+  "endedAt": "2026-11-01T06:07:15.810Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-before-390x844.png": "sha256:24cbf4f2ee1daf1e7be426abcc5fae66ad915c6f164157a40b2887f05f97e0a1",
+    "02-after-390x844.png": "sha256:16ae7ef7c32daecd1a71fef7394e927db773ff8d865019170102666dc8a6e5d0",
+    "03-after-1280x900.png": "sha256:a0d6a5a0f34c5105a1b3d87121d14c34a1c710f252131932a3ee94cf29496534"
+  }
+}
