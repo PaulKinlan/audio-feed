@@ -18,8 +18,13 @@
  *        discovered).
  *   3. Mobile (390x844):
  *      - Verifies responsive layout and zero horizontal overflow.
- *   4. Front door (/):
- *      - Verifies bookmarklet hint and ?add= query param auto-filling.
+ *   4. Shared/bookmarklet link prefill (/account?add=&feed=):
+ *      - A link carrying ?add=/?feed= still lands the user on a prefilled add card.
+ *        It is verified on /account because that is where the prefill now lives: the
+ *        front door lost its ingest form when 0bf07a7e replaced the home page with
+ *        the explainer, and 772b1397 deleted the dead client-side prefill wiring
+ *        (src/assets/home.js). The prefill is rendered server-side in
+ *        src/routes/account.ts from the same query params.
  *
  *   deno run --allow-all --unstable-kv scripts/bookmarklet-browser-proof.ts
  */
@@ -469,32 +474,43 @@ await runProof("audio-feed-ep1", async (checker) => {
 
         await saveShot(`${OUT}04-quick-add-mobile-390.png`);
 
-        // 3. Front door (/) prefilling test
+        // 3. Shared/bookmarklet link prefill (?add=&feed=) test.
+        // NOT the front door: it has had no ingest form since 0bf07a7e (explainer home)
+        // and its dead client-side prefill wiring was deleted in 772b1397. The same
+        // query params are honoured server-side on /account (src/routes/account.ts),
+        // so a shared/bookmarklet link is verified where it actually lands: the
+        // unified quick-add card carries the add URL and the detected-feed line
+        // carries the feed (the prefill replaces #sendUrl, see checks 1B).
         await cdp("Page.navigate", {
-          url: `${BASE}/?add=${encodeURIComponent(targetUrl)}&feed=${
+          url: `${BASE}/account?add=${encodeURIComponent(targetUrl)}&feed=${
             encodeURIComponent(targetFeed)
           }`,
         });
         await until(
-          `document.readyState === "complete"`,
-          "front door loaded",
+          `!!document.getElementById("quickAddPanel")`,
+          "account prefilled from shared link",
           UNTIL_HANG_BOUND_MS,
         );
 
-        const prefilledUrl = await js(`document.getElementById("url")?.value`);
-        const prefilledFeed = await js(`document.getElementById("feed-url")?.value`);
-        check(
-          "front door pre-fills #url input from ?add= query param",
-          prefilledUrl === targetUrl,
-          `url: '${prefilledUrl}'`,
+        const sharedLinkedUrl = await js(
+          `document.querySelector("#quickAddPanel .quick-card code")?.textContent`,
         );
         check(
-          "front door pre-fills #feed-url input from ?feed= query param",
-          prefilledFeed === targetFeed,
-          `feed: '${prefilledFeed}'`,
+          "a bookmarked add URL still prefills the account quick-add card",
+          sharedLinkedUrl === targetUrl,
+          `url: '${sharedLinkedUrl}'`,
+        );
+        const sharedFeedHidden = await js(`document.getElementById("detectedFeed")?.hidden`);
+        const sharedLinkedFeed = await js(
+          `document.getElementById("detectedFeedUrl")?.textContent`,
+        );
+        check(
+          "a bookmarked feed URL still prefills the detected-feed line",
+          sharedFeedHidden === false && sharedLinkedFeed === targetFeed,
+          `hidden: ${sharedFeedHidden}, feed: '${sharedLinkedFeed}'`,
         );
 
-        await saveShot(`${OUT}05-front-door-prefilled.png`);
+        await saveShot(`${OUT}05-account-prefilled-from-shared-link.png`);
 
         const commonSections = [
           {
@@ -520,7 +536,7 @@ await runProof("audio-feed-ep1", async (checker) => {
             {
               heading: "Screenshots",
               body:
-                `- 01-account-bookmarklet-desktop.png: Account page with draggable bookmarklet widget\n- 02-quick-add-single-queued.png: Quick-add panel, single episode queued\n- 03-quick-add-subscribed.png: RSS feed subscribed in one click\n- 04-quick-add-mobile-390.png: Mobile responsive layout\n- 05-front-door-prefilled.png: Front door with prefilled inputs`,
+                `- 01-account-bookmarklet-desktop.png: Account page with draggable bookmarklet widget\n- 02-quick-add-single-queued.png: Quick-add panel, single episode queued\n- 03-quick-add-subscribed.png: RSS feed subscribed in one click\n- 04-quick-add-mobile-390.png: Mobile responsive layout\n- 05-account-prefilled-from-shared-link.png: /account quick-add card prefilled from a shared ?add=&feed= link (the front door has no ingest form since 0bf07a7e; the prefill moved server-side to /account in src/routes/account.ts)`,
             },
           ],
         });
