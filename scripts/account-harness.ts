@@ -19,6 +19,45 @@ import { memoryStores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 
 /**
+ * Pinned process clock for reproducible evidence captures (audio-feed-zey80).
+ *
+ * account-browser-proof.ts pins the BROWSER's Date/Temporal, but timestamps
+ * written by the SERVER during live flows come from this process's clock:
+ * passkeys.ts stamps a registered passkey's createdAt and lastUsedAt (and its
+ * "Passkey added <date>" name) from new Date(), and the account page renders
+ * those as absolute calendar dates — so the capture used to advance daily. Pin
+ * the harness process to the SAME instant the page pin uses (2026-10-12T03:30:
+ * 00.000Z), so every row the server writes inside the harness carries the fixed
+ * date. Production code is untouched: this is the harness process only, and
+ * ACCOUNT_HARNESS_NOW=live|now (the seeds' real-clock escape hatch) restores
+ * the real clock here too.
+ */
+const PINNED_PROCESS_MS = 1791775800000; // 2026-10-12T03:30:00.000Z
+const pinProcessClock = (() => {
+  const env = Deno.env.get("ACCOUNT_HARNESS_NOW");
+  return !(env === "live" || env === "now");
+})();
+if (pinProcessClock) {
+  const OrigDate = Date;
+  const PinnedDate = function (this: unknown, ...args: unknown[]) {
+    if (new.target) {
+      if (args.length === 0) return new OrigDate(PINNED_PROCESS_MS);
+      // deno-lint-ignore no-explicit-any
+      return new (OrigDate as any)(...args);
+    }
+    return new OrigDate(PINNED_PROCESS_MS).toString();
+  } as unknown as DateConstructor;
+  PinnedDate.now = () => PINNED_PROCESS_MS;
+  PinnedDate.parse = OrigDate.parse;
+  PinnedDate.UTC = OrigDate.UTC;
+  Object.defineProperty(PinnedDate, "prototype", { value: OrigDate.prototype });
+  globalThis.Date = PinnedDate;
+  if (typeof Temporal !== "undefined" && Temporal.Now) {
+    Temporal.Now.instant = () => Temporal.Instant.fromEpochMilliseconds(PINNED_PROCESS_MS);
+  }
+}
+
+/**
  * Fixed port for reproducible evidence screenshots (audio-feed-vc4u).
  * An ephemeral port (port 0) leaks random OS-assigned port digits into
  * screenshots (bookmarklet snippet, curl examples, and feed URLs) which breaks
