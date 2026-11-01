@@ -12,8 +12,11 @@
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
+  assertExemptionReasons,
   collect,
+  EVIDENCE_RECORD_EXEMPTIONS,
   EVIDENCE_RECORDS_ENFORCED,
+  EVIDENCE_RECORDS_ENFORCED_FOR_TESTS,
   findNestedEvidence,
   hashEvidenceDir,
   parseOptions,
@@ -23,6 +26,7 @@ import {
   RECORD_MAX_AGE_DAYS,
   referencesProofInCode,
   resolveBound,
+  resolveRecordsEnforced,
   shaIsAncestor,
   stripAnsi,
   validateRunRecord,
@@ -1305,17 +1309,27 @@ const VOLATILE_PROOF =
  * HEAD). The proof writes a DETERMINISTIC artefact (stable sha256 across runs) unless a caller passes
  * `proofSource`, which is how audio-feed-fufd0 runs the same tree with a volatile artefact.
  */
-async function makeRecordScratch(proofSource: string = DETERMINISTIC_PROOF): Promise<{
+async function makeRecordScratch(
+  proofSource: string = DETERMINISTIC_PROOF,
+  /** The evidence-dir NAME; pass a map key to exercise an exemption (the arming row does). */
+  dirName: string = "h22ml-scratch",
+): Promise<{
   root: string;
   dirAbs: string;
   ghostSha: string;
   cleanup(): Promise<void>;
 }> {
   const root = await Deno.makeTempDir({ prefix: "h22ml-" });
-  const dirAbs = join(root, "docs", "evidence", "h22ml-scratch");
+  // The built-in proofs write into docs/evidence/h22ml-scratch by path; retarget them when the
+  // evidence dir is named differently (the exemption row reuses a real map key).
+  const script = proofSource.replaceAll(
+    "docs/evidence/h22ml-scratch/",
+    `docs/evidence/${dirName}/`,
+  );
+  const dirAbs = join(root, "docs", "evidence", dirName);
   await Deno.mkdir(dirAbs, { recursive: true });
   await Deno.mkdir(join(root, "scripts"), { recursive: true });
-  await Deno.writeTextFile(join(root, "scripts", "trivial-proof.ts"), proofSource);
+  await Deno.writeTextFile(join(root, "scripts", "trivial-proof.ts"), script);
   await Deno.writeTextFile(
     join(dirAbs, "README.md"),
     "- Script: scripts/trivial-proof.ts\n- Asserts: the trivial proof passes\n",
@@ -1413,6 +1427,11 @@ Deno.test(
           "RECORD MISSING: no run.json in docs/evidence/h22ml-scratch",
         );
         assertStringIncludes(missing.stdout, "a claimed run must leave a checkable record");
+        // The incident must name the ONE command that produces the record (arming decision).
+        assertStringIncludes(
+          missing.stdout,
+          "deno task evidence --only h22ml-scratch",
+        );
       } else {
         assertEquals(missing.code, 0, "unarmed: a missing record seeds silently (amendment 1)");
         assertStringIncludes(
@@ -1678,9 +1697,26 @@ Deno.test(
     // both are exempt from the record rules rather than permanently red (audio-feed-h22ml).
     const required = declarations.filter((d) => d.exists && d.executedBy === null);
     assert(required.length > 40, "the real tree must still carry its declared evidence dirs");
+    // THE EXEMPTION MAP CANNOT PIN JUNK (KNOWN_UNRUN discipline): every entry must name a declared
+    // runnable evidence dir on THIS tree, and its reason must be non-empty - an exemption without
+    // a reason is an unexplained hole, and map drift reds here the moment the tree moves.
+    for (const [name, reason] of Object.entries(EVIDENCE_RECORD_EXEMPTIONS)) {
+      assertEquals(
+        reason.trim().length > 0,
+        true,
+        `EVIDENCE_RECORD_EXEMPTIONS["${name}"] needs a non-empty reason`,
+      );
+      assert(
+        required.some((d) => d.dir === `docs/evidence/${name}`),
+        `EVIDENCE_RECORD_EXEMPTIONS names ${name}, which is not a declared runnable evidence dir on this tree`,
+      );
+    }
+    // Exempted dirs are never required to carry a record; every other runnable dir is.
+    const exemptNames = new Set(Object.keys(EVIDENCE_RECORD_EXEMPTIONS));
+    const obligate = required.filter((d) => !exemptNames.has(d.dir.split("/").pop()!));
     const missing: string[] = [];
     const bad: string[] = [];
-    for (const declaration of required) {
+    for (const declaration of obligate) {
       const read = await readRunRecord(join(root, declaration.dir));
       if (read.state === "missing") missing.push(declaration.dir);
       else if (read.state === "unparseable") bad.push(`${declaration.dir}: ${read.error}`);
@@ -1694,17 +1730,163 @@ Deno.test(
       // SEED GATE (amendment 1): the full-tree seed has not landed yet, so this row is gated behind
       // the same constant that arms the missing-record rule; it asserts fully once that commit lands.
       console.log(
-        `[h22ml census] seed pending: ${missing.length}/${required.length} declared dirs have no ${RECORD_FILE} ` +
+        `[h22ml census] seed pending: ${missing.length}/${obligate.length} declared dirs have no ${RECORD_FILE} ` +
           `(row arms with EVIDENCE_RECORDS_ENFORCED; ${RECORD_MAX_AGE_DAYS}-day freshness is a run-path rule only)`,
       );
       return;
     }
+    // ARMED: the only runnable dirs allowed to lack a record are the PINNED PENDING SEED set
+    // below, by EXACT SET with a reason each (the KNOWN_UNRUN discipline). Heavy browser proofs
+    // still owed their seed run: seeding one means DELETING its entry here, never re-typing it.
+    // The run path keeps enforcing on these dirs - only this census row tolerates them, so the
+    // debt stays visible and shrinks to zero.
+    const PENDING_RECORD_SEED: Record<string, string> = {
+      "audio-feed-exww":
+        "live-claims browser proof (4 full-page captures against the served app) - heavy-slot seed run still owed",
+      "audio-feed-l7m1":
+        "full live end-to-end verification (browser + served app across every route) - heavy-slot seed run still owed",
+    };
+    for (const [name, reason] of Object.entries(PENDING_RECORD_SEED)) {
+      assertEquals(
+        reason.trim().length > 0,
+        true,
+        `PENDING_RECORD_SEED["${name}"] needs a non-empty reason`,
+      );
+    }
     assertEquals(
-      missing,
-      [],
-      `someone deleted the records - every declared evidence dir must carry a parseable ${RECORD_FILE}: ` +
+      missing.map((dir) => dir.split("/").pop()!).sort(),
+      Object.keys(PENDING_RECORD_SEED).sort(),
+      `the runnable dirs with no ${RECORD_FILE} must be EXACTLY the pinned pending-seed set - ` +
+        `seed the dir (deno task evidence --only <name>) and delete its pin, or pin a new dir WITH a reason: ` +
         missing.join(", "),
     );
+  },
+);
+
+Deno.test(
+  "ARMING (branch only): the production default is false and the test-only switch is the only way in",
+  () => {
+    assertEquals(
+      EVIDENCE_RECORDS_ENFORCED,
+      false,
+      "arming is Paul's decision: main must ship the seed phase until he makes it",
+    );
+    const unset = () => undefined;
+    assertEquals(resolveRecordsEnforced(unset), false, "no switch set: unarmed");
+    assertEquals(resolveRecordsEnforced(() => "0"), false, "any value but 1: unarmed");
+    assertEquals(
+      resolveRecordsEnforced((name) =>
+        name === EVIDENCE_RECORDS_ENFORCED_FOR_TESTS ? "1" : undefined
+      ),
+      true,
+      "the test-only switch arms a scratch run",
+    );
+  },
+);
+
+Deno.test(
+  "ARMING (branch only): a dir with no record FAILS a run under enforcement, and the same dir seeds quietly on the production default",
+  async () => {
+    // ARMED (test-only switch): the fresh dir's missing record is the named incident.
+    const armed = await makeRecordScratch();
+    try {
+      const run = await runTier(armed.root, [], { [EVIDENCE_RECORDS_ENFORCED_FOR_TESTS]: "1" });
+      assertEquals(run.code, 1, `armed: a missing record must fail: ${run.stdout}\n${run.stderr}`);
+      assertStringIncludes(
+        run.stdout,
+        "RECORD MISSING: no run.json in docs/evidence/h22ml-scratch",
+      );
+      // The incident must name the ONE command that produces the record.
+      assertStringIncludes(run.stdout, "deno task evidence --only h22ml-scratch");
+      assertStringIncludes(run.stdout, "ok   docs/evidence/h22ml-scratch");
+      // The writer detector is NEVER gated: the failing run still left its record.
+      assertEquals(expectOk(await readRunRecord(armed.dirAbs)).exit, 0);
+      // With the record in place, the same armed run is clean.
+      const again = await runTier(armed.root, [], { [EVIDENCE_RECORDS_ENFORCED_FOR_TESTS]: "1" });
+      assertEquals(again.code, 0, `armed with a record: ${again.stdout}\n${again.stderr}`);
+      assertEquals(again.stdout.includes("RECORD MISSING"), false);
+    } finally {
+      await armed.cleanup();
+    }
+    // UNARMED (the production default): the very same fresh dir seeds and passes.
+    const unarmed = await makeRecordScratch();
+    try {
+      const run = await runTier(unarmed.root);
+      assertEquals(run.code, 0, `production default must seed: ${run.stdout}\n${run.stderr}`);
+      assertStringIncludes(run.stdout, "has no run.json yet (seed phase");
+      assertEquals(run.stdout.includes("RECORD MISSING"), false);
+    } finally {
+      await unarmed.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "ARMING (branch only): every exempted dir passes with no record, its reason is printed and non-empty, and a dir outside the map still fails",
+  async () => {
+    // THE REAL MAP: every reason is non-empty (the run path refuses it otherwise).
+    assertExemptionReasons();
+    const names = Object.keys(EVIDENCE_RECORD_EXEMPTIONS).sort();
+    assert(names.length > 0, "the map must name the dirs it exempts");
+    for (const name of names) {
+      const reason = EVIDENCE_RECORD_EXEMPTIONS[name]!;
+      assertEquals(reason.trim().length > 0, true, `${name} needs a non-empty reason`);
+      // The fixture reuses the map's own key, so the lookup under test is the production one.
+      const h = await makeRecordScratch(DETERMINISTIC_PROOF, name);
+      try {
+        const run = await runTier(h.root, [], { [EVIDENCE_RECORDS_ENFORCED_FOR_TESTS]: "1" });
+        assertEquals(
+          run.code,
+          0,
+          `${name} must not fail under enforcement: ${run.stdout}\n${run.stderr}`,
+        );
+        assertStringIncludes(run.stdout, `docs/evidence/${name} is exempt from the record rules (`);
+        assertStringIncludes(run.stdout, reason);
+        assertEquals(
+          run.stdout.includes("RECORD MISSING"),
+          false,
+          "an exempted dir must never be told its record is missing",
+        );
+        // The writer detector is NEVER exempt: the run still wrote the record.
+        assertEquals(expectOk(await readRunRecord(h.dirAbs)).exit, 0);
+        // And with the record DELETED, the exemption still holds.
+        await Deno.remove(join(h.dirAbs, RECORD_FILE));
+        const again = await runTier(h.root, [], { [EVIDENCE_RECORDS_ENFORCED_FOR_TESTS]: "1" });
+        assertEquals(again.code, 0, `${name} must not fail with no record: ${again.stdout}`);
+        assertEquals(again.stdout.includes("RECORD MISSING"), false);
+      } finally {
+        await h.cleanup();
+      }
+    }
+    // CONTRAST: the same fixture under a name OUTSIDE the map fails the armed rules on its very
+    // first run - the exemption is a named set, not a blanket.
+    const plain = await makeRecordScratch();
+    try {
+      const run = await runTier(plain.root, [], { [EVIDENCE_RECORDS_ENFORCED_FOR_TESTS]: "1" });
+      assertEquals(run.code, 1, "a dir outside the map still fails the armed record rules");
+      assertStringIncludes(
+        run.stdout,
+        "RECORD MISSING: no run.json in docs/evidence/h22ml-scratch",
+      );
+    } finally {
+      await plain.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "ARMING (branch only): an exemption with no reason is an ERROR, not a quieter hole",
+  () => {
+    const err = assertThrows(
+      () => assertExemptionReasons({ "audio-feed-9vns": "   " }),
+      Error,
+      "an exemption without a reason is an unexplained hole",
+    );
+    assertStringIncludes(
+      err.message,
+      'EVIDENCE_RECORD_EXEMPTIONS["audio-feed-9vns"] has no reason',
+    );
+    assertThrows(() => assertExemptionReasons({ "audio-feed-9vns": "" }), Error);
   },
 );
 
