@@ -16,6 +16,8 @@
  * - until() fails at ITS deadline when the poll's evaluate never answers, instead of waiting
  *   for the evaluate for ever
  * - until() still lets a thrown expression through unwrapped and unretried
+ * - withHangBound() bounds ONE raw cdp reply that never arrives as CdpHangBoundExceeded, naming
+ *   the command, and passes a real reply's value - or its own error - through unchanged
  * - the exported MEASURED_STARVED_POLL_MS / HANG_BOUND_MS pair is still 8s and 15x it
  * - close() closes the WebSocket cleanly
  *
@@ -29,7 +31,59 @@ import {
   connectCdp,
   HANG_BOUND_MS,
   MEASURED_STARVED_POLL_MS,
+  withHangBound,
 } from "../scripts/proof-cdp.ts";
+
+Deno.test(
+  "proof-cdp: withHangBound bounds ONE raw cdp reply that never arrives as a named failure, and passes real replies and errors through unchanged",
+  async () => {
+    // The failure the bound exists for: the command was sent, the reply never comes. A promise
+    // that never settles is exactly that reply; the race must reject inside the bound with the
+    // SAME class js() uses, naming the command, so a sweep's screenshot stall is actionable
+    // instead of a silent hang past the last PASS (measured on account-browser-proof).
+    const never = new Promise<unknown>(() => {});
+    const start = Date.now();
+    const err = await withHangBound("Page.captureScreenshot", never, 150).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    const elapsed = Date.now() - start;
+    assert(
+      err instanceof CdpHangBoundExceeded,
+      `a never-answered raw reply must reject as CdpHangBoundExceeded, got ${String(err)}`,
+    );
+    const message = (err as Error).message;
+    assertStringIncludes(
+      message,
+      "cdp: the `Page.captureScreenshot` reply never arrived within 150ms",
+    );
+    assertStringIncludes(message, `${HANG_BOUND_MS}ms by default`);
+    assertStringIncludes(message, "sent exactly once");
+    assert(
+      elapsed < 5_000,
+      `an explicit 150ms raw-reply bound must fail well inside it; elapsed ${elapsed}ms`,
+    );
+
+    // A reply that DOES arrive passes through unchanged, value and type.
+    const value = await withHangBound("Page.enable", Promise.resolve({ enabled: true }), 150);
+    assertEquals(value, { enabled: true });
+
+    // A reply that arrives as an ERROR keeps its own error unwrapped - the bound converts only
+    // a reply that never comes into CdpHangBoundExceeded, never a real failure into a hang.
+    await assertRejects(
+      async () =>
+        await withHangBound("Fail.method", Promise.reject(new Error("method failed")), 150),
+      Error,
+      "method failed",
+    );
+    const realError = await withHangBound("Fail.method", Promise.reject(new Error("boom")), 150)
+      .then(() => null, (e: unknown) => e);
+    assert(
+      !(realError instanceof CdpHangBoundExceeded),
+      "a real reply error must not be reclassified as a hang",
+    );
+  },
+);
 
 Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, until, and error cases", async () => {
   const ac = new AbortController();

@@ -17,7 +17,14 @@
 
 import { HARNESS_PORT_DEFAULT } from "./harness-port.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
-import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { connectCdp, MEASURED_STARVED_POLL_MS, withHangBound } from "./proof-cdp.ts";
+import {
+  runProof,
+  SPAWN_HARNESS_HEALTH_TIMEOUT_MS,
+  spawnHarness,
+  withChrome,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-8fc/", import.meta.url).pathname;
 await Deno.mkdir(OUT, { recursive: true });
@@ -34,61 +41,46 @@ await runProof("account-browser-proof", async (checker) => {
   try {
     const BASE = harness.base;
     await withChrome(async (chrome) => {
-      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
-      const page = targets.find((t: { type: string }) => t.type === "page");
-      const ws = new WebSocket(page.webSocketDebuggerUrl);
-      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-      let nextId = 0;
-      const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-      ws.addEventListener("message", (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)!(msg);
-          pending.delete(msg.id);
-        }
-      });
+      // audio-feed-account-cdp-bound: migrated to the shared bounded client (proof-cdp.ts).
+      // The private copy's reply wait was a bare `await new Promise` on its pending map, so ONE
+      // reply that never arrived - a stalled evaluate inside until(), or one
+      // `Page.captureScreenshot` inside a sweep - parked the proof forever past its last PASS
+      // (measured twice on 2026-10-31: killed at 300s with 7 then 2 PASS lines printed and NO
+      // error ever printed). connectCdp() races every evaluate against the derived
+      // HANG_BOUND_MS and rejects as CdpHangBoundExceeded; the raw commands below (Emulation.*,
+      // Page.navigate, Page.captureScreenshot, WebAuthn.*) get the SAME derived bound through
+      // withHangBound. Nothing about what is asserted, stepped, or captured changes: only a
+      // reply that never comes now fails by name instead of hanging.
+      const client = await connectCdp({ port: chrome.port });
       // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
-        const id = ++nextId;
-        ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
-        );
-        if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-        return msg.result;
+      function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+        return withHangBound(method, client.cdp(method, params));
       }
       // deno-lint-ignore no-explicit-any
-      async function js(expression: string): Promise<any> {
-        const r = await cdp("Runtime.evaluate", {
-          expression,
-          awaitPromise: true,
-          returnByValue: true,
-          userGesture: true,
-        });
-        if (r.exceptionDetails) {
-          throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
-        }
-        return r.result.value;
+      function js(expression: string): Promise<any> {
+        return client.js(expression);
       }
       /**
-       * The two-argument until() calls below pass no timeout, so each inherits the private
-       * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
-       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
-       * measured starved floor is the unit.
+       * This host has MEASURED a bare `readyState === "complete"` evaluate legitimately
+       * exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That measured starved
+       * floor - imported from proof-cdp.ts so there is one spelling of the unit - is what
+       * UNTIL_HANG_BOUND_MS is derived from: 120s = 15 x 8s. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather than
+       * hanging until something outside the proof kills the lane - and it fails with a message
+       * naming what was asked and the budget it had.
        *
-       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
-       * bound: a page whose main thread never answers still fails, in two minutes rather
-       * than hanging until something outside the proof kills the lane - and it fails with a
-       * message naming what was asked and the budget it had.
+       * Each poll is bounded by what is LEFT of this wait's budget (the same shape as the
+       * shared client's until()): the deadline test sits BEFORE the await, so a bare
+       * `await js()` once parked the whole wait past its own deadline - the 120s argument
+       * never reached a pending evaluate. The catch-all stays: a poll that lands
+       * mid-navigation throws, and that is not a failure of the wait.
        */
-      const MEASURED_STARVED_POLL_MS = 8_000;
       const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expression: string, label: string, ms = 8000) {
         const end = Date.now() + ms;
         while (Date.now() < end) {
           try {
-            if (await js(expression)) return;
+            if (await client.js(expression, Math.max(1, end - Date.now()))) return;
           } catch { /* page mid-navigation */ }
           await sleep(100);
         }
@@ -568,18 +560,32 @@ run, on a memory store that ends with the harness.`,
           ],
         });
       } finally {
-        ws.close();
+        client.close();
       }
     }, { prefix: "audiofeed-proof-8fc-" });
   } finally {
     harness.kill();
-    await harness.process.status.catch(() => {});
+    // The reap is bounded (the same 2s window spawnHarness's own killAndReap uses): a harness
+    // that ignores SIGTERM must not park teardown past the proof that already finished. The
+    // port-refusal check below is the property that FAILS when the kill regresses; this bound
+    // only keeps that failure reachable instead of hanging ahead of it.
+    await Promise.race([
+      harness.process.status.catch(() => {}),
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 2_000);
+        Deno.unrefTimer(t);
+      }),
+    ]);
     // audio-feed-ee7pk: the reap above is correct - what was missing is a property that FAILS if it silently stops
     // working. Once the harness has been reaped its port must refuse connections; if the kill/await regresses, the
     // harness still serves and this check names it.
     let serving = true;
     for (let attempt = 1; attempt <= 5 && serving; attempt++) {
-      serving = await fetch(`${harness.base}/health`).then(() => true).catch(() => false);
+      serving = await fetch(`${harness.base}/health`, {
+        // Bound each probe (the same window spawnHarness gives its own health probes): an
+        // accepted-but-never-answered socket must not hang teardown past the proof.
+        signal: AbortSignal.timeout(SPAWN_HARNESS_HEALTH_TIMEOUT_MS),
+      }).then(() => true).catch(() => false);
       if (serving) await new Promise((r) => setTimeout(r, 100));
     }
     checker.check(
