@@ -1,0 +1,19 @@
+{
+  "script": "scripts/bookmarklet-browser-proof.ts",
+  "sha": "b320106d85ec91c6893c1224d650f3f60240d7e7",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T09:19:34.139Z",
+  "endedAt": "2026-11-01T09:23:33.634Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-account-bookmarklet-desktop.png": "sha256:fe83eea94016ce32314e4acec1678990dc5dbbe05c9850d7ffc5ff03db45cb2d",
+    "02-quick-add-single-queued.png": "sha256:1e47e90f00bbe4cab9cded26b59236a3114dca67ab1274b24367f272d16c5b0d",
+    "03-quick-add-subscribed.png": "sha256:3563fdf3317eac153de6f48b8423f04330983b70e012eea6293bc75130757d65",
+    "04-quick-add-mobile-390.png": "sha256:e3a9c44a0acc74dcfe4e0c9020d6a92f6619bf5a721f2bcedf818f080c9e787c",
+    "05-account-prefilled-from-shared-link.png": "sha256:ba54a7cfafee85b94babef4f7f603d085abc2d51bd7174ec3bb354783883a35d"
+  }
+}

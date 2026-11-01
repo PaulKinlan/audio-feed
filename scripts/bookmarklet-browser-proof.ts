@@ -536,7 +536,7 @@ await runProof("audio-feed-ep1", async (checker) => {
             {
               heading: "Screenshots",
               body:
-                `- 01-account-bookmarklet-desktop.png: Account page with draggable bookmarklet widget\n- 02-quick-add-single-queued.png: Quick-add panel, single episode queued\n- 03-quick-add-subscribed.png: RSS feed subscribed in one click\n- 04-quick-add-mobile-390.png: Mobile responsive layout\n- 05-account-prefilled-from-shared-link.png: /account quick-add card prefilled from a shared ?add=&feed= link (the front door has no ingest form since 0bf07a7e; the prefill moved server-side to /account in src/routes/account.ts)`,
+                `- 01-account-bookmarklet-desktop.png: Account page with draggable bookmarklet widget\n- 02-quick-add-single-queued.png: Quick-add panel, single episode queued\n- 03-quick-add-subscribed.png: RSS feed subscribed in one click\n- 04-quick-add-mobile-390.png: Mobile responsive layout\n- 05-account-prefilled-from-shared-link.png: /account quick-add card prefilled from a shared ?add=&feed= link. Verified on /account rather than the front door: the home page has had no ingest form since the explainer-home change named in this script header, and the prefill is rendered server-side in src/routes/account.ts. Regenerate with: deno task evidence --only audio-feed-ep1`,
             },
           ],
         });
