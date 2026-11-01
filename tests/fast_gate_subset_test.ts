@@ -732,6 +732,15 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   ], RELATIONS);
   // README.md moved out of the inert bucket for the reason recorded above: a suite reads the docs/evidence
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
+  // It now selects ONE more suite than it did, and the reason is the read FORM rather than a new reader of
+  // this file: tests/evidence_readme_regeneration_test.ts opens each evidence README as a `${dir}/README.md`
+  // TAIL path, and the derivation keeps a tail read under its BASENAME (that is how the census/run/selection
+  // entries above earn their "README.md" membership). The basename exists at the repo root, so the key is
+  // kept and this row's README.md change selects the suite. Its input is docs/evidence READMEs, not the root
+  // one, so this is over-selection in the safe direction - the same cause as the three shared entries - and
+  // it is tolerated by name below. PER ROW rather than in SHARED_OVER_SELECTION, because the suite derives
+  // NO docs/evidence/ relation by design (its evidence paths are composed at runtime, audio-feed-t9w1), so a
+  // shared entry would be failed by the liveness bound on the docs/evidence/ row at the top of this file.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
   // audio-feed-sru1b: src/server.ts sits under the whole-tree scanners' directory keys ("src", "src/"),
   // so the scanners join the bucket. And since audio-feed-38f28 its SIX proven importers are an exact
@@ -750,6 +759,13 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
     "tests/security_audit_test.ts",
     "tests/server_bootstrap_test.ts",
     "tests/tokens_test.ts",
+  ], [
+    ...SHARED_OVER_SELECTION,
+    {
+      file: "tests/evidence_readme_regeneration_test.ts",
+      why:
+        "it reads each docs/evidence README through a `${dir}/README.md` tail path, and the derivation keys a tail read on the basename - so its read lands on the root README.md this fixture changes, because that file exists at the root. It is a reader of the evidence READMEs and not of the root one: over-selection in the safe direction, and the membership is a function of the read FORM (the tail) rather than of anything in this row",
+    },
   ]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
 });
@@ -1253,37 +1269,44 @@ interface ToleratedSuite {
   why: string;
 }
 
+/** Over-selection tolerated by every selection in this file: the three suites the docs/evidence/ and
+ * "README.md" relations lend (census, run, selection). Named rather than inlined as the parameter default
+ * so a row whose selection is a different set can SPREAD these and add its own - a tolerance is asserted
+ * LIVE against the selection it is declared for, so adding a member that the other rows do not select to
+ * this shared list would fail their liveness bound instead of describing them. */
+const SHARED_OVER_SELECTION: readonly ToleratedSuite[] = [
+  {
+    file: "tests/evidence_census_test.ts",
+    why:
+      "the census script walks docs/evidence/ and scripts/*.ts, so it derives both directory relations; its membership flips with unrelated census-script text (the measured comma bug), so it is tolerated rather than required",
+  },
+  {
+    file: "tests/evidence_run_test.ts",
+    why:
+      "the suite feeds docs/evidence README paths to the evidence-run checks, so it observes evidence-file changes through the docs/evidence/ directory key",
+  },
+  {
+    file: "tests/evidence_selection_test.ts",
+    why:
+      "the suite feeds docs/evidence README paths to the selection checks, so it observes evidence-file changes through the docs/evidence/ directory key",
+  },
+  // audio-feed-amho REMOVED A DECLARATION FROM THIS LIST, and the reason it is recorded here rather
+  // than silently dropped is that its absence from the diff is otherwise indistinguishable from an
+  // oversight. tests/chrome_profile_sweep_sites_test.ts used to be tolerated as an over-selector
+  // because it imported maskNonCode()/firstArgument() from scripts/evidence-census.ts - a pure string
+  // utility living in a module that WALKS DIRECTORIES, so the relation closure (depth 2, recorded per
+  // suite) lent the suite docs/evidence/ and scripts/ relations it never observes. Those helpers now
+  // live in scripts/source-mask.ts, which reads nothing: the suite derives NO relation, and it is
+  // therefore selected only for what it really reads. The declaration is gone because the CAUSE is
+  // gone, not because the assertion was loosened - `required` is unchanged and `unexpected` still
+  // fails - so if this suite ever needs a declaration here again, that means a module it imports has
+  // started lending it directory relations and the reason should be re-derived rather than assumed.
+];
+
 function assertSelected(
   actual: readonly string[] | null | undefined,
   required: readonly string[],
-  overSelection: readonly ToleratedSuite[] = [
-    {
-      file: "tests/evidence_census_test.ts",
-      why:
-        "the census script walks docs/evidence/ and scripts/*.ts, so it derives both directory relations; its membership flips with unrelated census-script text (the measured comma bug), so it is tolerated rather than required",
-    },
-    {
-      file: "tests/evidence_run_test.ts",
-      why:
-        "the suite feeds docs/evidence README paths to the evidence-run checks, so it observes evidence-file changes through the docs/evidence/ directory key",
-    },
-    {
-      file: "tests/evidence_selection_test.ts",
-      why:
-        "the suite feeds docs/evidence README paths to the selection checks, so it observes evidence-file changes through the docs/evidence/ directory key",
-    },
-    // audio-feed-amho REMOVED A DECLARATION FROM THIS LIST, and the reason it is recorded here rather
-    // than silently dropped is that its absence from the diff is otherwise indistinguishable from an
-    // oversight. tests/chrome_profile_sweep_sites_test.ts used to be tolerated as an over-selector
-    // because it imported maskNonCode()/firstArgument() from scripts/evidence-census.ts - a pure string
-    // utility living in a module that WALKS DIRECTORIES, so the relation closure (depth 2, recorded per
-    // suite) lent the suite docs/evidence/ and scripts/ relations it never observes. Those helpers now
-    // live in scripts/source-mask.ts, which reads nothing: the suite derives NO relation, and it is
-    // therefore selected only for what it really reads. The declaration is gone because the CAUSE is
-    // gone, not because the assertion was loosened - `required` is unchanged and `unexpected` still
-    // fails - so if this suite ever needs a declaration here again, that means a module it imports has
-    // started lending it directory relations and the reason should be re-derived rather than assumed.
-  ],
+  overSelection: readonly ToleratedSuite[] = SHARED_OVER_SELECTION,
 ): void {
   assert(
     actual !== null && actual !== undefined,
