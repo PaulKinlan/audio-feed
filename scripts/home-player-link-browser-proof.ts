@@ -377,7 +377,9 @@ try {
         title: "Front door player links",
         script: "scripts/home-player-link-browser-proof.ts",
         asserts: ASSERTS,
-        notes: ["Captures are 256-colour PNG8, quantised in place by the proof before the run record is sealed (audio-feed-s6w2q)"],
+        notes: [
+          "Captures are 256-colour PNG8, quantised in place by the proof before the run record is sealed (audio-feed-s6w2q)",
+        ],
         checker,
       });
     }
