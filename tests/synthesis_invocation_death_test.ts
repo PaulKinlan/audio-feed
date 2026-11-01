@@ -267,7 +267,18 @@ Deno.test(
         }
         assert(reported !== null, "the parent must throw on a marker-less child stop, not pass");
         assert(reported instanceof Error);
-        assertStringIncludes(reported.message, "never reached uploading_audio");
+        // audio-feed-aqms-window P1: this asserted the exact wording "never reached
+        // uploading_audio", but killDuringUpload has TWO throw sites for a marker-less stop
+        // - the child-exit branch above (line ~113, "child round N exited before
+        // uploading_audio (signal ...)") and the EOF branch below it (~line 120, "child
+        // round N never reached uploading_audio ..."). With the zero window the child exits
+        // almost immediately, so the child-exit branch wins the read/exit race often enough
+        // that the wording assert was itself a coin flip - a fresh intermittent failure
+        // inside the test added to remove one. Pin what BOTH messages say: the round, and
+        // the marker-less stop at the upload stage. It still fails if the parent stops
+        // throwing, and it still fails on an unrelated error (no round, no phase name).
+        assertStringIncludes(reported.message, `child round 10`);
+        assertStringIncludes(reported.message, "uploading_audio");
       } finally {
         await Deno.remove(reportKvPath).catch(() => {});
       }

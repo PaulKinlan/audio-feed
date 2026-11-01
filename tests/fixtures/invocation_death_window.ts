@@ -20,8 +20,15 @@
  *       red-path case sets 0, which stops the child WITHOUT the marker
  *       deterministically: the give-up becomes a controlled event instead of a
  *       race with host load.
+ *
+ * MEASURED_STARVED_POLL_MS is IMPORTED, not restated: it was a second literal
+ * 8_000 here with nothing pinning it to the measured floor, so a change to
+ * scripts/proof-cdp.ts would have left this 15x derivation silently deriving
+ * from a stale number. proof-cdp.ts imports nothing and runs nothing at import
+ * time (constants, a class and async helpers), so the import cannot cycle - and
+ * tests/ already imports it (anchor_positioning_test.ts, proof_cdp_test.ts).
  */
-export const MEASURED_STARVED_POLL_MS = 8_000;
+import { MEASURED_STARVED_POLL_MS } from "../../scripts/proof-cdp.ts";
 
 /** The repo's standard headroom multiplier over the starved floor (HANG_BOUND_MS). */
 export const MARKER_WAIT_HEADROOM = 15;
