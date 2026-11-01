@@ -1,0 +1,16 @@
+{
+  "script": "scripts/verify_ieek_canonical_urls.ts",
+  "sha": "fffb67b34b0de7e51d44e0e902ad6a5b78719ad1",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T05:10:17.977Z",
+  "endedAt": "2026-11-01T05:11:42.280Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-listen-canonical-playback.png": "sha256:e113b2e18c77eb551ffe0fba2a91e1891338d46343acd15a5b9f285268cb5356",
+    "verification.json": "sha256:fe7df9a10a151b9dc08af40f20180c808e7a52920f159d0c9f97930a56e97cfb"
+  }
+}
