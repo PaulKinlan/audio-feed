@@ -208,3 +208,44 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
 
   return { ws, cdp, js, until, close };
 }
+
+/**
+ * Bound ONE raw CDP round-trip that has no `Runtime.evaluate` to carry `js()`'s race.
+ *
+ * `js()` bounds evaluates, but proofs also send raw commands through `cdp()` -
+ * `Emulation.setEmulatedMedia`, `Emulation.setDeviceMetricsOverride`, `Page.captureScreenshot`,
+ * `WebAuthn.*` - and each of those waits on the same kind of bare reply promise. One screenshot
+ * request the browser never answers would hang the caller for as long as the lane lives (measured:
+ * account-browser-proof printed 11/11 PASS and never exited). This wraps any single reply promise
+ * in the SAME derived bound js() uses and rejects with the SAME class, so a caller's catch block
+ * can treat a starved screenshot exactly like a starved evaluate. The command itself is sent
+ * exactly once by the caller; this only bounds the wait for its answer.
+ */
+export async function withHangBound<T>(
+  what: string,
+  reply: Promise<T>,
+  timeoutMs = HANG_BOUND_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | 0 = 0;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new CdpHangBoundExceeded(
+            `cdp: the \`${what}\` reply never arrived within ${timeoutMs}ms - the hang bound ` +
+              `in force (${HANG_BOUND_MS}ms by default, 15 x the ${MEASURED_STARVED_POLL_MS}ms ` +
+              `measured starved-poll floor, audio-feed-6gst1). This is a HANG bound on ONE CDP ` +
+              `reply, not a latency bound: the command was sent exactly once and the browser ` +
+              `never answered it, so the browser's main thread (or the DevTools socket) stalled ` +
+              `rather than the page being slow.`,
+          ),
+        ),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([reply, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
