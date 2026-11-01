@@ -1,0 +1,17 @@
+{
+  "script": "scripts/bookmarklet-browser-proof.ts",
+  "sha": "25c7eb4845a91f2cd318dbf87c593f5b11031d0f",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T06:19:43.032Z",
+  "endedAt": "2026-11-01T06:24:11.533Z",
+  "exit": 1,
+  "marker": true,
+  "artefacts": {
+    "01-unified-card-no-feed.png": "sha256:8456ede908316423369e86239c8b3d39e5972248c0216eb765b840bedc4e2e2e",
+    "02-unified-card-discovered-feed.png": "sha256:7deb442ad0c88d30881ae841e9d77ff1574a038c3214ed7c339f6dbf69a32276",
+    "03-unified-card-subscribed.png": "sha256:6ce4621b230de337b034c76ad3f18ee2d03e6d6b0631fa33a84415023d0f20a9"
+  }
+}
