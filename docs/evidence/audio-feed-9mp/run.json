@@ -1,0 +1,15 @@
+{
+  "script": "scripts/spend-visibility-browser-proof.ts",
+  "sha": "05599d55648370ae783fa429282d4ccfe56e5efc",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T02:14:03.709Z",
+  "endedAt": "2026-11-01T02:14:38.300Z",
+  "exit": 1,
+  "marker": true,
+  "artefacts": {
+    "01-admin-spend-visibility.png": "sha256:906c98bfa9553ed41e0c969049fa8e5d47432dd8c8078c677465f6efaa50b3ca"
+  }
+}

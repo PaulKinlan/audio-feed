@@ -1,0 +1,15 @@
+{
+  "script": "scripts/verify_qz3x_confirm_dismiss_browser.ts",
+  "sha": "05599d55648370ae783fa429282d4ccfe56e5efc",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T02:18:14.609Z",
+  "endedAt": "2026-11-01T02:18:31.420Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-second-dialog-open.png": "sha256:d1132c65c8226acacf963e06c9aa70983f0ca198245b444dfb50390e27070303"
+  }
+}

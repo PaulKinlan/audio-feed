@@ -1,0 +1,15 @@
+{
+  "script": "scripts/verify_3asd_bookmarklet_browser.ts",
+  "sha": "9e25774f2437d49e4bf674d4905491a746104c20",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T02:19:49.809Z",
+  "endedAt": "2026-11-01T02:20:15.501Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-bookmarklet-disclosure-open.png": "sha256:29c8414fc737c2bc8239fcd62fee508860b1089c3b5cf1a1a1f2b71998b3fc6c"
+  }
+}
