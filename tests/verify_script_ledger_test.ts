@@ -42,7 +42,7 @@ const SOURCE_TEXT_AUDITS: Readonly<Record<string, string>> = {
   "scripts/verify_c0gj_scanner_divergence.ts":
     "read as data by the two c0gj suites that pin its scanner's linear-complexity property; the script's own end-to-end scan of the real tree is not run by any suite",
   "scripts/verify_live_tts.ts":
-    "its evidence-dir resolution helpers are imported and asserted by tests/verify_live_e2e_tts_output_test.ts; the live TTS run itself needs GEMINI_API_KEY and is not executed",
+    "its evidence-dir resolution helpers are imported and asserted by tests/verify_live_e2e_tts_output_test.ts; the live TTS run itself is KEYLESS but PAID - it reads no credential and sends no auth header, calling through the fleet proxy at https://gemini.int.exe.xyz/v1beta which injects the key server-side - and is not executed",
   "scripts/verify_live_e2e_tts.ts":
     "its evidence-dir resolution helpers are imported and asserted by tests/verify_live_e2e_tts_output_test.ts; the live end-to-end run needs GEMINI_API_KEY and is not executed",
   "scripts/verify_main_l7m1_e2e.ts":
