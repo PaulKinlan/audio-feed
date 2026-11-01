@@ -529,16 +529,32 @@ export async function hashEvidenceDir(dirAbs: string): Promise<Record<string, st
 
 /**
  * fleet/only-isolation: an in-memory snapshot of one evidence dir's artefacts, taken before a
- * `--allow-siblings` run so the sibling can be verified and restored afterwards. Same exclusions
- * as hashEvidenceDir (top-level README.md and run.json stay out); the BYTES are kept, not hashes,
- * because restoring is the point - a hash alone could detect the tamper but not undo it. A few
- * hundred KB per dir.
+ * `--allow-siblings` run so the sibling can be verified and restored afterwards. The BYTES are
+ * kept, not hashes, because restoring is the point - a hash alone could detect the tamper but not
+ * undo it. A few hundred KB per dir.
  */
 export interface EvidenceDirSnapshot {
   /** Whether the directory existed at snapshot time. */
   existed: boolean;
   /** dir-relative path -> bytes, for every artefact present at snapshot time. */
   files: Map<string, Uint8Array>;
+  /**
+   * dir-relative directory -> whether it existed at snapshot time. `""` is the snapshot dir
+   * itself, so a run that CREATED the whole dir can have it removed again (restoring state means
+   * removing what was not there, not just the leaves).
+   */
+  dirs: Set<string>;
+  /**
+   * Whether top-level README.md/run.json were snapshotted as ordinary artefacts.
+   *
+   * A SIBLING keeps them: the proof can overwrite a sibling's README.md or run.json too, and the
+   * top-level `RECORD_EXCLUDED` guard exists for hashEvidenceDir's validation walk, not for
+   * restoring bytes - a restore that skipped them would silently keep the tampered record (the
+   * sibling's record is never validated by this tier, so nothing else would catch it either).
+   * Restore reads this flag from the snapshot rather than taking it again, so a snapshot and its
+   * restore can never disagree about which files were in scope.
+   */
+  keepsRecordFiles: boolean;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -547,9 +563,18 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-/** Snapshot every artefact of one evidence dir (fleet/only-isolation). Symlinks are skipped, as in hashEvidenceDir. */
-export async function snapshotEvidenceDir(dirAbs: string): Promise<EvidenceDirSnapshot> {
+/**
+ * Snapshot every artefact of one evidence dir (fleet/only-isolation). Symlinks are skipped, as in
+ * hashEvidenceDir. `keepRecordFiles` decides whether the top-level README.md/run.json travel with
+ * the snapshot; a sibling of an `--only` run does (see EvidenceDirSnapshot.keepsRecordFiles).
+ */
+export async function snapshotEvidenceDir(
+  dirAbs: string,
+  options: { keepRecordFiles?: boolean } = {},
+): Promise<EvidenceDirSnapshot> {
+  const keepRecordFiles = options.keepRecordFiles === true;
   const files = new Map<string, Uint8Array>();
+  const dirs = new Set<string>();
   let existed = true;
   try {
     await Deno.stat(dirAbs);
@@ -558,6 +583,7 @@ export async function snapshotEvidenceDir(dirAbs: string): Promise<EvidenceDirSn
   }
   async function walk(rel: string): Promise<void> {
     const abs = rel === "" ? dirAbs : join(dirAbs, rel);
+    dirs.add(rel);
     const entries: Deno.DirEntry[] = [];
     for await (const entry of Deno.readDir(abs)) entries.push(entry);
     entries.sort((a, b) => (a.name < b.name ? -1 : 1));
@@ -568,26 +594,31 @@ export async function snapshotEvidenceDir(dirAbs: string): Promise<EvidenceDirSn
         await walk(childRel);
         continue;
       }
-      if (rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
+      if (!keepRecordFiles && rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
       files.set(childRel, await Deno.readFile(join(dirAbs, childRel)));
     }
   }
   if (existed) await walk("");
-  return { existed, files };
+  return { existed, files, dirs, keepsRecordFiles: keepRecordFiles };
 }
 
 /**
  * Restore a snapshot after a run (fleet/only-isolation): files the run created are REMOVED, files
- * it rewrote or deleted are rewritten with their snapshot bytes. Returns what it did, sorted, so
- * the caller can print it; an empty pair means the sibling was verified unchanged.
+ * it rewrote or deleted are rewritten with their snapshot bytes, and directories the run created
+ * are removed deepest-first once they are empty (removing the files alone leaves an empty `sub/`
+ * behind, which is state the sibling never had). A non-empty directory is left alone and its
+ * contents are the restore's next business, not a reason to delete them. Returns what it did,
+ * sorted, so the caller can print it; empty lists mean the sibling was verified unchanged.
  */
 export async function restoreEvidenceSnapshot(
   dirAbs: string,
   snapshot: EvidenceDirSnapshot,
-): Promise<{ restored: string[]; removed: string[] }> {
+): Promise<{ restored: string[]; removed: string[]; removedDirs: string[] }> {
   const restored: string[] = [];
   const removed: string[] = [];
+  const removedDirs: string[] = [];
   const onDisk = new Set<string>();
+  const onDiskDirs = new Set<string>();
   let dirExists = true;
   try {
     await Deno.stat(dirAbs);
@@ -596,6 +627,7 @@ export async function restoreEvidenceSnapshot(
   }
   async function walk(rel: string): Promise<void> {
     const abs = rel === "" ? dirAbs : join(dirAbs, rel);
+    onDiskDirs.add(rel);
     const entries: Deno.DirEntry[] = [];
     for await (const entry of Deno.readDir(abs)) entries.push(entry);
     entries.sort((a, b) => (a.name < b.name ? -1 : 1));
@@ -606,7 +638,7 @@ export async function restoreEvidenceSnapshot(
         await walk(childRel);
         continue;
       }
-      if (rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
+      if (!snapshot.keepsRecordFiles && rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
       onDisk.add(childRel);
     }
   }
@@ -631,7 +663,32 @@ export async function restoreEvidenceSnapshot(
       restored.push(name);
     }
   }
-  return { restored, removed };
+  // Directories the run created, deepest first, so a created `sub/` empties before its parent is
+  // considered. `""` is included only when the dir itself did not exist at snapshot time.
+  const createdDirs = [...onDiskDirs].filter((rel) => !snapshot.dirs.has(rel)).sort((a, b) =>
+    depth(b) - depth(a) || (a < b ? 1 : -1)
+  );
+  for (const rel of createdDirs) {
+    const abs = rel === "" ? dirAbs : join(dirAbs, rel);
+    let empty = true;
+    try {
+      for await (const _entry of Deno.readDir(abs)) {
+        empty = false;
+        break;
+      }
+    } catch {
+      empty = false; // vanished or unreadable: not this restore's to claim
+    }
+    if (!empty) continue;
+    await Deno.remove(abs);
+    removedDirs.push(rel);
+  }
+  return { restored, removed, removedDirs };
+}
+
+/** dir-relative path depth: `""` is 0, `a` is 1, `a/b` is 2 - the deepest-first sort key. */
+function depth(rel: string): number {
+  return rel === "" ? 0 : rel.split("/").length;
 }
 
 export interface RecordValidationContext {
@@ -1300,7 +1357,12 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       for (const sibling of siblings) {
         console.error(
           `[evidence] FAIL --only ${options.only} -> ${selected.declared} ` +
-            `(SIBLING WRITE: this script also declares ${sibling.dir} - running it under --only ` +
+            `(SIBLING WRITE: this script also declares ${sibling.dir}` +
+            // A sibling whose record a test suite owns is a different refusal: the direct run
+            // rewrites evidence the suite is responsible for, so name the owner rather than
+            // letting both cases read as "another dir a script happens to write".
+            (sibling.executedBy ? ` (SUITE-OWNED: executed by ${sibling.executedBy})` : "") +
+            ` - running it under --only ` +
             `would rewrite the sibling's recorded evidence and break its run.json record)`,
         );
       }
@@ -1319,7 +1381,14 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       );
       for (const sibling of siblings) {
         const abs = join(options.root, sibling.dir);
-        siblingSnapshots.push({ dir: sibling.dir, abs, ...await snapshotEvidenceDir(abs) });
+        // A sibling keeps its README.md/run.json: this tier never writes a sibling's record, so
+        // those two files are pure proof-written state here and a restore that skipped them would
+        // leave a tampered record in place (P2, fleet/onlyiso-p2).
+        siblingSnapshots.push({
+          dir: sibling.dir,
+          abs,
+          ...await snapshotEvidenceDir(abs, { keepRecordFiles: true }),
+        });
       }
     }
   }
@@ -1437,7 +1506,10 @@ export async function main(args: string[] = Deno.args): Promise<void> {
   for (const snap of siblingSnapshots) {
     try {
       const outcome = await restoreEvidenceSnapshot(snap.abs, snap);
-      if (outcome.restored.length === 0 && outcome.removed.length === 0) {
+      if (
+        outcome.restored.length === 0 && outcome.removed.length === 0 &&
+        outcome.removedDirs.length === 0
+      ) {
         console.log(`[evidence] sibling ${snap.dir} verified unchanged after the --only run`);
       } else {
         console.log(
@@ -1445,11 +1517,19 @@ export async function main(args: string[] = Deno.args): Promise<void> {
             (outcome.removed.length > 0
               ? `, removed ${outcome.removed.length} file(s) the run created`
               : "") +
+            (outcome.removedDirs.length > 0
+              ? `, removed ${outcome.removedDirs.length} empty dir(s) the run created`
+              : "") +
             ` - the sibling's record stays truthful`,
         );
         for (const name of outcome.restored) console.log(`  restored ${snap.dir}/${name}`);
         for (const name of outcome.removed) {
           console.log(`  removed ${snap.dir}/${name} (created by the --only run)`);
+        }
+        for (const rel of outcome.removedDirs) {
+          console.log(
+            `  removed ${snap.dir}/${rel} (directory created by the --only run)`,
+          );
         }
       }
     } catch (err) {
