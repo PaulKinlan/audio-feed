@@ -217,8 +217,101 @@ export const RECORD_MAX_AGE_DAYS = 30;
  *    missing-record incident on in the run path.
  * 4. NOTHING ELSE IS GATED on this constant: the post-run "the tier ran <dir> and wrote no
  *    record" guarantee is always on, because it is the detector for the silence this bead closes.
+ *
+ * PRE-STAGED - BRANCH ONLY (fleet/arm-records): this constant STAYS FALSE on main until Paul
+ * decides. fleet/arm-records carries the rest of the arming (the reasoned exemption map below and
+ * the rows in tests/evidence_run_test.ts) so a yes is a merge, not a queue position. The decision it
+ * pre-stages: the seed at d6a968ed carries valid records for the runnable dirs except the ones named
+ * below - 4 live-TTS dirs that each need a real PAID provider call, audio-feed-8fc excluded on
+ * measured COST, and audio-feed-exww + audio-feed-l7m1 still owed a heavy browser seed (pinned as
+ * PENDING_RECORD_SEED in tests/evidence_run_test.ts). Suite-owned dirs are exempt through the `- Executed by:` skip
+ * (audio-feed-8u4x1, audio-feed-np5). Arming adds NO reads, NO hashing and NO proof re-runs: the
+ * record pre-flight below runs identically armed or not, so the only change is that a MISSING record
+ * stops being a seeded note and becomes a non-zero exit.
  */
 export const EVIDENCE_RECORDS_ENFORCED = false;
+
+/**
+ * TEST-ONLY switch for the constant above (arming branch): the tests must exercise the ARMED run
+ * path while the production default stays false, and the tier is spawned as a subprocess, so the
+ * switch has to cross a process boundary. It can only ever turn enforcement ON for a scratch tree
+ * (the tests pass `--root <tempdir>`); production arming is still the constant, decided by Paul.
+ * Nothing in this repo sets it outside tests/evidence_run_test.ts.
+ */
+export const EVIDENCE_RECORDS_ENFORCED_FOR_TESTS = "EVIDENCE_RECORDS_ENFORCED_FOR_TESTS";
+
+/** Resolves the enforcement decision once per run: the constant, plus the test-only switch. */
+export function resolveRecordsEnforced(
+  env: (name: string) => string | undefined = (name) => Deno.env.get(name),
+): boolean {
+  return EVIDENCE_RECORDS_ENFORCED || env(EVIDENCE_RECORDS_ENFORCED_FOR_TESTS) === "1";
+}
+
+/**
+ * The record-rule exemptions (arming decision, Paul pending): declared evidence dirs the RUN path
+ * does NOT hold to the record rules, pinned by EXACT SET with a one-line reason each - the same
+ * discipline as KNOWN_UNRUN in tests/evidence_census_test.ts. Keys are evidence-dir NAMES (the
+ * same currency as --only). An entry means: the dir's missing or stale record is never a run-path
+ * incident; the tier prints the reason as a note instead, and the proof still runs and still
+ * writes its record - the post-run writer detector is NEVER exempt, because a run that executed
+ * must leave a record.
+ *
+ * AN EMPTY OR WHITESPACE-ONLY REASON IS AN ERROR: assertExemptionReasons() runs before any proof
+ * in main(), so a reasonless entry exits the tier non-zero rather than silently widening the hole.
+ *
+ * Suite-owned dirs are deliberately NOT entries here: they are exempt through the `- Executed by:`
+ * skip (audio-feed-8u4x1 -> tests/exww_mutants_test.ts, audio-feed-np5 ->
+ * tests/outbox_proof_test.ts), whose ownership rules already pin them; restating them here would
+ * buy silence if that ownership ever broke. THE SET IS CLOSED: an entry is added only with a
+ * measured reason, never for convenience.
+ *
+ * Each reason below was checked against the dir's own README.md and its declared proof script, not
+ * carried over. All four live-TTS dirs share ONE credential shape - a LIVE PAID PROXY CALL with the
+ * real key injected server-side, no credential read or transmitted by the caller:
+ *   - verify_live_tts.ts (u60a) sends no auth header at all (scripts/verify_live_tts.ts:109 sets
+ *     only Content-Type).
+ *   - verify_live_e2e_tts.ts (9vns) SETS the env var itself as a placeholder
+ *     (`Deno.env.set("GEMINI_API_KEY", "proxy-managed")`, scripts/verify_live_e2e_tts.ts:138) next
+ *     to the proxy base URL (:137) - it never reads a caller-supplied credential.
+ *   - repro_tts_brittleness_9yu8.ts (9yu8) and repro_tts_failure_bp6r.ts (bp6r) name GEMINI_API_KEY
+ *     only in a usage comment (`dummy-via-proxy`, :24 in each) and send a dummy key to the proxy
+ *     (their own note: "gemini.int.exe.xyz injects Paul's real API key; the client sends a dummy
+ *     key").
+ *   What a refresh genuinely needs for all four is a live PAID call through the fleet proxy at
+ *   `https://gemini.int.exe.xyz/v1beta`, which injects the key server-side - same cost, no key.
+ * audio-feed-8fc's COST is the duration in its own run.json
+ * (2026-11-01T01:20:45.807Z -> 01:28:36.645Z = 470.8s for 32 full-page captures).
+ */
+export const EVIDENCE_RECORD_EXEMPTIONS: Record<string, string> = {
+  "audio-feed-9vns":
+    "live end-to-end TTS verify - its proof SETS GEMINI_API_KEY itself as a placeholder ('proxy-managed', scripts/verify_live_e2e_tts.ts:138) and points at the key-injecting fleet proxy, so a refresh needs a live PAID proxy call the tier cannot demand as a refresh condition",
+  "audio-feed-9yu8":
+    "live TTS brittleness proof - its proof names GEMINI_API_KEY only in a usage comment ('dummy-via-proxy', scripts/repro_tts_brittleness_9yu8.ts:24) and sends a dummy key to the key-injecting fleet proxy, so a refresh needs a live PAID proxy call the tier cannot demand as a refresh condition",
+  "audio-feed-bp6r":
+    "live TTS failure proof - its proof names GEMINI_API_KEY only in a usage comment ('dummy-via-proxy', scripts/repro_tts_failure_bp6r.ts:24) and sends a dummy key to the key-injecting fleet proxy, so a refresh needs a live PAID proxy call the tier cannot demand as a refresh condition",
+  "audio-feed-u60a":
+    "live TTS verify (verify_live_tts.ts, the dir KNOWN_UNRUN already pins for the live gap) - KEYLESS but PAID: the script reads no credential and sends no auth header (scripts/verify_live_tts.ts:109 sets only Content-Type), calling the provider through the fleet proxy at https://gemini.int.exe.xyz/v1beta (line 99), which injects the key server-side - so a refresh still spends against Paul's provider and the tier cannot demand it as a refresh condition",
+  "audio-feed-8fc":
+    "exempt on COST, not correctness: its own run.json measures 470.8s per run (2026-11-01T01:20:45.807Z -> 01:28:36.645Z) for 32 sequential full-page captures (8 pages x 2 widths x 2 schemes), so the 30-day freshness rule would schedule an ~8-minute browser proof on every lane",
+};
+
+/**
+ * An exemption without a reason is an unexplained hole, so the run path REFUSES one: called from
+ * main() before the first proof, it throws on an empty or whitespace-only reason. Exported so
+ * tests/evidence_run_test.ts can prove the refusal on the real map and on a blanked one without
+ * needing a run.
+ */
+export function assertExemptionReasons(
+  map: Record<string, string> = EVIDENCE_RECORD_EXEMPTIONS,
+): void {
+  for (const [name, reason] of Object.entries(map)) {
+    if ((reason ?? "").trim() === "") {
+      throw new Error(
+        `EVIDENCE_RECORD_EXEMPTIONS["${name}"] has no reason - an exemption without a reason is an unexplained hole`,
+      );
+    }
+  }
+}
 
 /** The record itself, written after every proof run (audio-feed-h22ml). */
 export interface RunRecord {
@@ -722,7 +815,8 @@ export async function validateRunRecord(
     if (ctx.recordsEnforced) {
       incidents.push(
         `RECORD MISSING: no ${RECORD_FILE} in ${ctx.dir} - a claimed run must leave a checkable record ` +
-          `(the proof runs anyway; it seeds a fresh one)`,
+          `(produce one: deno task evidence --only ${ctx.dir.split("/").pop()}; ` +
+          `the proof runs anyway and seeds a fresh record)`,
       );
     }
     return incidents;
@@ -1411,6 +1505,10 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     );
     Deno.exit(1);
   }
+  // Refuse a reasonless exemption BEFORE one proof runs: an exemption without a reason is an
+  // unexplained hole, so it is an error rather than a wider silence.
+  assertExemptionReasons();
+  const recordsEnforced = resolveRecordsEnforced();
   const debt = printDebt();
   const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
   const suiteOwned: Declaration[] = [];
@@ -1445,8 +1543,17 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       // post-run guarantee is what catches a broken writer even during the seed phase.
       const bound = resolveBound(options, declaration);
       const dirAbs = join(options.root, declaration.dir);
+      const dirName = declaration.dir.split("/").pop()!;
+      const exemption = EVIDENCE_RECORD_EXEMPTIONS[dirName];
       const pre = await readRunRecord(dirAbs);
-      if (pre.state === "missing" && !EVIDENCE_RECORDS_ENFORCED) {
+      if (exemption !== undefined) {
+        // Arming decision: an exempted dir's record is never a run-path incident. The reason is
+        // printed, the proof still runs, and the post-run writer detector below still applies -
+        // a run that executed must leave a record, exempt or not.
+        console.log(
+          `[evidence] note: ${declaration.dir} is exempt from the record rules (${exemption})`,
+        );
+      } else if (pre.state === "missing" && !recordsEnforced) {
         console.log(
           `[evidence] note: ${declaration.dir} has no ${RECORD_FILE} yet (seed phase: writing one this run)`,
         );
@@ -1456,7 +1563,7 @@ export async function main(args: string[] = Deno.args): Promise<void> {
           const incident of await validateRunRecord(pre, {
             root: options.root,
             dir: declaration.dir,
-            recordsEnforced: EVIDENCE_RECORDS_ENFORCED,
+            recordsEnforced,
             historyCheckable,
           })
         ) {

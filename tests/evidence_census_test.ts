@@ -969,9 +969,9 @@ const KNOWN_UNRUN: Record<string, string> = {
   "verify_kvnw_account_bookmarklet_browser.ts":
     "account bookmarklet verification in a real Chrome (withChrome) - not gate-safe",
   "verify_live_e2e_tts.ts":
-    "live end-to-end TTS run - needs GEMINI_API_KEY (only its evidence-dir helpers are imported and asserted, by tests/verify_live_e2e_tts_output_test.ts)",
+    "live end-to-end TTS run - LIVE PAID PROXY CALL: the script sets GEMINI_API_KEY itself as a placeholder ('proxy-managed', scripts/verify_live_e2e_tts.ts:138) and the fleet proxy injects the real key server-side, so a run spends money with no caller-supplied credential read (only its evidence-dir helpers are imported and asserted, by tests/verify_live_e2e_tts_output_test.ts)",
   "verify_live_tts.ts":
-    "live TTS run - needs GEMINI_API_KEY (only its evidence-dir helpers are imported and asserted, by tests/verify_live_e2e_tts_output_test.ts)",
+    "live TTS run - KEYLESS but PAID: reads no credential and sends no auth header, calling through the fleet proxy at https://gemini.int.exe.xyz/v1beta which injects the key server-side (only its evidence-dir helpers are imported and asserted, by tests/verify_live_e2e_tts_output_test.ts)",
   "verify_qz3x_confirm_dismiss_browser.ts": "real-browser proof (withChrome) - not gate-safe",
   "voice-audition-browser-proof.ts":
     "real-browser voice-audition proof (withChrome) - not gate-safe",
