@@ -23,6 +23,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-6y9/", import.meta.url).pathname;
 
@@ -246,6 +247,7 @@ await runProof("audio-feed-6y9", async (checker) => {
         `${OUT}01-admin-retry-failed-episodes.png`,
         Uint8Array.from(atob(shotAdmin.data), (c) => c.charCodeAt(0)),
       );
+      await quantiseEvidencePng(`${OUT}01-admin-retry-failed-episodes.png`);
       console.log(`Saved screenshot to ${OUT}01-admin-retry-failed-episodes.png`);
 
       // 2. Visit /listen/:token (player)
@@ -288,6 +290,7 @@ await runProof("audio-feed-6y9", async (checker) => {
         `${OUT}02-player-activity-failed-episode.png`,
         Uint8Array.from(atob(shotPlayer.data), (c) => c.charCodeAt(0)),
       );
+      await quantiseEvidencePng(`${OUT}02-player-activity-failed-episode.png`);
       console.log(`Saved screenshot to ${OUT}02-player-activity-failed-episode.png`);
 
       // 3. Visit /account
@@ -323,6 +326,7 @@ await runProof("audio-feed-6y9", async (checker) => {
         `${OUT}03-account-retry-failed-episodes.png`,
         Uint8Array.from(atob(shotAccount.data), (c) => c.charCodeAt(0)),
       );
+      await quantiseEvidencePng(`${OUT}03-account-retry-failed-episodes.png`);
       console.log(`Saved screenshot to ${OUT}03-account-retry-failed-episodes.png`);
 
       // Summary report

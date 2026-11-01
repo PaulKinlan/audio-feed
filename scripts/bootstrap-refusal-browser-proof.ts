@@ -17,6 +17,7 @@ import {
   withChrome,
   writeEvidenceReadme,
 } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-xw7/", import.meta.url).pathname;
 
@@ -153,6 +154,7 @@ await runProof("audio-feed-xw7", async (checker) => {
           `${OUT}01-existing-account-refusal.png`,
           Uint8Array.from(atob(shotRefusal.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(`${OUT}01-existing-account-refusal.png`);
         console.log(`Saved screenshot to ${OUT}01-existing-account-refusal.png`);
 
         // 3. Refusal test: submit valid token with existing pending reader email (sam@example.com)
@@ -211,6 +213,7 @@ await runProof("audio-feed-xw7", async (checker) => {
           `${OUT}02-new-admin-bootstrap-success.png`,
           Uint8Array.from(atob(shotSuccess.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(`${OUT}02-new-admin-bootstrap-success.png`);
         console.log(`Saved screenshot to ${OUT}02-new-admin-bootstrap-success.png`);
 
         await writeEvidenceReadme({

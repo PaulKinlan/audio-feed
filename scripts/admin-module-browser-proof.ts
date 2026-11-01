@@ -29,6 +29,7 @@ import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -348,6 +349,7 @@ await runProof("audio-feed-3xq", async (checker) => {
         const shot1 = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
         const rawShot1 = Uint8Array.from(atob(shot1.data), (c) => c.charCodeAt(0));
         await Deno.writeFile(`${OUT}part4a-admin-1280x900.png`, rawShot1);
+        await quantiseEvidencePng(`${OUT}part4a-admin-1280x900.png`);
 
         // 7. The same page at phone width: module cached-or-refetched, still clean, still working.
         events.length = 0;
@@ -383,6 +385,7 @@ await runProof("audio-feed-3xq", async (checker) => {
         const shot2 = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
         const rawShot2 = Uint8Array.from(atob(shot2.data), (c) => c.charCodeAt(0));
         await Deno.writeFile(`${OUT}part4a-admin-390x844.png`, rawShot2);
+        await quantiseEvidencePng(`${OUT}part4a-admin-390x844.png`);
 
         await writeEvidenceReadme({
           dir: OUT,

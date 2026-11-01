@@ -20,6 +20,7 @@ import {
   withChrome,
   writeEvidenceReadme,
 } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-8eh/", import.meta.url).pathname;
 
@@ -190,6 +191,7 @@ await runProof("audio-feed-8eh", async (checker) => {
           `${OUT}01-admin-bootstrap-success.png`,
           Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(`${OUT}01-admin-bootstrap-success.png`);
         console.log(`Saved screenshot to ${OUT}01-admin-bootstrap-success.png`);
 
         await writeEvidenceReadme({
