@@ -409,15 +409,15 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         probe: () => Promise<T>,
         ready: (value: T) => boolean,
         timeoutMs = 5000,
-      ): Promise<T> => {
-        // State-gated CDP poll with a deadline: loops until ready condition matches; host scheduling delay adds poll cycles rather than failing a fixed sleep.
+      ): Promise<{ value: T; ready: boolean }> => {
+        // State-gated CDP poll with a deadline: loops until ready condition matches; host scheduling delay adds poll cycles rather than failing a fixed sleep. It returns the LAST VALUE IT SAW alongside the verdict, so a caller's failure message can print the page's own last observation - a bare `T` narrowed by `assert()` could only ever print `false`.
         const deadline = Date.now() + timeoutMs;
         let value = await probe();
         while (!ready(value) && Date.now() < deadline) {
           await sleep(50);
           value = await probe();
         }
-        return value;
+        return { value, ready: ready(value) };
       };
       const measure = async (url: string, surface: string, wrap: string) => {
         await evaluate(
@@ -434,28 +434,34 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         // (scripts/proof-cdp.ts), because in a loaded fast gate the starved renderer never
         // got there in 20s at all ("/listen: page did not become scrollable within 20s").
         // The state polls below keep their 5s default.
+        // The poll's last value IS the diagnostic, so the probe evaluates the page's FACTS and
+        // the predicate tests them: `Boolean` over a bare conjunction narrowed the value to the
+        // boolean the assert already knows, so `(last poll value: ${loaded})` could only ever
+        // print `false` on the one path it existed for. Now it prints what the page actually was.
+        const loadState = () =>
+          evaluate(
+            `JSON.stringify({pathname: location.pathname, readyState: document.readyState, ` +
+              `scrollHeight: document.documentElement.scrollHeight, innerHeight: innerHeight})`,
+          ).then(JSON.parse);
         const loaded = await until(
-          () =>
-            evaluate(
-              `location.pathname === ${
-                JSON.stringify(url)
-              } && document.readyState === "complete" && document.documentElement.scrollHeight > innerHeight`,
-            ),
-          Boolean,
+          loadState,
+          (state) =>
+            state.pathname === url && state.readyState === "complete" &&
+            state.scrollHeight > state.innerHeight,
           HANG_BOUND_MS,
         );
         assert(
-          loaded,
+          loaded.ready,
           `${url}: page did not become scrollable within the ${HANG_BOUND_MS}ms derived ` +
-            `load ceiling (last poll value: ${loaded})`,
+            `load ceiling (last poll value: ${JSON.stringify(loaded.value)})`,
         );
         const probe = () => evaluate(PROBE(surface, wrap)).then(JSON.parse);
         // The unscrolled baseline still polls on a wall-clock deadline: no transition is in
         // flight before the first scroll, so there is no mid-transition value to race.
-        const before = await until(
+        const before = (await until(
           probe,
           (state) => state.scrollY === 0 && state.rectTop === 0 && state.shadow === "none",
-        );
+        )).value;
         // From here on the waits are FRAME-COUPLED (audio-feed-mir4g): the flip and the
         // restore are awaited inside the page, and the styles are read only once they are
         // stable across two rendered frames - no assertion can land mid-transition.
