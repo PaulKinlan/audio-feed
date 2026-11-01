@@ -9,12 +9,15 @@
  * - js() sends Runtime.evaluate and extracts result.value
  * - js() throws when response includes exceptionDetails
  * - until() polls until expression evaluates truthy
- * - until() honours an explicit timeoutMs and its timeout error names what was waited for
+ * - until() honours an explicit timeoutMs and its timeout error names what was waited for.
+ *   The deadline is measured on a FAKE clock: it is arithmetic on Date.now(), and wall-clock
+ *   promptness says nothing about the loop on a shared host
  * - js() bounds ONE evaluate against a timer: an expression the page never answers rejects as
  *   CdpHangBoundExceeded, naming the expression, the bound in force and that it did not poll,
  *   after exactly one Runtime.evaluate reached the server (not a poll, not a retry)
  * - until() fails at ITS deadline when the poll's evaluate never answers, instead of waiting
- *   for the evaluate for ever
+ *   for the evaluate for ever. Also on the FAKE clock: the starved evaluate is the mock's, not
+ *   the host's, so virtual time is the whole of the loop's input
  * - until() still lets a thrown expression through unwrapped and unretried
  * - withHangBound() bounds ONE raw cdp reply that never arrives as CdpHangBoundExceeded, naming
  *   the command and the bound it was given, and passes a real reply's value - or its own error -
@@ -237,20 +240,53 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       // honoured, and that one keeps its 150.
       await client.until("poll_counter", "counter ready", 2 * MEASURED_STARVED_POLL_MS);
 
-      // 7. Test until() timeout: an explicit timeoutMs is HONOURED (bounded by ~150ms, not the
-      // 120s derived hang bound the helper defaults to) and the error names what was waited for,
-      // which expression it polled, how long it waited and how many polls it managed
-      // (audio-feed-ev6wj).
-      const timeoutStart = Date.now();
-      await assertRejects(
-        async () => await client.until("never_ready", "waiting for never", 150),
-        Error,
-        "until: 'waiting for never' did not hold within 150ms of entry",
-      );
-      const timeoutElapsed = Date.now() - timeoutStart;
+      // 7. Test until() timeout: an explicit timeoutMs is HONOURED (the deadline fires at the
+      // 150ms it was given, not at the 120s derived hang bound the helper defaults to) and the
+      // error names what was waited for, which expression it polled, how long it waited and how
+      // many polls it managed (audio-feed-ev6wj).
+      //
+      // The deadline is measured on a FAKE clock, not by the stopwatch this row used to hold.
+      // `timeoutElapsed < 4_000` asserted the HOST's scheduler kept up: the loop's deadline is
+      // arithmetic on Date.now(), and on a starved lane a 150ms budget can sit behind seconds of
+      // event-loop backlog (this repo's measured starved-poll floor is MEASURED_STARVED_POLL_MS
+      // = 8s), so the row could redden a correct wait. Virtual time is deterministic on any host
+      // and is the only input the loop is allowed to depend on - and it still has to fire at
+      // exactly the 150ms asked for, which a wait that re-inherited HANG_BOUND_MS could not do.
+      const timeoutClock = new FakeTime();
+      let timeoutSettled = false;
+      let timeoutDeadlineError: unknown = null;
+      let timeoutElapsed = -1;
+      try {
+        const timeoutStart = Date.now();
+        void client.until("never_ready", "waiting for never", 150).then(
+          () => {
+            timeoutSettled = true;
+          },
+          (err: unknown) => {
+            timeoutSettled = true;
+            timeoutDeadlineError = err;
+          },
+        );
+        await timeoutClock.tickAsync(150);
+        await timeoutClock.runMicrotasks();
+        timeoutElapsed = Date.now() - timeoutStart;
+      } finally {
+        timeoutClock.restore();
+      }
       assert(
-        timeoutElapsed < 4_000,
-        `an explicit 150ms timeout must not wait out the helper's default; elapsed ${timeoutElapsed}ms`,
+        timeoutSettled,
+        "an explicit 150ms timeout must fire at 150ms of clock time: the page never held, so " +
+          "the wait had to have failed - it was still pending after the budget elapsed",
+      );
+      assertEquals(
+        timeoutElapsed,
+        150,
+        "the deadline must fire at the timeoutMs it was given, not at the 120s derived default",
+      );
+      assert(timeoutDeadlineError !== null, "the wait must reject, not resolve");
+      assertStringIncludes(
+        (timeoutDeadlineError as Error).message,
+        "until: 'waiting for never' did not hold within 150ms of entry",
       );
       // The message carries the evidence a gate log needs: the expression, the elapsed time and
       // the poll count, so "never got a slice" and "page never got there" are distinguishable.
@@ -303,12 +339,43 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       // class, inside its own bound, naming what was evaluated, the bound in force, and denying
       // that it polled - and exactly ONE Runtime.evaluate reached the server, which is the
       // difference between a bound and a retry loop.
-      const jsBoundStart = Date.now();
-      const jsBoundError = await client.js("never_answers", 150).then(
-        () => null,
-        (err: unknown) => err,
+      // The bound is driven by a FAKE clock, not by the stopwatch this row used to hold:
+      // `jsBoundElapsed < 5_000` asserted that the HOST gave the timer a slice promptly, and on a
+      // starved lane (measured starved-poll floor MEASURED_STARVED_POLL_MS = 8s) a healthy 150ms
+      // bound reddens. Virtual time is deterministic on any host, and asserting the bound fires at
+      // exactly the 150ms asked for is STRONGER than the upper bound it replaces: an
+      // implementation that ignored timeoutMs and armed HANG_BOUND_MS would still be pending.
+      const jsBoundClock = new FakeTime();
+      let jsBoundError: unknown = null;
+      let jsBoundSettled = false;
+      let jsBoundElapsed = -1;
+      try {
+        const jsBoundStart = Date.now();
+        void client.js("never_answers", 150).then(
+          () => {
+            jsBoundSettled = true;
+          },
+          (err: unknown) => {
+            jsBoundSettled = true;
+            jsBoundError = err;
+          },
+        );
+        await jsBoundClock.tickAsync(150);
+        await jsBoundClock.runMicrotasks();
+        jsBoundElapsed = Date.now() - jsBoundStart;
+      } finally {
+        jsBoundClock.restore();
+      }
+      assert(
+        jsBoundSettled,
+        "the 150ms js() bound must fire at 150ms of clock time: the evaluate was never answered, " +
+          "so the race had to have settled - it was still pending after the bound elapsed",
       );
-      const jsBoundElapsed = Date.now() - jsBoundStart;
+      assertEquals(
+        jsBoundElapsed,
+        150,
+        "the js() bound must fire at the bound it was given, not at the 120s default",
+      );
       assert(
         jsBoundError instanceof CdpHangBoundExceeded,
         `a starved evaluate must reject as CdpHangBoundExceeded, got ${String(jsBoundError)}`,
@@ -319,10 +386,10 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       assertStringIncludes(jsBoundMessage, "NOT polled");
       assertStringIncludes(jsBoundMessage, "evaluated exactly once");
       assertStringIncludes(jsBoundMessage, `${HANG_BOUND_MS}ms by default`);
-      assert(
-        jsBoundElapsed < 5_000,
-        `an explicit 150ms js() bound must fail well inside it; elapsed ${jsBoundElapsed}ms`,
-      );
+      // The evaluate was SENT inside the fake clock but delivered on the real event loop, so wait
+      // out one REAL round-trip before counting: socket ordering guarantees the server saw the
+      // evaluate before it can answer this.
+      await client.cdp("Page.enable");
       assertEquals(
         neverAnswersCount,
         1,
@@ -334,10 +401,51 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       // test that enforces the deadline sat behind a promise that might never settle. The error
       // is still until()'s own (callers and their catch blocks see the same shape as any other
       // missed wait), and it names the starved poll rather than blaming the page.
-      const starvedUntilStart = Date.now();
-      const starvedUntil = await client.until("never_answers_until", "never answering page", 200)
-        .then(() => null, (err: unknown) => err);
-      const starvedUntilElapsed = Date.now() - starvedUntilStart;
+      //
+      // THIS ROW IS ABOUT STARVATION, and it is still not a stopwatch. The starvation is in the
+      // FIXTURE - the mock server receives `never_answers_until` and deliberately never replies,
+      // which is exactly the evaluate a starved renderer leaves outstanding - and the property is
+      // that until()'s OWN 200ms deadline becomes a deadline for it. `starvedUntilElapsed < 5_000`
+      // (25x the deadline) did not assert that: it asserted the host resumed this lane inside 5s,
+      // and on a starved box (floor MEASURED_STARVED_POLL_MS = 8s) it reddens a wait that behaved
+      // perfectly. What the loop can legitimately depend on is the 200ms on the clock, so the
+      // clock is what the row drives: the fake timer armed with exactly the `remainingMs` left of
+      // the budget must fire at 200, and the loop must convert it into its own deadline error
+      // rather than retrying or hanging. That is the same property, minus the host - and it fails
+      // an implementation that re-inherited HANG_BOUND_MS instead of bounding the poll by what is
+      // left of the budget.
+      const starvedClock = new FakeTime();
+      let starvedUntilSettled = false;
+      let starvedUntil: unknown = null;
+      let starvedUntilElapsed = -1;
+      try {
+        const starvedUntilStart = Date.now();
+        void client.until("never_answers_until", "never answering page", 200).then(
+          () => {
+            starvedUntilSettled = true;
+          },
+          (err: unknown) => {
+            starvedUntilSettled = true;
+            starvedUntil = err;
+          },
+        );
+        await starvedClock.tickAsync(200);
+        await starvedClock.runMicrotasks();
+        starvedUntilElapsed = Date.now() - starvedUntilStart;
+      } finally {
+        starvedClock.restore();
+      }
+      assert(
+        starvedUntilSettled,
+        "until() must fail at its own 200ms deadline when the poll never answers: it was still " +
+          "pending after the deadline elapsed, which is the hang the per-poll bound removed",
+      );
+      assertEquals(
+        starvedUntilElapsed,
+        200,
+        "the starved poll must be bounded by what is left of the wait's budget, not by the " +
+          "120s derived default",
+      );
       assert(
         starvedUntil instanceof Error && !(starvedUntil instanceof CdpHangBoundExceeded),
         `a starved poll must surface as until()'s deadline error, got ${String(starvedUntil)}`,
@@ -349,10 +457,9 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       );
       assertStringIncludes(starvedUntilMessage, "the final poll's evaluate got no answer in");
       assertStringIncludes(starvedUntilMessage, "expression `never_answers_until`");
-      assert(
-        starvedUntilElapsed < 5_000,
-        `until() must fail at its own 200ms deadline, not hang; elapsed ${starvedUntilElapsed}ms`,
-      );
+      // Real round-trip before counting, for the same reason as the js() row above: socket
+      // ordering says the server received the starved poll before it answers this command.
+      await client.cdp("Page.enable");
       assertEquals(
         neverAnswersUntilCount,
         1,
