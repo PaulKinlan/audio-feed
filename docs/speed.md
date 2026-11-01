@@ -263,6 +263,22 @@ record, `b8c0610c`).
 s ceiling is a delay claim — "this normally finishes in 5 s" — and on a loaded host it turns correct
 code into a red gate, which is the same class as the elapsed-time rows in the section below.
 
+### A test-only dependency charges every fast gate on the branch (`fleet/timing-tail`, tip `8706c8b9`)
+
+`fleet/timing-tail` added `jsr:@std/testing` (for `FakeTime`) to replace three stopwatch assertions
+with deadline arithmetic on a fake clock. The change is right - equality on the bound is strictly
+stronger than an upper bound, and it removes the host from the assertion - but it changed
+`deno.lock`, and `deno.lock` is a module-graph config, so the fast gate correctly widened to the
+FULL suite:
+
+    fast-check: FULL suite (module-graph config changed: deno.lock (any suite's resolution may have moved))
+
+175 suites, 1670 s, for a diff of two test files. The widening is sound ("any suite's resolution may
+have moved" is an honest worst case) and it was NAMED rather than silent, so the selector is not the
+defect. **The cost is the dependency.** Before adding one for a test helper, prefer an in-repo fake
+clock or an injected `now()`: a lockfile delta makes every later fast gate on that branch a full
+gate, and it is paid by every lane behind it in the heavy queue.
+
 ## Tests must not assert on elapsed real time (audio-feed-n52j3)
 
 Two of the three union-gate reds on 2026-10-23 had nothing to do with the branches under test: the
@@ -414,40 +430,37 @@ after the sixth — the `265131c3` recount (2026-10-31) is the aggregate below:
 - **Zero `until()` call sites pass only the two required arguments** — the two-argument population
   is **0 across 0 files** at `origin/main` `265131c3`, out of 176 `until(` calls in 29 files, and
   **all 176** sites pass an explicit third argument: the sweep series below is complete. Method
-  (2026-10-31, `265131c3`): paren/quote/template-aware walk of each `until(` argument list,
-  counting only non-empty argument spans, with definitions and type positions excluded. Count it
-  rather than trusting this figure: `deno run --allow-read scripts/call-arity.ts --only-2arg until scripts`,
-  which prints each two-argument site as `file:line` and then the file tally — it prints none
-  today, and the full variant `deno run --allow-read scripts/call-arity.ts until scripts` counts
-  every site with its argument count (176 sites, all argc 3). The 31 sites the `ed7116fb` recount
-  found sat in files that declare their own `until`, so none of them inherited the shared
-  `proof-cdp.ts` default. The
-  originally published aggregate for the base this census first measured (`ea949d2e`) — 101
+  (2026-10-31, `265131c3`): paren/quote/template-aware walk of each `until(` argument list, counting
+  only non-empty argument spans, with definitions and type positions excluded. Count it rather than
+  trusting this figure: `deno run --allow-read scripts/call-arity.ts --only-2arg until scripts`,
+  which prints each two-argument site as `file:line` and then the file tally — it prints none today,
+  and the full variant `deno run --allow-read scripts/call-arity.ts until scripts` counts every site
+  with its argument count (176 sites, all argc 3). The 31 sites the `ed7116fb` recount found sat in
+  files that declare their own `until`, so none of them inherited the shared `proof-cdp.ts` default.
+  The originally published aggregate for the base this census first measured (`ea949d2e`) — 101
   two-argument sites across 28 files, 75 explicit-bound — was an undercount: re-walking that same
   `ea949d2e` with the safe walker gives **170 two-argument sites across 28 files, 6
   explicit-bound**, so 69 sites tree-wide had been misfiled as bounded. The trap: a scanner that
   splits an argument list on top-level commas reads a trailing comma before the closing paren as one
   more argument, which is how the eight unbounded waits in `scripts/account-browser-proof.ts` (15
   two-argument calls, none explicit at either base) were described as bounded. The six-site drop
-  from `ea949d2e` to `275df1da` (170 → 164) is `fleet/proof-waits` landing, not drift; the
-  164 → 31 drop is the first five sweeps below and the 31 → 0 drop is the sixth — none of it
-  is drift. Landed check
-  (`git merge-base --is-ancestor` against `origin/main` `265131c3`, 2026-10-31): `fleet/anchor-wait`
-  (`d0a546ca`), `fleet/proof-waits` (`0ef5368f`), `fleet/measure-waits` (`4cc6b4b3`),
-  `fleet/js-waits` (`9921a815`), this census commit (`789eeca7`), the cwv retry-after row
-  (`11ba107c`) and all six sweeps — `fleet/until-sweep-1` (`f5cafa86`, 30 sites), `-2` (`64cfdead`,
-  24), `-3` (`081f7006`, 32), `-4` (`912b310c`, 23), `-5` (`f8b5a0ab`, 24) and `-6` (`a0a98744`,
-  31) — are in; those 164 converted sites are the whole of the 164 → 0 drop.
+  from `ea949d2e` to `275df1da` (170 → 164) is `fleet/proof-waits` landing, not drift; the 164 → 31
+  drop is the first five sweeps below and the 31 → 0 drop is the sixth — none of it is drift. Landed
+  check (`git merge-base --is-ancestor` against `origin/main` `265131c3`, 2026-10-31):
+  `fleet/anchor-wait` (`d0a546ca`), `fleet/proof-waits` (`0ef5368f`), `fleet/measure-waits`
+  (`4cc6b4b3`), `fleet/js-waits` (`9921a815`), this census commit (`789eeca7`), the cwv retry-after
+  row (`11ba107c`) and all six sweeps — `fleet/until-sweep-1` (`f5cafa86`, 30 sites), `-2`
+  (`64cfdead`, 24), `-3` (`081f7006`, 32), `-4` (`912b310c`, 23), `-5` (`f8b5a0ab`, 24) and `-6`
+  (`a0a98744`, 31) — are in; those 164 converted sites are the whole of the 164 → 0 drop.
 - **The shared helper no longer defaults to 8s; that default survives only in private copies.**
   `scripts/proof-cdp.ts` exports `MEASURED_STARVED_POLL_MS = 8_000` and derives
   `HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS` = **120_000**, and that derived bound is the
   default for BOTH helpers: `until(expr, desc, timeoutMs = HANG_BOUND_MS)` (`:156`) and
   `js(expression, timeoutMs = HANG_BOUND_MS)` (`:113`), which races its ONE `Runtime.evaluate`
   against the timer and rejects with `CdpHangBoundExceeded` rather than polling
-  (`fleet/shared-proof-bound`, merge `7a3df3be`). 26 private `until` copies live beside it:
-  **15 default to 8 s**
-  (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-, request-access-,
-  playback-position-, spend-visibility-, voice-audition-, home-player-link- and
+  (`fleet/shared-proof-bound`, merge `7a3df3be`). 26 private `until` copies live beside it: **15
+  default to 8 s** (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-,
+  request-access-, playback-position-, spend-visibility-, voice-audition-, home-player-link- and
   listen-filter-browser-proof.ts, verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts,
   verify_qz3x_confirm_dismiss_browser.ts and verify_main_l7m1_e2e.ts — one more than the earlier
   count of 14, which missed the arrow-function copy at `:261`), 7 default to 15s and 4 to 10s. There
@@ -458,17 +471,17 @@ after the sixth — the `265131c3` recount (2026-10-31) is the aggregate below:
   unbounded on `main` at the base this census measured (`ea949d2e`). The four reads were bounded on
   `fleet/measure-waits` (`4cc6b4b3`) and the remaining evaluates on `fleet/js-waits` (`9921a815`,
   then in progress); neither branch was merged into the base this census measured, so on `main` a
-  hung evaluate waited for the lane's killer, not for any timeout. (Landed after, checked 2026-10-31:
-  `fleet/measure-waits` merged into `origin/main` as `9210dd55`, and `fleet/js-waits` (`9921a815`)
-  has now merged too — `origin/main` tip `275df1da` is that merge — so the four reads and the bare
-  evaluates are all bounded on `main` today.)
+  hung evaluate waited for the lane's killer, not for any timeout. (Landed after, checked
+  2026-10-31: `fleet/measure-waits` merged into `origin/main` as `9210dd55`, and `fleet/js-waits`
+  (`9921a815`) has now merged too — `origin/main` tip `275df1da` is that merge — so the four reads
+  and the bare evaluates are all bounded on `main` today.)
 
 Three fixes exist and are the pattern to copy, not a complaint to file:
 
 - **`fleet/anchor-wait` (`d0a546ca`)** — one test row's `until` (the native popover fade row) passes
-  an explicit `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS`, and `proof-cdp.ts`'s
-  timeout error now names the expression, deadline, elapsed time, poll count and last polled value,
-  so a red says which wait failed and whether the page ever got a slice.
+  an explicit `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS`, and `proof-cdp.ts`'s timeout
+  error now names the expression, deadline, elapsed time, poll count and last polled value, so a red
+  says which wait failed and whether the page ever got a slice.
 - **`fleet/proof-waits` (`0ef5368f`)** — six `until` call sites in `listen-browser-proof.ts` and
   `tooltip-top-layer-browser-proof.ts`, one derived constant per file
   (`LOAD_AND_RENDER_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS`).
