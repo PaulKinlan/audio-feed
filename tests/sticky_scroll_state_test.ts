@@ -15,7 +15,7 @@
 // - headless Chrome really flips the computed styles on scroll for BOTH headers and
 //   leaves sticky offset / z-index / container-type intact.
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { renderShell, SHELL_CSS } from "../src/routes/shell.ts";
 import { renderListenPage } from "../src/routes/listen.ts";
 import { assetBody, handleAsset } from "../src/routes/assets.ts";
@@ -92,6 +92,133 @@ Deno.test("txcz: the no-support path keeps the sticky geometry, and the stuck ru
     );
   }
 });
+
+/**
+ * audio-feed-lsrace: THE loadState probe's page-side facts, extracted to module scope so the
+ * guard test below pins the EXACT expression the browser poll runs (no re-typed copy that can
+ * drift from the real one).
+ */
+const LOAD_STATE_PROBE =
+  `JSON.stringify({pathname: location.pathname, readyState: document.readyState, ` +
+  `scrollHeight: document.documentElement.scrollHeight, innerHeight: innerHeight})`;
+
+/**
+ * audio-feed-lsrace: a CDP evaluate can land MID-NAVIGATION. `location.href = ...` returns before
+ * the new document commits, so the very next poll can run inside a document that exists but has
+ * not parsed its root yet: `document.documentElement` is null and an unguarded dereference
+ * throws - which `evaluate` (exceptionDetails -> reject) surfaces as a FAILURE, killing the poll
+ * instead of letting it retry (the 1-in-5 race this fixes: "Cannot read properties of null
+ * (reading 'scrollHeight')" thrown from the loadState poll immediately after location.href).
+ *
+ * THE RULE (navigation-in-flight vs page-is-broken): ONLY while `document.readyState` is
+ * "loading" is a missing documentElement/body classified as NOT READY - the wrapped probe
+ * returns `{"navigating":true}` so the poll's predicate fails the observation and retries. Every
+ * other throw PROPAGATES: a root missing after loading finished, or any error from the probe
+ * itself on a real document, still fails the suite with evidence instead of being retried into
+ * an opaque timeout.
+ */
+const NAVIGATION_SAFE = (probe: string) =>
+  `(() => {
+    if (document.documentElement === null || document.body === null) {
+      if (document.readyState !== "loading") {
+        throw new Error(
+          "documentElement/body missing while readyState is " + document.readyState,
+        );
+      }
+      return JSON.stringify({ navigating: true });
+    }
+    return (${probe});
+  })()`;
+
+/**
+ * audio-feed-lsrace: the guard's contract, pinned WITHOUT a browser by evaluating the generated
+ * probe against stub documents (the free variables `document`/`location`/`innerHeight` are bound
+ * as function parameters, shadowing the globals Deno does not have).
+ */
+Deno.test(
+  "txcz: a load poll landing mid-navigation returns not-ready instead of throwing; a broken page still throws",
+  () => {
+    const run = (
+      expr: string,
+      doc: { readyState: string; documentElement: unknown; body: unknown },
+    ) =>
+      // deno-lint-ignore no-explicit-any
+      (new Function("document", "location", "innerHeight", `return (${expr});`) as any)(
+        doc,
+        { pathname: "/listen" },
+        600,
+      );
+
+    // RED (the reported race, guard reverted): with the root not yet parsed, the RAW probe
+    // throws the exact TypeError the suite saw 1-in-5 - the poll dies instead of retrying.
+    assertThrows(
+      () =>
+        run(LOAD_STATE_PROBE, {
+          readyState: "loading",
+          documentElement: null,
+          body: null,
+        }),
+      Error,
+      "Cannot read properties of null (reading 'scrollHeight')",
+    );
+
+    // GREEN (guarded): the same mid-navigation condition is a NOT-READY observation the poll
+    // retries - pathname/readyState/scrollHeight fail the predicate, the loop polls again.
+    assertEquals(
+      JSON.parse(
+        run(NAVIGATION_SAFE(LOAD_STATE_PROBE), {
+          readyState: "loading",
+          documentElement: null,
+          body: null,
+        }),
+      ),
+      { navigating: true },
+    );
+
+    // RULE 3: a root missing once loading has FINISHED is a broken page, not a navigation -
+    // it must throw evidence, not be retried into a timeout.
+    assertThrows(
+      () =>
+        run(NAVIGATION_SAFE(LOAD_STATE_PROBE), {
+          readyState: "complete",
+          documentElement: null,
+          body: null,
+        }),
+      Error,
+      "documentElement/body missing while readyState is complete",
+    );
+
+    // Passthrough: a real document (root and body present) evaluates the probe unchanged.
+    assertEquals(
+      JSON.parse(
+        run(NAVIGATION_SAFE(LOAD_STATE_PROBE), {
+          readyState: "complete",
+          // deno-lint-ignore no-explicit-any
+          documentElement: { scrollHeight: 4000 } as any,
+          body: {},
+        }),
+      ),
+      { pathname: "/listen", readyState: "complete", scrollHeight: 4000, innerHeight: 600 },
+    );
+
+    // A loaded page that is BROKEN (its own probe throws on a present root) is not swallowed
+    // by the guard either - the app's error surfaces exactly as it would unguarded.
+    assertThrows(
+      () =>
+        run(NAVIGATION_SAFE(LOAD_STATE_PROBE), {
+          readyState: "complete",
+          documentElement: {
+            get scrollHeight(): number {
+              throw new Error("app exploded");
+            },
+          },
+          body: {},
+        }),
+      Error,
+      "app exploded",
+    );
+  },
+);
 
 /**
  * audio-feed-oyf3g: a scratch root this suite owns, handed to the helper AS AN ARGUMENT.
@@ -667,11 +794,7 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         // the predicate tests them: `Boolean` over a bare conjunction narrowed the value to the
         // boolean the assert already knows, so `(last poll value: ${loaded})` could only ever
         // print `false` on the one path it existed for. Now it prints what the page actually was.
-        const loadState = () =>
-          evaluate(
-            `JSON.stringify({pathname: location.pathname, readyState: document.readyState, ` +
-              `scrollHeight: document.documentElement.scrollHeight, innerHeight: innerHeight})`,
-          ).then(JSON.parse);
+        const loadState = () => evaluate(NAVIGATION_SAFE(LOAD_STATE_PROBE)).then(JSON.parse);
         const loaded = await until(
           loadState,
           (state) =>
