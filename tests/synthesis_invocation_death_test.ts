@@ -58,10 +58,36 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
   }).spawn();
 }
 
+/**
+ * What stopped the child, named from the child's OWN exit code.
+ *
+ * A bare "never reached uploading_audio" is an unknown wearing a timeout's clothes: the pipe
+ * closed, and that is all it says. Every code here is written by the fixture itself, so the red
+ * can name an owner instead of sending the next reader to re-derive one.
+ */
+function childStopOwner(code: number | null, signal: string | null): string {
+  if (signal) {
+    return `the child was KILLED by ${signal} - a crash or an external killer, not a starved stage`;
+  }
+  switch (code) {
+    case 3:
+      return "exit code 3 is the child's OWN marker deadline running out (invocation_death_child.ts' 8s poll window): the upload stage was still starved when it gave up";
+    case 1:
+      return "exit code 1 is the child's SURVIVE-FATAL self-abort (a stage never started)";
+    case 2:
+      return "exit code 2 is the child's usage error (argv: kvPath, mode, round)";
+    case 0:
+      return "exit code 0 means the invocation RETURNED without ever starting the upload stage - a mechanism break, not a slow host";
+    default:
+      return `unrecognised exit code ${code} - read the stderr tail`;
+  }
+}
+
 /** Read stdout until the child prints the marker, then SIGKILL it mid-put. */ async function killDuringUpload(
   kvPath: string,
   round: number,
 ) {
+  const startedAt = Date.now();
   const child = spawnChild(kvPath, "hang", round);
   const decoder = new TextDecoder();
   let out = "";
@@ -92,15 +118,43 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
       const status = await child.status;
       const err = await child.stderr.text();
       throw new Error(
-        `child round ${round} exited before uploading_audio (signal ${status.signal}, code ${status.code}; stderr: ${err}; stdout: ${out})`,
+        `child round ${round} exited before printing MARKER:uploading after ${
+          Date.now() - startedAt
+        }ms (${
+          childStopOwner(status.code, status.signal)
+        }; code ${status.code}, signal ${status.signal}; stderr tail: ${
+          err.trim().slice(-600) || "(empty)"
+        }; stdout: ${out})`,
       );
     }
   } finally {
     await buffer.cancel().catch(() => {});
   }
   if (!out.includes("MARKER:uploading")) {
-    await child.status;
-    throw new Error(`child round ${round} never reached uploading_audio (stdout: ${out})`);
+    // EOF WITHOUT THE MARKER IS A CHILD STAYING SILENT, NOT A SLOW WAIT, AND IT MUST SAY SO.
+    // `done` only says the child's stdout pipe closed; the old message here read "never reached
+    // uploading_audio", which reports an UNKNOWN (why did it stop? crashed? returned early? ran
+    // out of its own poll window?) as if it were a wait that expired - and it threw away the
+    // exit code, the signal and the child's stderr, the only three facts that name an owner.
+    // That is the shape the union gate produced (round 3, loadavg 5-10): a red that cannot be
+    // acted on without a re-run and a guess.
+    //
+    // The status await below is itself the liveness proof: it resolves only for a DEAD child, so
+    // reaching this throw means the child had already exited. A live child holding a closed pipe
+    // would leave this row hanging rather than reddening it - so the message states the death it
+    // observed instead of implying a timeout it never took.
+    const status = await child.status;
+    const err = await child.stderr.text();
+    throw new Error(
+      `child round ${round} stopped after ${
+        Date.now() - startedAt
+      }ms without printing MARKER:uploading: ` +
+        `stdout hit EOF and the child is dead (${childStopOwner(status.code, status.signal)}; ` +
+        `code ${status.code}, signal ${status.signal}; stderr tail: ${
+          err.trim().slice(-600) || "(empty)"
+        }; ` +
+        `stdout: ${out || "(empty)"})`,
+    );
   }
   // The put is in flight and the wrapper's deadline timer is still seconds out.
   child.kill("SIGKILL");
