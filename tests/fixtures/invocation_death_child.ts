@@ -21,6 +21,7 @@
  * uploading_audio -> await put -> death with the wrapper's deadline timer still in
  * the future.
  */
+import { DEFAULT_MARKER_WAIT_MS, MARKER_WAIT_MS_ENV } from "./invocation_death_window.ts";
 import { KvMetadataStore } from "../../src/storage/kv.ts";
 import type { BlobInfo, BlobObject, BlobStore } from "../../src/storage/mod.ts";
 import { runSynthesisBatch } from "../../src/worker/synthesis.ts";
@@ -173,7 +174,40 @@ const batchPromise = runSynthesisBatch(ctx, synth, {
 const hangingBlobs = stores.blobs as HangingPutBlobStore;
 
 if (mode === "hang") {
-  const deadline = Date.now() + 8_000;
+  // audio-feed-aqms-window: this window is a BOUND, not a latency expectation, and
+  // it is CALLER-CONTROLLED. The old bare 8_000 was exactly scripts/proof-cdp.ts
+  // MEASURED_STARVED_POLL_MS - one starved poll with zero headroom - so a
+  // gate-loaded host expired it while the batch was merely starved on its way to
+  // the upload stage and flaked the row. Now: (a) the default is 15 x that floor
+  // (DEFAULT_MARKER_WAIT_MS, the repo's HANG_BOUND_MS derivation), headroom over
+  // starvation that also exceeds the hang rounds' 30s batch budget; (b)
+  // INVOCATION_DEATH_MARKER_WAIT_MS overrides it, so the test pins the window
+  // explicitly (no ambient-env coupling) and the red-path case sets 0, which
+  // skips this loop entirely and stops WITHOUT the marker deterministically.
+  const rawMarkerWaitMs = Deno.env.get(MARKER_WAIT_MS_ENV);
+  let markerWaitMs = DEFAULT_MARKER_WAIT_MS;
+  if (rawMarkerWaitMs !== undefined) {
+    const parsed = Number(rawMarkerWaitMs);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      console.error(
+        `child: ${MARKER_WAIT_MS_ENV} must be a non-negative integer of milliseconds, got ${
+          JSON.stringify(rawMarkerWaitMs)
+        }`,
+      );
+      Deno.exit(2);
+    }
+    markerWaitMs = parsed;
+  }
+  const deadline = Date.now() + markerWaitMs;
+  // The give-up is an EVENT first, a clock second: once THIS invocation's batch
+  // settles (budget-yield or throw) the claim is released and the marker is
+  // unreachable - the condition below pins claimedBy and phase - so polling the
+  // rest of the window is dead time. Stop and red on the settlement instead.
+  const batchOutcome = batchPromise.then(
+    () => "settled",
+    (err: unknown) => `threw: ${err instanceof Error ? err.message : String(err)}`,
+  );
+  let settled: string | undefined;
   while (Date.now() < deadline) {
     const episode = await metadata.getEpisode("user-1", "episode-1");
     // Tie the marker to THIS invocation's claim: a leftover uploading_audio phase
@@ -188,9 +222,20 @@ if (mode === "hang") {
       // Stay alive inside the hung put. The parent kills us here.
       await new Promise<never>(() => {});
     }
-    await new Promise((r) => setTimeout(r, 20));
+    const outcome = await Promise.race([
+      batchOutcome,
+      new Promise<undefined>((r) => setTimeout(r, 20)),
+    ]);
+    if (outcome !== undefined) {
+      settled = outcome;
+      break;
+    }
   }
-  console.error("child: never reached uploading_audio before timeout");
+  if (settled !== undefined) {
+    console.error(`child: batch settled without uploading_audio (${settled})`);
+  } else {
+    console.error("child: never reached uploading_audio before timeout");
+  }
   Deno.exit(3);
 }
 

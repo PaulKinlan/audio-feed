@@ -28,6 +28,7 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { KvMetadataStore } from "../src/storage/kv.ts";
+import { DEFAULT_MARKER_WAIT_MS, MARKER_WAIT_MS_ENV } from "./fixtures/invocation_death_window.ts";
 
 const CHILD = new URL("./fixtures/invocation_death_child.ts", import.meta.url).pathname;
 
@@ -42,7 +43,12 @@ interface ChildOutcome {
   };
 }
 
-function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: number) {
+function spawnChild(
+  kvPath: string,
+  mode: "hang" | "survive" | "drain",
+  round: number,
+  env?: Record<string, string>,
+) {
   return new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -53,23 +59,34 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
       mode,
       String(round),
     ],
+    // Additive to this process's env: the marker-window control rides in without
+    // disturbing anything else the child inherits.
+    env,
     stdout: "piped",
     stderr: "piped",
   }).spawn();
 }
 
-/** Read stdout until the child prints the marker, then SIGKILL it mid-put. */ async function killDuringUpload(
+/** Read stdout until the child prints the marker, then SIGKILL it mid-put.
+ *
+ * `markerWaitMs` pins the child's give-up window EXPLICITLY (audio-feed-aqms-window):
+ * the hang rounds pass DEFAULT_MARKER_WAIT_MS so the child's giving-up is a controlled
+ * event pinned by this test rather than an ambient default (and one a stray env var in
+ * the gate environment cannot silently move); the red-path case passes "0".
+ */ async function killDuringUpload(
   kvPath: string,
   round: number,
+  markerWaitMs = String(DEFAULT_MARKER_WAIT_MS),
 ) {
-  const child = spawnChild(kvPath, "hang", round);
+  const child = spawnChild(kvPath, "hang", round, { [MARKER_WAIT_MS_ENV]: markerWaitMs });
   const decoder = new TextDecoder();
   let out = "";
   const buffer = child.stdout.getReader();
   try {
     // docs/speed.md census row 5: this used to stop reading at a REAL-CLOCK deadline
     // (20s, or 3x the previous round's observed time-to-marker). That bound could never fire
-    // on a live child - the hang child polls for the put for 8s and then exits 3 - so the
+    // on a live child - the hang child polls for the marker until its window expires
+    // (INVOCATION_DEATH_MARKER_WAIT_MS, default 15x the starved floor) and then exits 3 - so the
     // loud-fail path was ALWAYS the child-exit race below, and the deadline only ever
     // contributed a way for a loaded host to abandon a child that was still working. It is
     // deleted rather than raised: the loop now ends on EVENTS (marker bytes, EOF, the child's
@@ -208,3 +225,54 @@ Deno.test("audio-feed-aqms: invocation killed mid-upload leaves claim non-termin
     await Deno.remove(kvPath).catch(() => {});
   }
 });
+
+Deno.test(
+  "audio-feed-aqms red path: a zero marker window stops the child WITHOUT the marker and the parent reports it",
+  async () => {
+    // audio-feed-aqms-window: the fixture's give-up must stay a CONTROLLED EVENT, not
+    // a race with host load. INVOCATION_DEATH_MARKER_WAIT_MS=0 makes the child's deadline
+    // already-expired at the first loop check, so it skips the marker poll entirely and
+    // stops without the marker deterministically - the exact shape a loaded host used to
+    // produce by accident with the old zero-headroom 8s window. This case pins both halves
+    // of the premise: the child stops WITHOUT the marker (exit 3), and the parent REPORTS
+    // the marker-less stop by name instead of swallowing it.
+    const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-red-", suffix: ".kv" });
+    try {
+      const child = spawnChild(kvPath, "hang", 9, { [MARKER_WAIT_MS_ENV]: "0" });
+      const output = await child.output();
+      const status = await child.status;
+      const out = new TextDecoder().decode(output.stdout);
+      const err = new TextDecoder().decode(output.stderr);
+      assertEquals(status.code, 3, `the child must give up with exit 3 (stderr: ${err})`);
+      assertStringIncludes(err, "child: never reached uploading_audio before timeout");
+      assertEquals(
+        out.includes("MARKER:uploading"),
+        false,
+        "the child must stop WITHOUT the marker",
+      );
+
+      // Same controlled event, observed from the parent: killDuringUpload must throw
+      // rather than pass. On main it can throw either the child-exited message or the
+      // EOF message (whichever wins the event race); both name the marker-less stop.
+      const reportKvPath = await Deno.makeTempFile({
+        prefix: "audio-feed-aqms-red-report-",
+        suffix: ".kv",
+      });
+      try {
+        let reported: unknown = null;
+        try {
+          await killDuringUpload(reportKvPath, 10, "0");
+        } catch (e) {
+          reported = e;
+        }
+        assert(reported !== null, "the parent must throw on a marker-less child stop, not pass");
+        assert(reported instanceof Error);
+        assertStringIncludes(reported.message, "never reached uploading_audio");
+      } finally {
+        await Deno.remove(reportKvPath).catch(() => {});
+      }
+    } finally {
+      await Deno.remove(kvPath).catch(() => {});
+    }
+  },
+);
