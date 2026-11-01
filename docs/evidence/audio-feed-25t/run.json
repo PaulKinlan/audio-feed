@@ -1,0 +1,16 @@
+{
+  "script": "scripts/passkey-provider-browser-proof.ts",
+  "sha": "064ee57179209d27b5d220ba54f1ff6baed55c00",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T04:31:08.075Z",
+  "endedAt": "2026-11-01T04:32:21.977Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-account-passkey-providers-desktop.png": "sha256:a725de9ce889b218fb5c0be0d6eeed140f856496cefeeb2101b4b7c24ba0f9b1",
+    "02-account-passkey-providers-mobile-390.png": "sha256:c907148be80e861dab45a4ea69978e0690a693cee5ff81fb0c0432bb6c7a17de"
+  }
+}
