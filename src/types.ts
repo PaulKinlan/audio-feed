@@ -338,6 +338,23 @@ export interface Episode {
    */
   attempts?: number;
   /**
+   * Pure pre-turn refusals so far (audio-feed-refcap).
+   *
+   * A claim the pre-turn preflight refuses before it initiated ANY paid turn spent
+   * nothing, so it must not consume the claims cap — but a loop of identical
+   * refusals must still terminate. `attempts` cannot be that bound: a refusal
+   * returns its own claim's increment so the counter keeps meaning "claims that
+   * may have spent" (and never wipes the spend history of earlier claims). This
+   * separate monotone-till-progress counter is what bounds the zero-spend loop:
+   * `claimEpisode` fails the episode once it reaches MAX_PRETURN_REFUSALS, with a
+   * reason distinct from the zero-progress spend exhaustion.
+   *
+   * Reset to 0 by the same durable-progress resets that zero `attempts`, and by a
+   * deliberate subscriber retry/requeue (a fresh claim budget is a fresh refusal
+   * budget), so stale refusals never fail a later healthy episode.
+   */
+  refusals?: number;
+  /**
    * Last execution phase recorded by the worker (audio-feed-siv1).
    * e.g. "claimed", "reading_article", "generating_script", "synthesizing_segment_1_of_4", "uploading_audio", "completing".
    */
@@ -378,6 +395,52 @@ export const DEFAULT_CLAIM_LEASE_MS = 15 * 60_000;
  * poison job: crash, expire, re-claim, crash, bill again.
  */
 export const DEFAULT_MAX_CLAIMS = 3;
+
+/**
+ * Pure pre-turn refusals allowed before `claimEpisode` fails the episode
+ * (audio-feed-refcap).
+ *
+ * Its own constant, not maxClaims, and deliberately larger:
+ *
+ * - It MUST exceed the claims cap, or a transient that consumed one full claims
+ *   cap of refusals (exactly Paul's production episode: refused pre-turn 1 on
+ *   claim 3/3) would fail on the very next tick — the bug this counter exists to
+ *   fix. `preturnRefusalCap` therefore floors at maxClaims + 1 for any config.
+ * - The default 6 = 2 × DEFAULT_MAX_CLAIMS: refusals are provably zero-spend
+ *   (pinned by test), so a higher cap costs only time-to-terminal-failure, and
+ *   two consecutive transients still recover while a persistently slow pre-turn
+ *   fails deterministically on the tick after the sixth refusal.
+ */
+export const MAX_PRETURN_REFUSALS = 2 * DEFAULT_MAX_CLAIMS;
+
+/**
+ * The refusal cap for a claim budget: the stated constant, but never at or below
+ * the claims cap — see MAX_PRETURN_REFUSALS for why the floor exists.
+ */
+export function preturnRefusalCap(maxClaims: number): number {
+  return Math.max(MAX_PRETURN_REFUSALS, maxClaims + 1);
+}
+
+/**
+ * The terminal reason for a refusal-exhausted episode (audio-feed-refcap).
+ *
+ * Distinct by construction from the zero-progress spend exhaustion ("zero durable
+ * progress across all claims"): this names the pre-turn preflight and the fact
+ * that not one paid turn was ever initiated, so an operator can tell a zero-spend
+ * preflight loop from real spend that produced nothing.
+ */
+export function preturnRefusalExhaustedError(refusals: number, cap: number): string {
+  return `pre-turn preflight refused ${refusals} times without ever initiating a paid turn; ` +
+    `failed at the refusal cap of ${cap} to bound the zero-spend retry loop`;
+}
+
+/** The stable prefix of preturnRefusalExhaustedError, used to recognise the reason. */
+export const PRETURN_REFUSAL_ERROR_PREFIX = "pre-turn preflight refused";
+
+/** Whether an episode's error is the refusal-cap exhaustion (audio-feed-refcap). */
+export function isPreturnRefusalExhaustion(error?: string): boolean {
+  return typeof error === "string" && error.startsWith(PRETURN_REFUSAL_ERROR_PREFIX);
+}
 
 /**
  * Terminal-upload retries allowed before an episode fails terminally (audio-feed-lqd6).

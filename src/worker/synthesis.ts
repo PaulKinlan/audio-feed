@@ -65,6 +65,7 @@ import {
   DEFAULT_MAX_UPLOAD_RETRIES,
   DEFAULT_VOICES,
   INBOX_SOURCE_ID,
+  isPreturnRefusalExhaustion,
   parseAudioBlobKey,
   segmentBlobKey,
   segmentTextHash,
@@ -2191,6 +2192,23 @@ async function runSynthesisBatchCore(
           episode.id,
           afterClaim.audioKey,
         );
+        // audio-feed-refcap: a refusal-exhausted episode was failed INSIDE claimEpisode, which
+        // cannot queue notifications, and no other notifyOnDemand caller runs for it — they all
+        // sit on paths this worker drove to a terminal state itself. Emit it here, in the tick
+        // that watched the episode cross the refusal cap, so it reaches `failed` WITH its
+        // notification instead of sitting in a state the admin failed list never sees.
+        if (isPreturnRefusalExhaustion(afterClaim.error)) {
+          const error = afterClaim.error ?? "episode exhausted its pre-turn refusal budget";
+          console.error(
+            `[audio-feed] synthesis failed for episode "${afterClaim.id}" ("${afterClaim.title}"): ${error}`,
+          );
+          result.failed.push({
+            episodeId: afterClaim.id,
+            error,
+            title: afterClaim.title,
+          });
+          await notifyOnDemand(afterClaim, "failed", error);
+        }
       }
       result.skipped.push({ episodeId: episode.id, reason: "claimed elsewhere or exhausted" });
       continue;
@@ -2411,7 +2429,7 @@ async function runSynthesisBatchCore(
           // 3. Provenance: Only our explicit InvocationBudgetAbortError sentinel yields; provider/lease aborts take retry/failure.
           // 4. Progress: DURABLE PROGRESS = observable on the next tick after a restart; anything else is not progress.
           //    Every yield must either make durable progress (finalized segments committed or scriptTurns checkpointed)
-          //    resetting attempts to 0, or count against opts.maxAttempts — EXCEPT the pure pre-turn
+          //    resetting attempts and refusals to 0, or count against opts.maxAttempts — EXCEPT the pure pre-turn
           //    refusal (audio-feed-preturn): a yield raised by the pre-turn preflight before THIS CLAIM
           //    initiated any paid turn has spent nothing, so burning one of three claims on it produced
           //    permanent "claim 3/3; zero durable progress" deaths for episodes whose pre-turn stage
@@ -2419,8 +2437,12 @@ async function runSynthesisBatchCore(
           //    burns for every claim that initiated at least one paid turn: real spend with zero durable
           //    result remains bounded at opts.maxAttempts claims (audio-feed-zrkn's livelock guard), so
           //    a genuinely doomed episode still terminates. A pure-refusal loop costs zero provider
-          //    spend per tick and is bounded by the per-claim lease and the pre-claim batch gate, which
-          //    refuses to claim into an invocation that cannot afford the first turn estimate.
+          //    spend per tick and is bounded by the refusals counter (audio-feed-refcap): each pure
+          //    refusal increments episode.refusals and returns only its own claim's attempt increment,
+          //    and claimEpisode fails the episode with a distinct reason once refusals reaches
+          //    preturnRefusalCap(maxClaims) — lease expiry and the pre-claim batch gate do NOT bound
+          //    this loop (the gate sees a fresh invocation budget every tick, and a clean yield
+          //    releases the lease before it could expire).
           const refreshed = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
           const finalScriptTurns = refreshed?.scriptTurns?.length ?? 0;
           const finalSegments =
@@ -2463,6 +2485,10 @@ async function runSynthesisBatchCore(
               {
                 phase: yieldPhase,
                 advanceAttempts: !madeProgress && !preTurnRefusal,
+                // audio-feed-refcap: a pure refusal is counted on its own counter and its claim's
+                // attempt increment is returned, so attempts never resets over earlier spend
+                // history — and claimEpisode's refusal cap bounds the zero-spend loop.
+                incrementRefusals: preTurnRefusal,
               },
             ), currentEpisode.id);
           if (yielded) {

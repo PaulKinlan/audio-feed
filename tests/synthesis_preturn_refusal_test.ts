@@ -10,12 +10,19 @@
  * a pure refusal — it spent nothing, so it must not consume the claims cap. Claims that DID
  * initiate paid turns and still yield with zero progress keep burning attempts exactly as
  * audio-feed-zrkn specified (pinned by the second row: the cap is NOT weakened).
+ *
+ * audio-feed-refcap (review fix): a pure refusal must not RESET attempts either — that
+ * deleted the only abandonment bound and let a later refusal wipe earlier real spend.
+ * Refusals get their own counter and cap: attempts stay monotone (row 3), the refusal
+ * loop terminates failed with a distinct reason and a notification (row 4), and Paul's
+ * transient still recovers on a healthy tick (row 1).
  */
 import { assert, assertEquals } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult, SynthesisOptions } from "../src/tts/gemini.ts";
+import { isPreturnRefusalExhaustion } from "../src/types.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { controlledInvocationClock } from "./fixtures/invocation_clock.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -125,6 +132,11 @@ Deno.test(
       0,
       "a pure pre-turn refusal spent nothing, so the attempt counter must stay 0",
     );
+    assertEquals(
+      afterThree.refusals ?? 0,
+      3,
+      "each pure refusal must be counted on the separate refusal counter (audio-feed-refcap)",
+    );
     assert(
       !(afterThree.error ?? "").includes("zero durable progress"),
       "the episode must never reach the zero-progress terminal state: " + afterThree.error,
@@ -194,5 +206,154 @@ Deno.test(
       (exhausted?.error ?? "").includes("zero durable progress across all claims"),
       "terminal reason must name the exhaustion: " + exhausted?.error,
     );
+  },
+);
+
+Deno.test(
+  "audio-feed-refcap: attempts are monotone — spend, spend, refuse leaves attempts at 2, not 0",
+  async () => {
+    const { ctx, stores } = await setupEnv();
+    const time = controlledInvocationClock();
+    let call = 0;
+    // Ticks 1-2 are the audio-feed-zrkn shape: the claim initiates the paid turn,
+    // the provider burns 80s and 500s, the inner retry's preflight refuses — the
+    // CLAIM spent, so its yield keeps the attempt it counted at claim time.
+    // Tick 3 is a PURE refusal: the pre-turn stage burns the budget before the
+    // preflight, zero paid turns initiated in the whole claim.
+    const spendSpendRefuseClient = {
+      async synthesizeNarration(_input: NarrationInput, options: SynthesisOptions) {
+        call++;
+        if (call <= 4) {
+          await options.resume?.prepare("segment-1", "voice-a");
+          await time.advance(80_000);
+          throw Object.assign(new Error("provider exploded"), { status: 500 });
+        }
+        await time.advance(63_000);
+        await options.resume?.prepare("segment-1", "voice-a");
+        return fakeAudio();
+      },
+    };
+    const synth = createGeminiSynthesizer(ctx, {
+      client: spendSpendRefuseClient as unknown as GeminiTtsClient,
+      scriptGenerator: null,
+    });
+    const batchOpts = { maxInvocationDurationMs: 90_000, clock: time.clock };
+
+    for (let tick = 1; tick <= 2; tick++) {
+      const result = await runSynthesisBatch(ctx, synth, {
+        owner: `worker-mono-${tick}`,
+        ...batchOpts,
+      });
+      assertEquals(result.yielded.length, 1, `spending tick ${tick} must yield`);
+    }
+    const afterSpend = await stores.metadata.getEpisode("user-1", "episode-1");
+    assertEquals(afterSpend?.attempts ?? 0, 2, "two spending claims must stand in attempts");
+
+    const refused = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-mono-3",
+      ...batchOpts,
+    });
+    assertEquals(refused.yielded.length, 1, "the pure refusal must yield, not fail");
+    const after = await stores.metadata.getEpisode("user-1", "episode-1");
+    assertEquals(
+      after?.attempts ?? 0,
+      2,
+      "a pure refusal must not wipe the spend history of earlier claims: " +
+        "spend, spend, refuse leaves attempts at 2 (audio-feed-refcap)",
+    );
+    assertEquals(after?.refusals ?? 0, 1, "the pure refusal must land on the refusal counter");
+    assertEquals(after?.status, "pending");
+  },
+);
+
+Deno.test(
+  "audio-feed-refcap: pure refusals terminate at the refusal cap — failed with the distinct reason, zero spend, notification emitted",
+  async () => {
+    const { ctx, stores } = await setupEnv();
+    // The refusal-exhaustion notification is asserted below, so the outbox must be on.
+    (ctx.config as AppConfig).notifyOutboxEnabled = true;
+    const time = controlledInvocationClock();
+    let preflightsPassed = 0;
+    const alwaysRefusesClient = {
+      async synthesizeNarration(_input: NarrationInput, options: SynthesisOptions) {
+        await time.advance(63_000);
+        await options.resume?.prepare("segment-1", "voice-a");
+        preflightsPassed++; // only reached when the preflight ADMITS the turn
+        return fakeAudio();
+      },
+    };
+    const synth = createGeminiSynthesizer(ctx, {
+      client: alwaysRefusesClient as unknown as GeminiTtsClient,
+      scriptGenerator: null,
+    });
+    const batchOpts = { maxInvocationDurationMs: 90_000, clock: time.clock };
+
+    // MAX_PRETURN_REFUSALS = 6: six refused ticks must yield (pending), not fail.
+    for (let tick = 1; tick <= 6; tick++) {
+      const result = await runSynthesisBatch(ctx, synth, {
+        owner: `worker-refcap-${tick}`,
+        ...batchOpts,
+      });
+      assertEquals(result.yielded.length, 1, `refusal tick ${tick} must yield, not fail`);
+      assertEquals(
+        result.failed.length,
+        0,
+        `refusal tick ${tick} must not report a failure`,
+      );
+    }
+    assertEquals(
+      preflightsPassed,
+      0,
+      "every refused claim must have initiated zero paid turns: zero provider spend",
+    );
+    const beforeCap = await stores.metadata.getEpisode("user-1", "episode-1");
+    assertEquals(beforeCap?.status, "pending", "six refusals must not have failed the episode yet");
+    assertEquals(beforeCap?.refusals ?? 0, 6);
+
+    // Tick 7: claimEpisode must refuse and fail the episode — the loop stops here.
+    const terminal = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-refcap-7",
+      ...batchOpts,
+    });
+    assertEquals(
+      terminal.yielded.length,
+      0,
+      "a refusal-exhausted episode must not be claimable again",
+    );
+    assertEquals(
+      terminal.ready.length,
+      0,
+      "a refusal-exhausted episode must not synthesise",
+    );
+    const failed = await stores.metadata.getEpisode("user-1", "episode-1");
+    assertEquals(
+      failed?.status,
+      "failed",
+      "the episode must reach the terminal failed state, not rot in pending",
+    );
+    assert(
+      isPreturnRefusalExhaustion(failed?.error),
+      "terminal reason must be the distinct refusal reason: " + failed?.error,
+    );
+    assert(
+      (failed?.error ?? "").includes("6 times without ever initiating a paid turn"),
+      "the reason must name the refusal count: " + failed?.error,
+    );
+    // The loop stays stopped: a further tick neither claims nor revives it.
+    const afterStop = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-refcap-8",
+      ...batchOpts,
+    });
+    assertEquals(afterStop.yielded.length, 0, "the failed episode must stay out of the queue");
+    assertEquals(afterStop.ready.length, 0);
+    assertEquals(failed?.attempts ?? 0, 0, "pure refusals never leave spend history behind");
+
+    // Terminal must not be silent: the worker emits the failure notification.
+    const outbox = await stores.metadata.listOutbox();
+    assertEquals(outbox.length, 1, "exactly one failure notification must be queued");
+    const notification = outbox[0];
+    assert(notification, "the failure notification must exist");
+    assertEquals(notification.status, "failed");
+    assertEquals(notification.episodeId, "episode-1");
   },
 );

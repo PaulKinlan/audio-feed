@@ -488,6 +488,8 @@ export interface EpisodeRepository {
       phase?: string;
       now?: string;
       advanceAttempts?: boolean;
+      /** Pure pre-turn refusal: count the refusal and return the claim own increment (attempts stays monotone) (audio-feed-refcap). */
+      incrementRefusals?: boolean;
       uploadRetry?: number;
       incrementUploadRetry?: boolean;
     },

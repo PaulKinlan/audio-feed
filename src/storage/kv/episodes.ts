@@ -31,6 +31,8 @@ import {
   isClaimExpired,
   isPublishable,
   oldestClaimFirst,
+  preturnRefusalCap,
+  preturnRefusalExhaustedError,
   unsynthesized,
   utcDayKey,
 } from "../../types.ts";
@@ -409,6 +411,44 @@ export function createEpisodesRepository(
           : (prior ? `${prior}; ${expiredMsg}` : expiredMsg))
         : prior;
 
+      // audio-feed-refcap: the zero-spend pre-turn refusal loop is bounded by its OWN counter,
+      // not by attempts. A pure refusal returns its own claim's increment (see yieldEpisodeClaim),
+      // so `attempts` keeps meaning "claims that may have spent" and can never bound a loop whose
+      // claims provably spent nothing — and the previous fix's attempts-reset (which also wiped
+      // earlier spend history) removed the only bound entirely: the pre-claim gate sees a fresh
+      // invocation budget on every tick, and a clean yield releases the lease before it could
+      // ever expire. Each pure refusal increments `refusals`; at the cap the episode fails here
+      // with a reason distinct from the zero-progress spend exhaustion, and stays failed —
+      // visible to the admin failed list and notified — instead of looping pending forever.
+      // Checked BEFORE the attempts abandonment: the refusal reason is the more specific truth.
+      const priorRefusals = found.refusals ?? 0;
+      const refusalCap = preturnRefusalCap(claim.maxClaims);
+      if (priorRefusals >= refusalCap) {
+        const refusalReason = preturnRefusalExhaustedError(priorRefusals, refusalCap);
+        const refusedOut: Episode = {
+          ...unsynthesized(found, refusalReason),
+          claimedAt: undefined,
+          claimedBy: undefined,
+          phase: found.phase,
+          lastHeartbeat: found.lastHeartbeat,
+        };
+        const wroteRefusal = await atomicPutEpisode(core, refusedOut, entry);
+        if (wroteRefusal) {
+          // No lease-expiry facts here (nothing expired): the record names the refusal count
+          // and the cap, and severity "error" like the other terminal claim records.
+          await host().appendLog(
+            claimLifecycleEvent(refusedOut, {
+              phase: refusedOut.phase ?? "claimed",
+              attempt: Math.max(1, refusedOut.attempts ?? 1),
+              severity: "error",
+              reason: refusalReason,
+              context: { claimOutcome: "failed", refusals: priorRefusals, refusalCap },
+            }),
+          );
+        }
+        return null;
+      }
+
       if (attempts > claim.maxClaims) {
         // Abandon rather than re-bill. Still checked, so this cannot clobber a
         // worker that legitimately claimed between our read and this write.
@@ -526,7 +566,8 @@ export function createEpisodesRepository(
         phase: update.phase ?? current.phase,
         scriptTurns: update.scriptTurns ?? current.scriptTurns,
         bytesAttempted: update.bytesAttempted ?? current.bytesAttempted,
-        ...(madeScriptProgress ? { attempts: 0 } : {}),
+        // audio-feed-refcap: durable script progress restarts the refusal budget too.
+        ...(madeScriptProgress ? { attempts: 0, refusals: 0 } : {}),
       };
       const wrote = await atomicPutEpisode(core, updated, entry);
       if (wrote && update.phase && update.phase !== current.phase) {
@@ -549,6 +590,8 @@ export function createEpisodesRepository(
         phase?: string;
         now?: string;
         advanceAttempts?: boolean;
+        /** Pure pre-turn refusal: count the refusal and return the claim own increment (attempts stays monotone) (audio-feed-refcap). */
+        incrementRefusals?: boolean;
         uploadRetry?: number;
         incrementUploadRetry?: boolean;
       },
@@ -559,6 +602,16 @@ export function createEpisodesRepository(
       if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
       }
+      // audio-feed-refcap attempt accounting, one row per yield shape:
+      // - clean progress yield (neither flag): durable progress restarts BOTH budgets;
+      // - real-spend zero-progress yield (advanceAttempts): the claim keeps the attempt it
+      //   counted at claim time (audio-feed-zrkn) and refusals stand;
+      // - pure pre-turn refusal (incrementRefusals): the claim returns its OWN increment so
+      //   attempts goes back to its pre-claim value — never across it, so spend, spend, refuse
+      //   still reads 2 (attempts is monotone over real history, never reset to 0) — and the
+      //   refusal lands on its own counter, where claimEpisode's cap bounds the zero-spend loop.
+      const advanceAttempts = update?.advanceAttempts ?? false;
+      const incrementRefusals = update?.incrementRefusals ?? false;
       const yielded: Episode = {
         ...current,
         status: "pending",
@@ -566,7 +619,16 @@ export function createEpisodesRepository(
         claimedBy: undefined,
         phase: update?.phase ?? current.phase,
         lastHeartbeat: update?.now ?? new Date().toISOString(),
-        attempts: update?.advanceAttempts ? (current.attempts ?? 0) : 0,
+        attempts: incrementRefusals
+          ? Math.max(0, (current.attempts ?? 1) - 1)
+          : advanceAttempts
+          ? (current.attempts ?? 0)
+          : 0,
+        refusals: incrementRefusals
+          ? (current.refusals ?? 0) + 1
+          : advanceAttempts
+          ? current.refusals
+          : 0,
         uploadRetry: update?.uploadRetry !== undefined
           ? update.uploadRetry
           : update?.incrementUploadRetry
@@ -653,6 +715,7 @@ export function createEpisodesRepository(
         ...found,
         status: "pending",
         attempts: undefined,
+        refusals: undefined,
         claimedAt: undefined,
         claimedBy: undefined,
         error: undefined,
@@ -676,6 +739,7 @@ export function createEpisodesRepository(
         status: "pending",
         regenerating: true,
         attempts: undefined,
+        refusals: undefined,
         claimedAt: undefined,
         claimedBy: undefined,
         error: undefined,
