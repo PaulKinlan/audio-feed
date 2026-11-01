@@ -1,0 +1,16 @@
+{
+  "script": "scripts/repro_b6nr_token_storage.ts",
+  "sha": "9cc71c7fed2db6a79403916da8233cf3ebc06fb7",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T05:12:10.276Z",
+  "endedAt": "2026-11-01T05:12:59.976Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "before.json": "sha256:f7686573b1faea156c4643bccbca2ba60342bc84e092769981f94b918b3b2d4c",
+    "repro.json": "sha256:a5aa534af6f8b55ffd8452fe3bb41484b1cf61a3dbf1b9cd638c01a8f826dd96"
+  }
+}
