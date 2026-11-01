@@ -17,7 +17,9 @@
  *   for the evaluate for ever
  * - until() still lets a thrown expression through unwrapped and unretried
  * - withHangBound() bounds ONE raw cdp reply that never arrives as CdpHangBoundExceeded, naming
- *   the command, and passes a real reply's value - or its own error - through unchanged
+ *   the command and the bound it was given, and passes a real reply's value - or its own error -
+ *   through unchanged. The bound is measured on a FAKE clock: what it must react to is virtual
+ *   time elapsing, and wall-clock promptness is not a property of this function on a shared host
  * - the exported MEASURED_STARVED_POLL_MS / HANG_BOUND_MS pair is still 8s and 15x it
  * - close() closes the WebSocket cleanly
  *
@@ -26,6 +28,7 @@
  */
 
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { FakeTime } from "@std/testing/time";
 import {
   CdpHangBoundExceeded,
   connectCdp,
@@ -38,16 +41,55 @@ Deno.test(
   "proof-cdp: withHangBound bounds ONE raw cdp reply that never arrives as a named failure, and passes real replies and errors through unchanged",
   async () => {
     // The failure the bound exists for: the command was sent, the reply never comes. A promise
-    // that never settles is exactly that reply; the race must reject inside the bound with the
-    // SAME class js() uses, naming the command, so a sweep's screenshot stall is actionable
-    // instead of a silent hang past the last PASS (measured on account-browser-proof).
+    // that never settles is exactly that reply; the race must reject at the bound with the SAME
+    // class js() uses, naming the command and the bound in force, so a sweep's screenshot stall
+    // is actionable instead of a silent hang past the last PASS (measured on
+    // account-browser-proof).
+    //
+    // The bound is driven by a FAKE clock, not by the stopwatch this row used to hold. Wall-clock
+    // promptness is NOT a property of withHangBound on a shared host: its timer fires only when
+    // the event loop is scheduled, and a starved lane can be seconds late (this repo's own
+    // measured starved-poll floor is MEASURED_STARVED_POLL_MS = 8s). The old `elapsed < 5_000`
+    // consequently asserted the health of the BOX, not the function - it reddened a healthy bound
+    // at 6000ms on the loaded gate host. Advancing virtual time is deterministic on any host and
+    // is the only input the function is allowed to depend on.
     const never = new Promise<unknown>(() => {});
-    const start = Date.now();
-    const err = await withHangBound("Page.captureScreenshot", never, 150).then(
-      () => null,
-      (e: unknown) => e,
+    let settled = false;
+    let err: unknown = null;
+    let elapsed = -1;
+    {
+      const fakeTime = new FakeTime();
+      try {
+        const start = Date.now();
+        void withHangBound("Page.captureScreenshot", never, 150).then(
+          () => {
+            settled = true;
+          },
+          (e: unknown) => {
+            settled = true;
+            err = e;
+          },
+        );
+        // Exactly the bound the caller passed, on the clock. An implementation that ignored
+        // `timeoutMs` and armed HANG_BOUND_MS instead would still be pending here, so this
+        // catches the same regression the stopwatch was reaching for - without the box.
+        await fakeTime.tick(150);
+        await fakeTime.runMicrotasks();
+        elapsed = Date.now() - start;
+      } finally {
+        fakeTime.restore();
+      }
+    }
+    assert(
+      settled,
+      "the 150ms bound must fire at 150ms of clock time: the reply never arrived, so the race " +
+        "had to have settled - it was still pending after the bound elapsed",
     );
-    const elapsed = Date.now() - start;
+    assertEquals(
+      elapsed,
+      150,
+      "the bound must fire at the bound it was given, not at the 120s default",
+    );
     assert(
       err instanceof CdpHangBoundExceeded,
       `a never-answered raw reply must reject as CdpHangBoundExceeded, got ${String(err)}`,
@@ -59,10 +101,6 @@ Deno.test(
     );
     assertStringIncludes(message, `${HANG_BOUND_MS}ms by default`);
     assertStringIncludes(message, "sent exactly once");
-    assert(
-      elapsed < 5_000,
-      `an explicit 150ms raw-reply bound must fail well inside it; elapsed ${elapsed}ms`,
-    );
 
     // A reply that DOES arrive passes through unchanged, value and type.
     const value = await withHangBound("Page.enable", Promise.resolve({ enabled: true }), 150);
