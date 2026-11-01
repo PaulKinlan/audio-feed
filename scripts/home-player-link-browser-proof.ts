@@ -11,10 +11,10 @@
  *      - Verifies /listen auto-redirects to /listen/:token when token is stored.
  *      - Verifies submitting an article on /account reports a queued success state (the player link this used to
  *        check lives only in the dead legacy home module; see the retirement note in the submission section).
- *      - Takes desktop screenshot.
+ *      - Takes desktop screenshot (quantised to 256-colour PNG8 in place, audio-feed-s6w2q).
  *   3. Mobile (390x844):
  *      - Verifies responsive layout and zero horizontal overflow.
- *      - Takes mobile screenshot.
+ *      - Takes mobile screenshot (quantised to 256-colour PNG8 in place, audio-feed-s6w2q).
  *
  *   deno run --allow-all --unstable-kv scripts/home-player-link-browser-proof.ts
  */
@@ -26,6 +26,7 @@ import {
   withChrome,
   writeEvidenceReadme,
 } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const ASSERTS = [
   "header navigation links to /listen",
@@ -337,6 +338,7 @@ try {
           `${OUT}01-home-player-link-desktop.png`,
           Uint8Array.from(atob(shotDesktop.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(`${OUT}01-home-player-link-desktop.png`);
         console.log(`Saved screenshot to ${OUT}01-home-player-link-desktop.png`);
 
         // 2. Mobile test (390x844)
@@ -364,6 +366,7 @@ try {
           `${OUT}02-home-player-link-mobile-390.png`,
           Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(`${OUT}02-home-player-link-mobile-390.png`);
         console.log(`Saved screenshot to ${OUT}02-home-player-link-mobile-390.png`);
 
         ws.close();
@@ -374,6 +377,7 @@ try {
         title: "Front door player links",
         script: "scripts/home-player-link-browser-proof.ts",
         asserts: ASSERTS,
+        notes: ["Captures are 256-colour PNG8, quantised in place by the proof before the run record is sealed (audio-feed-s6w2q)"],
         checker,
       });
     }
