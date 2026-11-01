@@ -19,6 +19,8 @@
  */
 import { assert, assertEquals } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
+import { MemoryBlobStore } from "../src/storage/memory.ts";
+import { KvMetadataStore } from "../src/storage/kv.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult, SynthesisOptions } from "../src/tts/gemini.ts";
@@ -39,8 +41,66 @@ function fakeAudio(durationSeconds = 10): DecodedAudioResult {
   };
 }
 
-async function setupEnv() {
-  const stores: Stores = memoryStores();
+/**
+ * The refusal cap and the refusal counter live in the STORE (`claimEpisode` checks
+ * `refusals >= preturnRefusalCap`, `yieldEpisodeClaim` increments it), and production opens
+ * `KvMetadataStore` (`src/config.ts` `openStores`). The rows below must therefore run against
+ * BOTH adapters, constructed the way `tests/storage_test.ts` constructs them for the shared
+ * conformance suite: identical rows per adapter, in-memory Deno KV for the KV one.
+ *
+ * audio-feed-kvref: with only the memory double registered, mutating the refusal cap in
+ * `src/storage/kv/episodes.ts` to effectively infinite left every row in this file green —
+ * production's refusal loop bound was pinned by nothing.
+ */
+interface StoresUnderTest {
+  stores: Stores;
+  close: () => Promise<void>;
+}
+
+const ADAPTERS: { name: string; create: () => Promise<StoresUnderTest> }[] = [
+  {
+    name: "MemoryMetadataStore",
+    create: () => {
+      const stores: Stores = memoryStores();
+      return Promise.resolve({
+        stores,
+        close: () => stores.metadata.close(),
+      });
+    },
+  },
+  {
+    name: "KvMetadataStore",
+    create: async () => {
+      const kv = await Deno.openKv(":memory:");
+      return {
+        stores: {
+          metadata: new KvMetadataStore(kv, { ownsConnection: true }),
+          blobs: new MemoryBlobStore(),
+          describe: "metadata=kv blobs=memory",
+        },
+        close: async () => {
+          await kv.close();
+        },
+      };
+    },
+  },
+];
+
+/** Register one row against every adapter, with a fresh store per adapter. */
+function row(label: string, fn: (stores: Stores) => Promise<void>) {
+  for (const adapter of ADAPTERS) {
+    Deno.test(`${label} [${adapter.name}]`, async () => {
+      const underTest = await adapter.create();
+      try {
+        await fn(underTest.stores);
+      } finally {
+        await underTest.close();
+      }
+    });
+  }
+}
+
+async function setupEnv(stores: Stores) {
   await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
   await stores.metadata.putArticle(
@@ -61,8 +121,6 @@ async function setupEnv() {
       mode: "direct",
     }),
   );
-  const ctx = { config, stores };
-  return { ctx, stores };
 }
 
 /** The synthesizer's narration input type is structural; only the fields below are read. */
@@ -95,10 +153,11 @@ function healthyClient() {
   };
 }
 
-Deno.test(
+row(
   "audio-feed-preturn: three pre-turn refusals must not permanently fail an episode that never initiated a paid turn; a healthy fourth tick completes it",
-  async () => {
-    const { ctx, stores } = await setupEnv();
+  async (stores) => {
+    await setupEnv(stores);
+    const ctx = { config, stores };
     const time = controlledInvocationClock();
     const synth = createGeminiSynthesizer(ctx, {
       client: slowPreTurnClient(time, 63_000) as unknown as GeminiTtsClient,
@@ -157,10 +216,11 @@ Deno.test(
   },
 );
 
-Deno.test(
+row(
   "audio-feed-preturn: the cap is NOT weakened — a claim that initiated paid turns and yields with zero progress still exhausts at 3/3",
-  async () => {
-    const { ctx, stores } = await setupEnv();
+  async (stores) => {
+    await setupEnv(stores);
+    const ctx = { config, stores };
     const time = controlledInvocationClock();
     let call = 0;
     const spendingThenFailingClient = {
@@ -209,10 +269,11 @@ Deno.test(
   },
 );
 
-Deno.test(
+row(
   "audio-feed-refcap: attempts are monotone — spend, spend, refuse leaves attempts at 2, not 0",
-  async () => {
-    const { ctx, stores } = await setupEnv();
+  async (stores) => {
+    await setupEnv(stores);
+    const ctx = { config, stores };
     const time = controlledInvocationClock();
     let call = 0;
     // Ticks 1-2 are the audio-feed-zrkn shape: the claim initiates the paid turn,
@@ -266,10 +327,11 @@ Deno.test(
   },
 );
 
-Deno.test(
+row(
   "audio-feed-refcap: pure refusals terminate at the refusal cap — failed with the distinct reason, zero spend, notification emitted",
-  async () => {
-    const { ctx, stores } = await setupEnv();
+  async (stores) => {
+    await setupEnv(stores);
+    const ctx = { config, stores };
     // The refusal-exhaustion notification is asserted below, so the outbox must be on.
     (ctx.config as AppConfig).notifyOutboxEnabled = true;
     const time = controlledInvocationClock();
@@ -355,5 +417,88 @@ Deno.test(
     assert(notification, "the failure notification must exist");
     assertEquals(notification.status, "failed");
     assertEquals(notification.episodeId, "episode-1");
+  },
+);
+
+row(
+  "audio-feed-refcap: a REGENERATING episode at the refusal cap keeps its playable audio, and the record and the notification name the same reason",
+  async (stores) => {
+    (config as AppConfig).notifyOutboxEnabled = true;
+    await setupEnv(stores);
+    // A published episode the subscriber asked to regenerate: pending, still playable, old key.
+    const published = makeEpisode({
+      id: "episode-1",
+      userId: "user-1",
+      sourceId: "inbox",
+      articleId: "article-1",
+      status: "pending",
+      regenerating: true,
+      audioKey: "audio/user-1/direct/episode-1.mp3",
+      contentType: "audio/mpeg",
+    });
+    await stores.metadata.putEpisode(published);
+    const ctx = { config, stores };
+    const time = controlledInvocationClock();
+    const alwaysRefusesClient = {
+      async synthesizeNarration(_input: NarrationInput, options: SynthesisOptions) {
+        await time.advance(63_000);
+        await options.resume?.prepare("segment-1", "voice-a");
+        return fakeAudio();
+      },
+    };
+    const synth = createGeminiSynthesizer(ctx, {
+      client: alwaysRefusesClient as unknown as GeminiTtsClient,
+      scriptGenerator: null,
+    });
+    const batchOpts = { maxInvocationDurationMs: 90_000, clock: time.clock };
+
+    // Six refusals stay pending; the seventh claim crosses the cap inside claimEpisode.
+    let terminal = { failed: [], ready: [], yielded: [], skipped: [] } as unknown as Awaited<
+      ReturnType<typeof runSynthesisBatch>
+    >;
+    for (let tick = 1; tick <= 7; tick++) {
+      terminal = await runSynthesisBatch(ctx, synth, {
+        owner: `worker-regen-refcap-${tick}`,
+        ...batchOpts,
+      });
+    }
+
+    const record = await stores.metadata.getEpisode("user-1", "episode-1");
+    assert(record, "the episode must still exist");
+    // audio-feed-8oz: a regeneration that produces no new audio goes back to READY on its old
+    // audio rather than failing out of the feed. `unsynthesized` decides that, so the refusal cap
+    // inherits it — the refusal reason is recorded, the subscription keeps its playable episode.
+    assertEquals(record.status, "ready", "a failed regeneration must not remove the episode");
+    assertEquals(
+      record.audioKey,
+      published.audioKey,
+      "the regeneration must leave the previously published audio in place",
+    );
+    assert(
+      isPreturnRefusalExhaustion(record.error),
+      "the record must name the refusal exhaustion: " + record.error,
+    );
+    assertEquals(record.regenerating, undefined, "the regeneration attempt must be closed out");
+    assertEquals(record.refusals, 6, "the six counted refusals stand on the record");
+
+    // The reviewer's P2 asked whether the record and the notification disagree here. They do not,
+    // and this row is what says so: the worker's refusal-exhaustion branch is guarded by
+    // `afterClaim?.status === "failed"` (src/worker/synthesis.ts), and a regenerating episode that
+    // exhausts its refusals reaches `ready`, so nothing is queued. A still-playable episode must
+    // never be announced as failed — the watchdog notification (`notifyOnDemand`) suppresses
+    // regenerating episodes for the same reason, so both shapes agree: no failure announcement for
+    // an episode that is still in the feed.
+    const outbox = await stores.metadata.listOutbox();
+    assertEquals(
+      outbox.length,
+      0,
+      "a regeneration that returns to ready must not queue a failure notification: " +
+        JSON.stringify(outbox.map((n) => [n.status, n.error])),
+    );
+    assertEquals(
+      terminal.failed.length,
+      0,
+      "the batch must not report a failure for an episode that is still playable",
+    );
   },
 );
