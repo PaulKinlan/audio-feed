@@ -189,8 +189,15 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         'throw_error: {"text":"uncaught error"}',
       );
 
-      // 6. Test until() success
-      await client.until("poll_counter", "counter ready", 500);
+      // 6. Test until() success. The budget is DERIVED, not a fixed 500: this is the success
+      // path against the in-process mock, so the only thing that must fit is one evaluate -
+      // and under gate load even a mock round-trip starves past a fraction of a second
+      // (measured in a loaded fast gate: elapsed 799ms, polls 0, the evaluate never answered
+      // inside 500ms). Two x the imported MEASURED_STARVED_POLL_MS floor accommodates one full
+      // starved evaluate and still leaves the poll cycle room to observe the truthy result.
+      // The deliberate SHORT probe is test 7 below: an explicit 150ms timeout must be
+      // honoured, and that one keeps its 150.
+      await client.until("poll_counter", "counter ready", 2 * MEASURED_STARVED_POLL_MS);
 
       // 7. Test until() timeout: an explicit timeoutMs is HONOURED (bounded by ~150ms, not the
       // 120s derived hang bound the helper defaults to) and the error names what was waited for,

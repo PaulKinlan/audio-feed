@@ -428,7 +428,12 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         // audio-feed-1vxbj: this wait is page LOAD (navigation + stylesheet + layout), not a
         // style-state poll - under a full-gate load a starved renderer blew the 5s default
         // (measured: the gate run failed here at 21s into the row; the isolated pass takes
-        // 22s). It gets 20s; the state polls below keep 5s.
+        // 22s). The END is the event (readyState "complete" && scrollable); the ceiling is
+        // DERIVED, not a counted 20s window: this is the same load class the bootstrap
+        // scripts bound with HANG_BOUND_MS = 15 x the 8s MEASURED_STARVED_POLL_MS floor
+        // (scripts/proof-cdp.ts), because in a loaded fast gate the starved renderer never
+        // got there in 20s at all ("/listen: page did not become scrollable within 20s").
+        // The state polls below keep their 5s default.
         const loaded = await until(
           () =>
             evaluate(
@@ -437,9 +442,13 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
               } && document.readyState === "complete" && document.documentElement.scrollHeight > innerHeight`,
             ),
           Boolean,
-          20_000,
+          HANG_BOUND_MS,
         );
-        assert(loaded, `${url}: page did not become scrollable within 20s`);
+        assert(
+          loaded,
+          `${url}: page did not become scrollable within the ${HANG_BOUND_MS}ms derived ` +
+            `load ceiling (last poll value: ${loaded})`,
+        );
         const probe = () => evaluate(PROBE(surface, wrap)).then(JSON.parse);
         // The unscrolled baseline still polls on a wall-clock deadline: no transition is in
         // flight before the first scroll, so there is no mid-transition value to race.
