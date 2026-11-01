@@ -111,7 +111,7 @@
  * the census; making a diagnostic fail on age would turn it into an outage. Only the RUN path may
  * exit non-zero for these states.
  */
-import { fromFileUrl, join, relative, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, relative, resolve } from "@std/path";
 import { stripComments } from "./test-selection.ts";
 
 export interface Declaration {
@@ -142,6 +142,12 @@ export interface Declaration {
 export interface Options {
   list: boolean;
   only?: string;
+  /**
+   * fleet/only-isolation: escape hatch for a `--only` run whose script also declares sibling
+   * evidence dirs. Default false (undefined): the run refuses loudly. With the flag, the siblings
+   * are snapshot before the run and verified + restored after it, and what was restored is printed.
+   */
+  allowSiblings?: boolean;
   timeoutMs: number;
   root: string;
   explicitTimeout: boolean;
@@ -260,15 +266,22 @@ export async function readRunRecord(dirAbs: string): Promise<RunRecordRead> {
 }
 
 const USAGE =
-  `usage: deno task evidence [--list] [--only <evidence-dir>] [--timeout <seconds>] [--root <dir>]`;
+  `usage: deno task evidence [--list] [--only <evidence-dir>] [--allow-siblings] [--timeout <seconds>] [--root <dir>]`;
 
 export function parseOptions(args: string[]): Options {
   const root = resolve(fromFileUrl(new URL("../", import.meta.url)));
-  const options: Options = { list: false, timeoutMs: 300_000, root, explicitTimeout: false };
+  const options: Options = {
+    list: false,
+    allowSiblings: false,
+    timeoutMs: 300_000,
+    root,
+    explicitTimeout: false,
+  };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const value = args[i + 1];
     if (arg === "--list") options.list = true;
+    else if (arg === "--allow-siblings") options.allowSiblings = true;
     else if (arg === "--only" && value) {
       options.only = value;
       i++;
@@ -512,6 +525,113 @@ export async function hashEvidenceDir(dirAbs: string): Promise<Record<string, st
   }
   await walk("");
   return artefacts;
+}
+
+/**
+ * fleet/only-isolation: an in-memory snapshot of one evidence dir's artefacts, taken before a
+ * `--allow-siblings` run so the sibling can be verified and restored afterwards. Same exclusions
+ * as hashEvidenceDir (top-level README.md and run.json stay out); the BYTES are kept, not hashes,
+ * because restoring is the point - a hash alone could detect the tamper but not undo it. A few
+ * hundred KB per dir.
+ */
+export interface EvidenceDirSnapshot {
+  /** Whether the directory existed at snapshot time. */
+  existed: boolean;
+  /** dir-relative path -> bytes, for every artefact present at snapshot time. */
+  files: Map<string, Uint8Array>;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** Snapshot every artefact of one evidence dir (fleet/only-isolation). Symlinks are skipped, as in hashEvidenceDir. */
+export async function snapshotEvidenceDir(dirAbs: string): Promise<EvidenceDirSnapshot> {
+  const files = new Map<string, Uint8Array>();
+  let existed = true;
+  try {
+    await Deno.stat(dirAbs);
+  } catch {
+    existed = false;
+  }
+  async function walk(rel: string): Promise<void> {
+    const abs = rel === "" ? dirAbs : join(dirAbs, rel);
+    const entries: Deno.DirEntry[] = [];
+    for await (const entry of Deno.readDir(abs)) entries.push(entry);
+    entries.sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const entry of entries) {
+      if (entry.isSymlink) continue;
+      const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory) {
+        await walk(childRel);
+        continue;
+      }
+      if (rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
+      files.set(childRel, await Deno.readFile(join(dirAbs, childRel)));
+    }
+  }
+  if (existed) await walk("");
+  return { existed, files };
+}
+
+/**
+ * Restore a snapshot after a run (fleet/only-isolation): files the run created are REMOVED, files
+ * it rewrote or deleted are rewritten with their snapshot bytes. Returns what it did, sorted, so
+ * the caller can print it; an empty pair means the sibling was verified unchanged.
+ */
+export async function restoreEvidenceSnapshot(
+  dirAbs: string,
+  snapshot: EvidenceDirSnapshot,
+): Promise<{ restored: string[]; removed: string[] }> {
+  const restored: string[] = [];
+  const removed: string[] = [];
+  const onDisk = new Set<string>();
+  let dirExists = true;
+  try {
+    await Deno.stat(dirAbs);
+  } catch {
+    dirExists = false;
+  }
+  async function walk(rel: string): Promise<void> {
+    const abs = rel === "" ? dirAbs : join(dirAbs, rel);
+    const entries: Deno.DirEntry[] = [];
+    for await (const entry of Deno.readDir(abs)) entries.push(entry);
+    entries.sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const entry of entries) {
+      if (entry.isSymlink) continue;
+      const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory) {
+        await walk(childRel);
+        continue;
+      }
+      if (rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
+      onDisk.add(childRel);
+    }
+  }
+  if (dirExists) await walk("");
+  for (const name of [...onDisk].sort()) {
+    if (!snapshot.files.has(name)) {
+      await Deno.remove(join(dirAbs, name));
+      removed.push(name);
+    }
+  }
+  for (const name of [...snapshot.files.keys()].sort()) {
+    const abs = join(dirAbs, name);
+    let same = false;
+    try {
+      same = bytesEqual(await Deno.readFile(abs), snapshot.files.get(name)!);
+    } catch {
+      same = false;
+    }
+    if (!same) {
+      await Deno.mkdir(dirname(abs), { recursive: true });
+      await Deno.writeFile(abs, snapshot.files.get(name)!);
+      restored.push(name);
+    }
+  }
+  return { restored, removed };
 }
 
 export interface RecordValidationContext {
@@ -1156,6 +1276,53 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     Deno.exit(1);
   }
 
+  /**
+   * fleet/only-isolation: `--only <dir>` must isolate. One proof script can declare SEVERAL
+   * evidence dirs (scripts/bookmarklet-browser-proof.ts serves audio-feed-ep1 AND audio-feed-6hw),
+   * and the tier can know that statically from the READMEs' `- Script:` lines before anything
+   * runs. Observed damage: `--only audio-feed-6hw` executed the whole script, which re-wrote
+   * ep1's PNGs and left ep1's record hashing bytes that no longer existed - a record tampered by
+   * the very tool that exists to detect tampering. So the default is REFUSE: nothing runs, the
+   * siblings are named. `--allow-siblings` opts in explicitly, and then the siblings are
+   * snapshot before the run and verified + restored after it, with the restore printed - the
+   * option that cannot tamper silently either way.
+   */
+  const siblingSnapshots: Array<{ dir: string; abs: string } & EvidenceDirSnapshot> = [];
+  if (options.only && declarations.length === 1) {
+    const selected = declarations[0]!;
+    const full = await collect({ ...options, only: undefined });
+    const siblings = full.declarations.filter(
+      (declaration) =>
+        declaration.declared === selected.declared && declaration.dir !== selected.dir,
+    );
+    if (siblings.length > 0 && !options.allowSiblings) {
+      printDebt();
+      for (const sibling of siblings) {
+        console.error(
+          `[evidence] FAIL --only ${options.only} -> ${selected.declared} ` +
+            `(SIBLING WRITE: this script also declares ${sibling.dir} - running it under --only ` +
+            `would rewrite the sibling's recorded evidence and break its run.json record)`,
+        );
+      }
+      console.error(
+        `[evidence] RED: --only ${options.only} cannot isolate - ${selected.declared} also writes ` +
+          `${siblings.length} sibling dir(s) (above); refusing run. Re-run without --only to record ` +
+          `all of them, or pass --allow-siblings to snapshot the sibling(s) and restore them after the run`,
+      );
+      Deno.exit(1);
+    }
+    if (siblings.length > 0) {
+      console.log(
+        `[evidence] note: --allow-siblings: snapshotting ${siblings.length} sibling dir(s) the proof ` +
+          `also declares (${siblings.map((s) => s.dir).join(", ")}); they will be verified and ` +
+          `restored after the run`,
+      );
+      for (const sibling of siblings) {
+        const abs = join(options.root, sibling.dir);
+        siblingSnapshots.push({ dir: sibling.dir, abs, ...await snapshotEvidenceDir(abs) });
+      }
+    }
+  }
   console.log(
     `[evidence] running ${declarations.length} declared proof(s) sequentially, ${
       options.timeoutMs / 1000
@@ -1261,6 +1428,36 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       try {
         Deno.kill(-running, "SIGKILL");
       } catch { /* already gone */ }
+    }
+  }
+
+  // fleet/only-isolation: verify and restore every snapshotted sibling after the run. A restore is
+  // a named event, printed per artefact - never silence. A FAILED restore is a record incident:
+  // the sibling's run.json may now hash bytes the proof rewrote, so the run must go red.
+  for (const snap of siblingSnapshots) {
+    try {
+      const outcome = await restoreEvidenceSnapshot(snap.abs, snap);
+      if (outcome.restored.length === 0 && outcome.removed.length === 0) {
+        console.log(`[evidence] sibling ${snap.dir} verified unchanged after the --only run`);
+      } else {
+        console.log(
+          `[evidence] sibling ${snap.dir} RESTORED: rewrote ${outcome.restored.length} artefact(s)` +
+            (outcome.removed.length > 0
+              ? `, removed ${outcome.removed.length} file(s) the run created`
+              : "") +
+            ` - the sibling's record stays truthful`,
+        );
+        for (const name of outcome.restored) console.log(`  restored ${snap.dir}/${name}`);
+        for (const name of outcome.removed) {
+          console.log(`  removed ${snap.dir}/${name} (created by the --only run)`);
+        }
+      }
+    } catch (err) {
+      const reason =
+        `SIBLING RESTORE FAILED: ${snap.dir} could not be restored (${(err as Error).message}) - ` +
+        `its record may hash bytes the proof rewrote; restore it from git before trusting it`;
+      console.log(`[evidence] FAIL ${snap.dir} (${reason})`);
+      recordIncidents.push(`${snap.dir}: ${reason}`);
     }
   }
 
