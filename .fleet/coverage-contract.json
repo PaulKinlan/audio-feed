@@ -1,0 +1,8 @@
+{
+  "scripts/bd-durability-check.sh": [
+    "tests/bd_durability_check_test.ts"
+  ],
+  "tests/fixtures/bd_stub.sh": [
+    "tests/bd_durability_check_test.ts"
+  ]
+}

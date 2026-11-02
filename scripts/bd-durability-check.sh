@@ -10,6 +10,13 @@
 # or drop silently. The same error text ("table file not found") is the fleet's
 # known signature of concurrent embedded-Dolt access corrupting table files.
 #
+# COVERAGE DECLARATION (audio-feed-45s45): .fleet/coverage-contract.json maps this path to
+# tests/bd_durability_check_test.ts. The fast gate derives that suite from the spawn literal in the
+# test; the fleet's independent oracle places a changed path by stem convention, which requires
+# compatible extensions, so a .sh -> .ts edge needs the declaration to be named at all. Keep it in
+# step with the file's name (the suite's last row checks it).
+# Removing the declaration does not widen coverage: the same change reads `unmapped` in the gate record.
+#
 # WHAT IT CHECKS (exit non-zero on any failure):
 #   0. Auto-backup mode, from .beads/config.yaml (`backup.enabled`). bd's default is
 #      ON in embedded mode with a git remote, so an absent/unparseable key means ON.

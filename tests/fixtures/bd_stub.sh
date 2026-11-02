@@ -6,6 +6,12 @@
 # would have to be mid-failure to produce. Every knob is an env var, so a row states
 # its own lie explicitly:
 #
+# COVERAGE DECLARATION (audio-feed-45s45): .fleet/coverage-contract.json maps this fixture to
+# tests/bd_durability_check_test.ts - the suite copies it with copyFile, and the fleet's
+# independent oracle cannot place a .sh path from a .ts suite (its stem arm requires compatible
+# extensions), so the declaration is what names the edge. The suite's last row checks it.
+# Without it the fixture reads `unmapped` in the gate record even though this suite executed it.
+#
 #   BD_STUB_DIR         scratch dir the stub keeps its state in (required)
 #   BD_STUB_SHOW_TITLE  title `bd show` returns, when it should DIFFER from the one
 #                       `bd q` recorded — the wrong-read-back row
