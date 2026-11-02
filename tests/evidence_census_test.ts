@@ -1206,15 +1206,14 @@ Deno.test(
         `${
           unexercised.join(", ")
         }. For each one: add a test that SPAWNS it - the proof path as a ` +
-        `LITERAL in the suite's own new Deno.Command args AND the command actually STARTED - ` +
-        `.spawn()/.output()/.status() chained, held in a variable that is started, or handed to a ` +
-        `same-file wrapper that starts it - because that call text is what the ` +
-        `execute relation derives, and since audio-feed-spawnlit a never-started construction is a ` +
-        `mention and earns nothing (a mention, import or comment exercises nothing). A proof the suite ` +
-        `runs only through a harness the relation cannot name belongs in EXECUTED_WITHOUT_SPAWN above, ` +
-        `not here - or add its basename to KNOWN_UNRUN in tests/evidence_census_test.ts with a one-line ` +
-        `reason. A declared proof no suite runs and no pin names is exactly the unmapped-file COVERAGE ` +
-        `WARNING this row turns into a failing row.`,
+        `LITERAL in the suite's own new Deno.Command args AND the command actually STARTED ` +
+        `(.spawn()/.output()/.status() chained, held in a variable that is started, or handed to a ` +
+        `same-file wrapper that starts it), because that call text is what the execute relation ` +
+        `derives, and since audio-feed-spawnlit a never-started construction is a mention that earns ` +
+        `nothing (a mention, import or comment exercises nothing). A proof the suite runs only through ` +
+        `a harness the relation cannot name belongs in EXECUTED_WITHOUT_SPAWN above, not here - or add ` +
+        `its basename to KNOWN_UNRUN with a one-line reason. A declared proof no suite runs and no pin ` +
+        `names is exactly the unmapped-file COVERAGE WARNING this row turns into a failing row.`,
     );
 
     // POSITIVE CONTROL for the exercised relation: the corpus must be real or every exclusion
@@ -1224,10 +1223,9 @@ Deno.test(
         .length;
     assert(
       exercisedCount >= 5,
-      `expected a real spawned corpus, got ${exercisedCount} (measured 7 when the predicate narrowed, 6 after ` +
-        `audio-feed-spawnlit started requiring the constructed command to be STARTED: six repro_* executors ` +
-        `remain spawned, and the exww mapping row moved to EXECUTED_WITHOUT_SPAWN because its literal ` +
-        `construction was never run)`,
+      `expected a real spawned corpus, got ${exercisedCount} (measured 7 when the predicate narrowed, 6 once ` +
+        `audio-feed-spawnlit required the constructed command to be STARTED: six repro_* executors remain ` +
+        `spawned, and the exww mapping row moved to EXECUTED_WITHOUT_SPAWN - its literal was never run)`,
     );
 
     // POSITIVE CONTROLS: the walk found a real corpus on both sides, or every exclusion above

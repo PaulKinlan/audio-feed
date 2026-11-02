@@ -1520,6 +1520,10 @@ function readCallAt(source: string, index: number): boolean {
  * these reaches is a value that executes nothing. */
 const COMMAND_START_METHODS = "spawn|output|outputSync|status|statusSync";
 
+/** A construction whose own text continues into a start method (`new Deno.Command(...).output()`). */
+const CHAINED_START = new RegExp(`^\\s*\\.\\s*(?:${COMMAND_START_METHODS})\\s*\\(`);
+
+/** Does `text` (a function body, at `offset` in the file) call a start method on anything? */
 function commandStartUsage(text: string, spans: Array<[number, number]>, offset: number): boolean {
   const start = new RegExp(`\\.\\s*(?:${COMMAND_START_METHODS})\\s*\\(`, "g");
   for (const match of text.matchAll(start)) {
@@ -1545,29 +1549,24 @@ function balancedBody(source: string, spans: Array<[number, number]>, open: numb
 }
 
 /**
- * audio-feed-spawnlit: an EXECUTE call site earns its spawn credit only when the constructed command
- * is actually STARTED. The hole this closes was live in the tree: `tests/exww_mutants_test.ts` carried a
- * bare `new Deno.Command(Deno.execPath(), { args: [...literal proof path...] });` whose result was never
- * awaited or run, and the execute relation credited the named proof as SPAWNED by that suite - a proof
- * looking protected by a line that runs nothing, the exact MENTION class the census's own comment says
- * it fixed ("a mention executes nothing", tests/evidence_census_test.ts). The real execution was and is
- * `runProofIn` in scripts/exww-mutants.ts, a computed-path spawn this derivation deliberately cannot
- * name (audio-feed-4kl3/9rer: a computed argument proves nothing).
+ * audio-feed-spawnlit: an EXECUTE call earns its spawn credit only when the constructed command is
+ * actually STARTED. Found live in the tree: `tests/exww_mutants_test.ts` carried a bare
+ * `new Deno.Command(Deno.execPath(), { args: ["run", "scripts/exww-live-claims-browser-proof.ts"] });`
+ * whose value was discarded, and the execute relation credited that proof as SPAWNED by that suite - a
+ * proof looking protected by a line that runs nothing. The proof's real execution is `runProofIn` in
+ * scripts/exww-mutants.ts, a computed-path spawn this derivation deliberately cannot name.
  *
- * Started means one of three provable shapes:
- *   1. CHAINED - the construction is directly followed by a start method: `.spawn()`, `.output()`,
- *      `.outputSync()`, `.status()`, `.statusSync()` (measured on this tree: the repro_* executors chain
- *      `.spawn()`, evidence_size_trap chains `.output()`, the modern-web checker chains `.outputSync()`);
- *   2. HELD - assigned to a variable that is started later in the same file (`const cmd = new
- *      Deno.Command(...); ... await cmd.output()` - fast_check_test, select_test, evidence_png_test);
- *   3. HANDED TO A STARTER - passed as the direct argument of a call to a same-file function whose body
- *      starts the commands it is given (`await runBounded(new Deno.Command(...))` where runBounded's body
- *      calls `command.spawn()` - verify_s3uk_real_browser_test).
- * A `return new Deno.Command(...)` with no chain is NOT credited (no measured case; fail closed), and a
- * never-started construction contributes NOTHING - not to executedRelations and not to the relation:
- * it is a mention, and a mention exercises nothing. Measured consequence: the exww mapping row's edge
- * moves to EXECUTED_WITHOUT_SPAWN in tests/evidence_census_test.ts, where the census already keeps the
- * honest form of "executed through a harness the spawn relation cannot name".
+ * STARTED means one of three shapes:
+ *   1. CHAINED - the construction is followed by a start method (`.spawn()`, `.output()`,
+ *      `.outputSync()`, `.status()`, `.statusSync()`);
+ *   2. HELD - assigned to a variable that a start method is called on later in the same file;
+ *   3. HANDED TO A STARTER - the direct argument of a call to a SAME-FILE function whose body calls a
+ *      start method (a wrapper defined in another file is not followed: fail closed).
+ * Anything else - `return new Deno.Command(...)` with no chain, a wrapper out of file, a holder started
+ * behind an alias - is NOT credited, and a never-started construction contributes nothing at all: it is
+ * a mention, and a mention exercises nothing. The three shapes are syntactic, so a real spawn in a shape
+ * they miss loses its EXECUTE credit (the dangerous direction); on this tree the only edge they remove is
+ * the false one above, and the suite keeps its read edge for the same file.
  */
 function executeSiteStarted(
   source: string,
@@ -1576,9 +1575,7 @@ function executeSiteStarted(
   end: number,
 ): boolean {
   // 1. Chained: the construction expression is immediately followed by a start method.
-  if (/^\s*\.\s*(?:spawn|output|outputSync|status|statusSync)\s*\(/.test(source.slice(end + 1))) {
-    return true;
-  }
+  if (CHAINED_START.test(source.slice(end + 1))) return true;
   // Look back for the statement the construction sits in, so the same checks cover `new Deno.Command`
   // and a destructured `Command` alike.
   const rawPrefix = source.slice(Math.max(0, at - 200), at);
@@ -2151,8 +2148,7 @@ export async function deriveReadRelationReport(
         }
         const callText = source.slice(at, end + 1);
         // audio-feed-spawnlit: an EXECUTE call earns credit only when the constructed command is STARTED
-        // (see executeSiteStarted). A never-started construction is a mention, not a spawn, and a mention
-        // contributes nothing - not even a read-shaped hint - because nothing here reads or runs.
+        // (see executeSiteStarted): a never-started construction is a mention, and a mention runs nothing.
         if (isExecuteCall && !executeSiteStarted(source, spans, at, end)) continue;
         // The narrowed text is what an EXECUTE call can actually run (audio-feed-20c7); a read keeps the whole
         // call, because a read's path IS its argument.

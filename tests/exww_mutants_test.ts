@@ -237,14 +237,12 @@ Deno.test({
       // audio-feed-coao: the narrow mapping row, tied to the only form the gate can see. runProofIn spawns the
       // proof through `timeout` with a COMPUTED path (join(dir, PROOF)), and the derivation will not read that
       // as an execute edge - deliberately, because a computed argument proves nothing.
-      // audio-feed-spawnlit: the construction below used to EARN the suite a derived spawn credit on its bare
-      // literal, while running nothing - a proof looking protected by a line that executes nothing (the exact
-      // mention class the census says it fixed). The derivation now credits only STARTED constructions, so
-      // this call earns nothing; the proof's exercised status is stated honestly in EXECUTED_WITHOUT_SPAWN
-      // (tests/evidence_census_test.ts). The literal stays as the coupling pin the census's
-      // referencesProofInCode direction checks, and the assertions make it a COUPLING rather than a
-      // decoration: they tie the literal to the very constant runProofIn spawns - rename the proof and THIS
-      // goes red, rather than the mapping quietly surviving the thing it claims to describe.
+      // audio-feed-spawnlit: this construction used to EARN the suite a derived spawn edge while running
+      // nothing - a mention, the class the census says it fixed. The derivation now credits only STARTED
+      // commands, so this line earns nothing and the proof's exercised status is stated in
+      // EXECUTED_WITHOUT_SPAWN (tests/evidence_census_test.ts). It stays as the coupling pin: the assertions
+      // below tie the literal to the constant runProofIn actually spawns, so renaming the proof reddens this
+      // rather than letting the mapping outlive the execution it describes.
       new Deno.Command(Deno.execPath(), {
         args: ["run", "scripts/exww-live-claims-browser-proof.ts"],
       });

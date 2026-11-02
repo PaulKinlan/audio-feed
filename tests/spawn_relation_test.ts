@@ -443,9 +443,8 @@ Deno.test("audio-feed-tziw: a read the RESOLVER can follow earns the .ts relatio
 // names; this pair is about WHETHER the construction spawns at all. Found live
 // in the tree: tests/exww_mutants_test.ts carried a bare
 // `new Deno.Command(Deno.execPath(), { args: [...literal proof path...] });`
-// whose result was never awaited or run, and the execute relation credited the
-// proof as SPAWNED by that suite - a proof looking protected by a line that
-// runs nothing.
+// whose value was discarded, and the execute relation credited the proof as
+// SPAWNED by that suite - a proof looking protected by a line that runs nothing.
 // ---------------------------------------------------------------------------
 
 const STARTED_TREE: Record<string, string> = {
@@ -475,8 +474,7 @@ Deno.test(
       assertEquals(
         bare.relations.get("scripts/tool.ts"),
         undefined,
-        "and the construction contributes nothing to the relation either - not executedRelations, not relations: " +
-          "nothing here reads or runs",
+        "and the construction contributes nothing to the relation either - not executedRelations, not relations",
       );
 
       const started = await deriveReadRelationReport(root, ["tests/started_construction_test.ts"]);
