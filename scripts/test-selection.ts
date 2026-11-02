@@ -324,9 +324,19 @@ const READ_CALLS = [
   "realPath",
   "open",
   "openSync",
+  // copyFile READS its source: a suite that copies a repo fixture depends on that
+  // fixture exactly as it depends on one it reads as text. Without this entry the
+  // fixture was unmapped (fast-gate: unmapped:, coverage PARTIAL) — a change that broke
+  // tests/fixtures/bd_stub.sh selected nothing but the wrong suite, because its only
+  // use was `Deno.copyFile(STUB_PATH, ...)`.
+  "copyFile",
+  "copyFileSync",
   "Deno.Command",
   "Command",
 ];
+
+/** Copy calls: a copy DEPENDS only on its SOURCE argument. */
+const COPY_CALLS = new Set(["copyFile", "copyFileSync"]);
 
 /**
  * Strip comments and track string boundaries in a single character-level scan.
@@ -2151,9 +2161,14 @@ export async function deriveReadRelationReport(
         // (see executeSiteStarted): a never-started construction is a mention, and a mention runs nothing.
         if (isExecuteCall && !executeSiteStarted(source, spans, at, end)) continue;
         // The narrowed text is what an EXECUTE call can actually run (audio-feed-20c7); a read keeps the whole
-        // call, because a read's path IS its argument.
+        // call, because a read's path IS its argument. A COPY is the one read narrowed like an execute: the
+        // call DEPENDS only on its SOURCE, and the destination is created by the call, not read by it — its
+        // literals are not dependencies (scanning them offered the dest segment "install-hooks.sh" as an
+        // authored path naming nothing, and one unresolved hint disables the inert class for EVERY change).
         const scanText = isExecuteCall
           ? executedText(source.slice(at + match[0].length, end))
+          : COPY_CALLS.has(call)
+          ? (splitTopLevel(source.slice(at + match[0].length, end))[0] ?? "")
           : callText;
         const { paths, tailCandidates } = staticPathHints(
           scanText,

@@ -24,13 +24,17 @@ Deno.test("g8ss9: esc() escapes the single quote as &#39;", () => {
   assertEquals(esc(`' onmouseover='alert(1)`), `&#39; onmouseover=&#39;alert(1)`);
 });
 
-Deno.test("g8ss9: exactly ONE `function esc(` definition exists under src/ — src/routes/html.ts", async () => {
-  // Asserted precisely: walking every .ts file under src/, the pattern
-  // /function esc\(/ occurs in exactly ONE file, and that file is
-  // src/routes/html.ts. (`escapeRegExp`/`escapeXml` do not match: the pattern
-  // requires `esc(` immediately after `function `.) A second private escaper
-  // copy anywhere under src/ — the defect this bead fixed in home.ts — reddens
-  // this row.
+Deno.test("g8ss9: exactly ONE escaper definition exists under src/ — src/routes/html.ts", async () => {
+  // Asserted precisely: walking every .ts file under src/, the escaper-definition
+  // pattern occurs in exactly ONE file, and that file is src/routes/html.ts.
+  // (`escapeRegExp`/`escapeXml` do not match: the pattern requires `esc` as the whole
+  // name.) The scan matches BOTH spellings a reintroduced copy could take — the
+  // function declaration `function esc(` AND the const/arrow bindings `const esc =`,
+  // `let esc =`, `var esc =` (optionally with a type annotation before the `=`), which
+  // is how an arrow-function escaper would actually be written. A second private
+  // escaper copy anywhere under src/ — the defect this bead fixed in home.ts — reddens
+  // this row in either spelling.
+  const ESCAPER_DEF = /\bfunction\s+esc\s*\(|\b(?:const|let|var)\s+esc\s*(?::[^=]*)?=/;
   const srcRoot = new URL("../src/", import.meta.url);
   const definitions: string[] = [];
 
@@ -42,7 +46,7 @@ Deno.test("g8ss9: exactly ONE `function esc(` definition exists under src/ — s
       if (entry.isDirectory) await walk(new URL(`${entry.name}/`, dir));
       else if (entry.name.endsWith(".ts")) {
         const text = await Deno.readTextFile(new URL(entry.name, dir));
-        if (/function esc\(/.test(text)) {
+        if (ESCAPER_DEF.test(text)) {
           definitions.push(new URL(entry.name, dir).href.replace(srcRoot.href, "src/"));
         }
       }

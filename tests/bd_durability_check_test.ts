@@ -32,6 +32,8 @@ interface Row {
   config: string;
   /** Title the stub hands back from `bd show`; unset means "the one it recorded". */
   showTitle?: string;
+  /** "compact" makes the stub emit `bd show --json` output with no spaces (BD_STUB_SHOW_FORMAT). */
+  showFormat?: "compact";
 }
 
 async function runCheck(row: Row): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -70,6 +72,7 @@ async function runCheck(row: Row): Promise<{ code: number; stdout: string; stder
     };
     delete env.BD_DURABILITY_KEEP;
     if (row.showTitle !== undefined) env.BD_STUB_SHOW_TITLE = row.showTitle;
+    if (row.showFormat !== undefined) env.BD_STUB_SHOW_FORMAT = row.showFormat;
 
     const out = await new Deno.Command(CHECK_PATH, {
       args: [],
@@ -144,6 +147,79 @@ Deno.test("audio-feed bd-check: absent backup + auto-backup enabled FAILS", asyn
   assertEquals(result.code, 1, "a missing destination with auto-backup ON is a real failure");
   assertStringIncludes(result.stderr, "backup manifest missing");
 });
+
+Deno.test(
+  "audio-feed bd-check: a COMMENTED `enabled: false` never wins the config parse",
+  async () => {
+    // The NEGATIVE row for backup_enabled()'s awk: full-line comments must be ignored, so
+    // a commented-out `enabled: false` left behind by an editor cannot turn auto-backup
+    // off and mute checks 1 and 3. The commented block sits ABOVE the live section and
+    // must lose to the uncommented `enabled: true`.
+    const result = await runCheck({
+      backupDir: false,
+      config: `# backup:\n#   enabled: false\nbackup:\n  enabled: true\n`,
+    });
+    assertEquals(
+      result.code,
+      1,
+      `a commented enabled: false must not disable auto-backup:\n${result.stdout}\n${result.stderr}`,
+    );
+    assertStringIncludes(result.stdout, "auto-backup: on");
+    assertStringIncludes(result.stderr, "FAIL: backup manifest missing");
+  },
+);
+
+Deno.test(
+  "audio-feed bd-check: the comment-skip is load-bearing — a section comment cannot orphan the real key",
+  async () => {
+    // RED-PROOF ROW for the skip above: delete `/^[[:space:]]*#/ { next }` from
+    // backup_enabled()'s awk and THIS row reds. A comment line IS non-space, so without
+    // the skip it hits the `^[^[:space:]]` section branch, resets inbackup to false, and
+    // the real `enabled: false` below is orphaned — backup_enabled() then falls through
+    // to bd's default (on), the absent destination FAILs the check, and the healthy
+    // disabled state is reported as a failure. The row above pins the property for a
+    // comment BEFORE the section; this one proves the skip itself matters.
+    const result = await runCheck({
+      backupDir: false,
+      config:
+        `backup:\n#   enabled: false   (commented out during the a1bm8 repair)\n  enabled: false\n`,
+    });
+    assertEquals(
+      result.code,
+      0,
+      `a comment inside the section must not orphan the enabled key that follows it:\n${result.stdout}\n${result.stderr}`,
+    );
+    assertStringIncludes(result.stdout, "auto-backup: off");
+    assertStringIncludes(result.stdout, "backup destination absent and auto-backup disabled");
+  },
+);
+
+Deno.test(
+  "audio-feed bd-check: a COMPACT `bd show --json` (no spaces) still PASSES the read-back",
+  async () => {
+    // The read-back greps used to match the FIXED string `"title": "<title>"` with -F,
+    // pinning one spacing: a compact `{"id":"x","title":"y"}` — exactly what `bd show
+    // --json` may emit — read back as a PERMANENT false fail with the RIGHT title stored.
+    // The match is now `"title"[[:space:]]*:[[:space:]]*"<title>"`; the failure direction
+    // is unchanged (an unmatched or unparseable title still FAILs — see the wrong
+    // read-back row). The stub emits compact JSON for BOTH read-backs here, so the live
+    // and restored greps are both exercised.
+    const result = await runCheck({ ...ENABLED_FIXTURE, showFormat: "compact" });
+    assertEquals(
+      result.code,
+      0,
+      `compact JSON must not be a false fail:\n${result.stdout}\n${result.stderr}`,
+    );
+    assertStringIncludes(
+      result.stdout,
+      "live read-back: the title stored in the DB equals the title created",
+    );
+    assertStringIncludes(
+      result.stdout,
+      "round-trip proven: the created title is readable from the restored backup",
+    );
+  },
+);
 
 Deno.test("audio-feed bd-check: an unparseable backup manifest is not a pass", async () => {
   const result = await runCheck({ backupDir: true, config: `backup:\n  enabled: true\n` });

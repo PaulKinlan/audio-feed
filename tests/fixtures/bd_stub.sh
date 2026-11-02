@@ -9,6 +9,8 @@
 #   BD_STUB_DIR         scratch dir the stub keeps its state in (required)
 #   BD_STUB_SHOW_TITLE  title `bd show` returns, when it should DIFFER from the one
 #                       `bd q` recorded — the wrong-read-back row
+#   BD_STUB_SHOW_FORMAT compact makes `bd show` emit COMPACT JSON (`{"id":"x"}`) instead
+#                       of the spaced default — the read-back-tolerant row
 #   BD_STUB_CREATE_RC   exit status for `bd q` (default 0)
 #   BEADS_DIR           only used by `bd where`, which echoes it
 #
@@ -49,7 +51,11 @@ case "$cmd" in
     fi
     title=$(cat "$title_file" 2>/dev/null || true)
     if [ -n "${BD_STUB_SHOW_TITLE:-}" ]; then title="$BD_STUB_SHOW_TITLE"; fi
-    printf '[{"id": "%s", "title": "%s"}]\n' "$have_id" "$title"
+    if [ "${BD_STUB_SHOW_FORMAT:-pretty}" = compact ]; then
+      printf '[{"id":"%s","title":"%s"}]\n' "$have_id" "$title"
+    else
+      printf '[{"id": "%s", "title": "%s"}]\n' "$have_id" "$title"
+    fi
     ;;
   delete)
     exit 0
