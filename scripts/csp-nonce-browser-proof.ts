@@ -2,13 +2,13 @@
  * Browser proof for audio-feed-syhu: the emitted CSP carries a per-response nonce, not
  * 'unsafe-inline', and the real pages still render and run under enforcement.
  *
- * KNOWN WRONG SURFACE (audio-feed-38qar, measured by the evidence seed pilot audio-feed-9x9e1):
- * since src/routes/home.ts:263-273 (audio-feed-irgu) answers a signed-in `GET /` with a 303 to
- * /account, and this proof sets its session cookie BEFORE the page loop, `home-1280x900.png`
- * captures the /account document and the four `home:` checks are duplicates of the account ones.
- * The pre-irgu signed-in home view it used to capture cannot be reproduced today, and no row
- * asserts home's `location.pathname`, so nothing goes red - the fix is a per-row choice between
- * capturing home signed-out (and asserting it stays `/`) or asserting the redirect instead.
+ * HOME IS CAPTURED SIGNED-OUT (audio-feed-38qar, measured by the evidence seed pilot
+ * audio-feed-9x9e1): since src/routes/home.ts:263-273 (audio-feed-irgu) answers a SIGNED-IN
+ * `GET /` with a 303 to /account, a cookie set for the whole page loop made `home-1280x900.png`
+ * the /account document byte for byte - four `home:` checks that were silently duplicates of the
+ * account ones, green even if the home page regressed. The home row now clears the session
+ * cookie, captures the page a visitor actually gets, and asserts it LANDED on `/`, so a future
+ * change to the redirect reds the row instead of quietly changing what it proves.
  *
  * For each HTML surface it asserts, in headless Chrome with the CSP enforced:
  *   1. zero `securitypolicyviolation` events (nothing the page ships was blocked);
@@ -183,14 +183,16 @@ await runProof("audio-feed-syhu", async (checker) => {
           mobile: false,
         });
         // __Host- cookies need Secure; Chrome allows Secure on localhost (a trustworthy origin).
-        await cdp("Network.setCookie", {
-          name: "__Host-af_session",
-          value: session,
-          url: BASE,
-          secure: true,
-          path: "/",
-          httpOnly: true,
-        });
+        const signIn = () =>
+          cdp("Network.setCookie", {
+            name: "__Host-af_session",
+            value: session,
+            url: BASE,
+            secure: true,
+            path: "/",
+            httpOnly: true,
+          });
+        await signIn();
 
         const pages: Array<[string, string]> = [
           ["home", "/"],
@@ -202,6 +204,12 @@ await runProof("audio-feed-syhu", async (checker) => {
         ];
 
         for (const [name, path] of pages) {
+          // Signed-in `GET /` is a 303 to /account (audio-feed-irgu), so the home row drops the
+          // cookie first and takes it back afterwards: every later row is signed in, and home is
+          // the page a visitor is served rather than a second capture of /account.
+          if (name === "home") {
+            await cdp("Network.deleteCookies", { name: "__Host-af_session", url: BASE });
+          }
           events.length = 0;
           await cdp("Page.navigate", { url: `${BASE}${path}` });
           await until(`document.readyState === "complete"`, `${path} loaded`, UNTIL_HANG_BOUND_MS);
@@ -286,6 +294,16 @@ await runProof("audio-feed-syhu", async (checker) => {
             );
           }
 
+          // A redirect on the home row is a RED, never a silent change of surface: without this
+          // the row proves whatever / happens to serve (audio-feed-38qar).
+          if (name === "home") {
+            check(
+              "home: signed-out viewer landed on /",
+              landed === "/",
+              `landed on ${landed}`,
+            );
+          }
+
           if (name === "account" && landed !== "/account") {
             check(
               "account: authenticated session landed on /account",
@@ -298,6 +316,8 @@ await runProof("audio-feed-syhu", async (checker) => {
           const raw = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
           await Deno.writeFile(`${OUT}${name}-1280x900.png`, raw);
           await quantiseEvidencePng(`${OUT}${name}-1280x900.png`);
+
+          if (name === "home") await signIn();
         }
 
         await writeEvidenceReadme({
@@ -306,8 +326,8 @@ await runProof("audio-feed-syhu", async (checker) => {
           script: "scripts/csp-nonce-browser-proof.ts",
           asserts: checks.map((c) => c.name),
           notes: [
-            "KNOWN WRONG SURFACE (audio-feed-38qar): src/routes/home.ts:263-273 (audio-feed-irgu) 303-redirects a signed-in GET / to /account and this proof sets its session cookie before the page loop, so home-1280x900.png is the /account document byte for byte and the four home checks duplicate the account ones",
-            "the pre-irgu signed-in home view cannot be reproduced today, so the earlier home capture was that removed behaviour rather than a current one, and the fix is a per-row choice between capturing home signed-out or asserting the redirect",
+            "home is captured SIGNED-OUT and asserts it landed on / (audio-feed-38qar): src/routes/home.ts:263-273 (audio-feed-irgu) 303-redirects a signed-in GET / to /account, so the row clears the session cookie first and restores it after the capture - before that the row captured the /account document byte for byte and its four checks duplicated the account ones",
+            "what the row no longer does is silently follow a redirect: where a SIGNED-IN GET / lands is a separate contract this proof does not own, but where a signed-out one lands is asserted",
           ],
           sections: [
             {
