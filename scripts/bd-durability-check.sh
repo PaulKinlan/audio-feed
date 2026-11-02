@@ -15,6 +15,7 @@
 # test; the fleet's independent oracle places a changed path by stem convention, which requires
 # compatible extensions, so a .sh -> .ts edge needs the declaration to be named at all. Keep it in
 # step with the file's name (the suite's last row checks it).
+# Removing the declaration does not widen coverage: the same change reads `unmapped` in the gate record.
 #
 # WHAT IT CHECKS (exit non-zero on any failure):
 #   0. Auto-backup mode, from .beads/config.yaml (`backup.enabled`). bd's default is
