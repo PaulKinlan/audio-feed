@@ -24,7 +24,7 @@ exhaustive analysis.
 
 ## Unauthenticated `/health` — deploy fingerprint and backend-kind disclosure
 
-- **Decision** (audio-feed-1552, audio-feed-ciia; fallback behaviour on audio-feed-j9j1): the
+- **Decision** (audio-feed-1552, audio-feed-ciia; fallback behaviour on audio-feed-j9j1; section recorded on audio-feed-vaw6n): the
   unauthenticated `/health` route (`src/app.ts`) deliberately returns, to any caller without a
   token or session: the storage backend KIND (`ctx.stores.describe`, e.g. `blobs=s3`), the deploy
   id and its source, and the exact source commit SHA (`deploy.commit`).
