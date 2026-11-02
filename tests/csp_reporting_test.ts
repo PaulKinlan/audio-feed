@@ -312,7 +312,9 @@ Deno.test("SECURITY: attacker-controlled report fields are sanitized and never r
   // Assert no raw executable tags exist in the output markup
   assert(!renderedHtml.includes("<script>"), "HTML output must not contain raw <script> tags");
   assert(!renderedHtml.includes("<img src=x"), "HTML output must not contain raw <img tags");
-  assertStringIncludes(renderedHtml, "&lt;script&gt;alert('xss_url')&lt;/script&gt;");
+  // g8ss9: esc() now also escapes the single quote, so the payload's apostrophes
+  // come out as &#39; — the whole payload is inert in every quote context.
+  assertStringIncludes(renderedHtml, "&lt;script&gt;alert(&#39;xss_url&#39;)&lt;/script&gt;");
 
   // 4. Test script block embedding helper
   const scriptJson = jsonForScript(log);

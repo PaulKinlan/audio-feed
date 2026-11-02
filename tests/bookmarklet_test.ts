@@ -177,7 +177,9 @@ Deno.test("GET /account: sanitizes hostile HTML in title and rejects invalid URL
     false,
     "raw script tag must not appear",
   );
-  assertStringIncludes(html, "&lt;script&gt;alert('xss')&lt;/script&gt;");
+  // g8ss9: esc() now also escapes the single quote, so the payload's apostrophes
+  // come out as &#39; — the whole payload is inert in every quote context.
+  assertStringIncludes(html, "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;");
 
   // Hostile javascript: URL must be rejected and not rendered in quickAddPanel
   const resBadUrl = await fetch(
