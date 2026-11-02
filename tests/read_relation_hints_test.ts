@@ -18,6 +18,7 @@ import {
   reverseGraph,
 } from "../scripts/fast-check.ts";
 import {
+  COPY_CALLS,
   deriveDataReadRelations,
   deriveReadRelationReport,
   ROOT,
@@ -1828,4 +1829,134 @@ Deno.test("audio-feed-38f28: src/server.ts's observers are an EXACT, measured se
       `${mention} mentions src/server.ts as text and must not be claimed as an observer`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-ylzv6: the COPY_CALLS source-only narrowing, PINNED.
+//
+// scripts/test-selection.ts narrows a copyFile/copyFileSync scan to its FIRST
+// top-level argument (`splitTopLevel(...)[0]`): a copy DEPENDS only on its
+// source; the destination is created by the call, not read by it. Until these
+// rows the narrowing was enforced only by the code comment: reverting it to
+// whole-call scanning left every observable check green, while the destination
+// text of a real call shape -
+//   Deno.copyFile(INSTALL_PATH, path.join(seed, "scripts", "hooks", "install-hooks.sh"))
+// (tests/pre_push_hook_test.ts) - offered the bare last segment "install-hooks.sh"
+// as an authored repo path that names nothing, and ONE unresolved hint disables
+// the inert class for EVERY change. The two tests below are paired so the
+// narrowing can only break in the direction that loses protection:
+//   - SOURCE-POSITIVE: the source still maps the repo path to the suite (one
+//     sample per COPY_CALLS entry, coverage-checked like TARGET_SAMPLES on the
+//     write side), and
+//   - DESTINATION-NEGATIVE: a destination that is repo-shaped but composed onto
+//     a runtime root credits no read and produces no unresolved hint.
+// ---------------------------------------------------------------------------
+
+/**
+ * One sample per COPY_CALLS entry: a suite whose copy SOURCE is a repo path and
+ * whose destination names nothing repo-side (an absolute /tmp path is outside
+ * every repo-relative resolution). The coverage assertion below fails when a
+ * COPY_CALLS entry has no sample, so a copy call cannot join the read relation
+ * without its source argument being stated and exercised - the same
+ * unrepresentable-state rule the write side applies with TARGET_SAMPLES.
+ */
+const COPY_SOURCE_SAMPLES: Record<string, { suiteContent: string; fixture: string }> = {
+  "copyFile": {
+    suiteContent: [
+      "export async function copyIt() {",
+      '  await Deno.copyFile("../fixtures/copy_src.sh", "/tmp/copy-dest.png");',
+      "}",
+      "",
+    ].join("\n"),
+    fixture: "fixtures/copy_src.sh",
+  },
+  "copyFileSync": {
+    suiteContent: [
+      "export function copyItNow() {",
+      '  Deno.copyFileSync("../fixtures/copy_src.sh", "/tmp/copy-dest.png");',
+      "}",
+      "",
+    ].join("\n"),
+    fixture: "fixtures/copy_src.sh",
+  },
+};
+
+Deno.test("audio-feed-ylzv6: a copy's SOURCE maps the repo path to the suite, one sample per COPY_CALLS entry", async () => {
+  // Coverage first: a new COPY_CALLS entry with no sample here fails this, by construction.
+  for (const name of COPY_CALLS) {
+    assert(
+      COPY_SOURCE_SAMPLES[name] !== undefined,
+      `COPY_CALLS entry ${name} has no source sample: state its source argument`,
+    );
+  }
+  assertEquals(
+    Object.keys(COPY_SOURCE_SAMPLES).length,
+    COPY_CALLS.size,
+    "every COPY_CALLS entry needs exactly one sample",
+  );
+  for (const [name, { suiteContent, fixture }] of Object.entries(COPY_SOURCE_SAMPLES)) {
+    const suite = "tests/copy_sample_test.ts";
+    await withTempTree({
+      [fixture]: "#!/usr/bin/env bash\necho copied\n",
+      [suite]: suiteContent,
+    }, async (root) => {
+      const report = await deriveReadRelationReport(root, [suite]);
+      assertEquals(
+        report.relations.get(fixture),
+        [suite],
+        `${name}'s source argument is a dependency: the copied fixture must select this suite`,
+      );
+      assertEquals(
+        [...report.relations.keys()],
+        [fixture],
+        `${name} must credit ONLY its source: the destination is created by the call, not read by it`,
+      );
+    });
+  }
+});
+
+Deno.test("audio-feed-ylzv6: a copy DESTINATION on a runtime root is no read - the install-hooks.sh class stays out of unresolved", async () => {
+  const suite = "tests/copydest_test.ts";
+  // THE REGRESSION THE NARROWING EXISTS TO PREVENT. The destination below is the
+  // pre_push_hook_test.ts shape: the copy's destination is a repo-looking path
+  // ("scripts", "hooks", "install-hooks.sh") composed onto a base (`scratch`) the
+  // detector cannot attribute - a parameter, not a statically out-of-repo binding,
+  // so the join() suppression does not fire. Whole-call scanning reads those
+  // destination literals as authored repo paths; the last segment names nothing at
+  // the repo root and lands in `unresolved`, and one unresolved hint disables the
+  // inert class for every change. Under the source-only rule none of that text is
+  // scanned: the destination is created, not depended on.
+  await withTempTree({
+    "fixtures/copy_src.sh": "#!/usr/bin/env bash\necho seeded\n",
+    [suite]: [
+      "export async function seedClone(scratch: string) {",
+      '  await Deno.copyFile("../fixtures/copy_src.sh",',
+      '    join(scratch, "scripts", "hooks", "install-hooks.sh"));',
+      "}",
+      "",
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, [suite]);
+    assertEquals(
+      report.unresolved,
+      [],
+      `the destination segment "install-hooks.sh" must not become an unresolved hint: ` +
+        `one unresolved hint disables the inert class for EVERY change: ${
+          JSON.stringify(report.unresolved)
+        }`,
+    );
+    for (const key of report.relations.keys()) {
+      assert(
+        !key.includes("install-hooks.sh"),
+        `a copy destination must never appear as a read relation key: ${key}`,
+      );
+    }
+    // ...and the narrowing must not have thrown the baby out: the copy's SOURCE is
+    // still credited in the very same call.
+    assertEquals(
+      report.relations.get("fixtures/copy_src.sh"),
+      [suite],
+      "the source of the same copy is still a dependency",
+    );
+  });
 });
