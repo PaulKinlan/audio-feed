@@ -32,6 +32,8 @@ interface Row {
   config: string;
   /** Title the stub hands back from `bd show`; unset means "the one it recorded". */
   showTitle?: string;
+  /** "compact" makes the stub emit `bd show --json` output with no spaces (BD_STUB_SHOW_FORMAT). */
+  showFormat?: "compact";
 }
 
 async function runCheck(row: Row): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -70,6 +72,7 @@ async function runCheck(row: Row): Promise<{ code: number; stdout: string; stder
     };
     delete env.BD_DURABILITY_KEEP;
     if (row.showTitle !== undefined) env.BD_STUB_SHOW_TITLE = row.showTitle;
+    if (row.showFormat !== undefined) env.BD_STUB_SHOW_FORMAT = row.showFormat;
 
     const out = await new Deno.Command(CHECK_PATH, {
       args: [],
@@ -190,3 +193,69 @@ Deno.test(
     assertStringIncludes(result.stdout, "backup destination absent and auto-backup disabled");
   },
 );
+
+Deno.test(
+  "audio-feed bd-check: a COMPACT `bd show --json` (no spaces) still PASSES the read-back",
+  async () => {
+    // The read-back greps used to match the FIXED string `"title": "<title>"` with -F,
+    // pinning one spacing: a compact `{"id":"x","title":"y"}` — exactly what `bd show
+    // --json` may emit — read back as a PERMANENT false fail with the RIGHT title stored.
+    // The match is now `"title"[[:space:]]*:[[:space:]]*"<title>"`; the failure direction
+    // is unchanged (an unmatched or unparseable title still FAILs — see the wrong
+    // read-back row). The stub emits compact JSON for BOTH read-backs here, so the live
+    // and restored greps are both exercised.
+    const result = await runCheck({ ...ENABLED_FIXTURE, showFormat: "compact" });
+    assertEquals(
+      result.code,
+      0,
+      `compact JSON must not be a false fail:\n${result.stdout}\n${result.stderr}`,
+    );
+    assertStringIncludes(
+      result.stdout,
+      "live read-back: the title stored in the DB equals the title created",
+    );
+    assertStringIncludes(
+      result.stdout,
+      "round-trip proven: the created title is readable from the restored backup",
+    );
+  },
+);
+
+Deno.test("audio-feed bd-check: an unparseable backup manifest is not a pass", async () => {
+  const result = await runCheck({ backupDir: true, config: `backup:\n  enabled: true\n` });
+  assertEquals(result.code, 0);
+  // The guard itself: a manifest with no 32-char address must fail rather than
+  // report "all 0 referenced table files present".
+  const tmp = await Deno.makeTempDir({ prefix: "bd-durability-empty-" });
+  try {
+    await Deno.mkdir(`${tmp}/backup`, { recursive: true });
+    await Deno.writeTextFile(`${tmp}/backup/manifest`, "not-a-manifest\n");
+    await Deno.writeTextFile(`${tmp}/config.yaml`, "backup:\n  enabled: true\n");
+    const out = await new Deno.Command("bash", {
+      args: [
+        "-c",
+        `BEADS_DIR="${tmp}" BD_DURABILITY_TIMEOUT=20 bash "${CHECK_PATH}" --skip-restore`,
+      ],
+      cwd: ROOT,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const stdout = new TextDecoder().decode(out.stdout);
+    const stderr = new TextDecoder().decode(out.stderr);
+    assertEquals(out.code, 1, `an empty manifest must fail the check:\n${stdout}\n${stderr}`);
+    assertStringIncludes(stderr, "no parseable 32-char table-file address");
+  } finally {
+    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("audio-feed bd-check: a dashed id and a dashed title are parsed apart", async () => {
+  // The first cut used `grep -oE '[a-z0-9]+-[a-z0-9]+' | tail -1`, which turned
+  // `audio-feed-ro4tg` into `audio-feed` and preferred any dashed word from a title
+  // or a PATH warning over the id. The stub prints its id with a dashed PATH warning
+  // on stderr and the check generates a dashed title of its own.
+  const result = await runCheck(ENABLED_FIXTURE);
+  assertStringIncludes(result.stdout, "bd create printed a bare id: audio-feed-tst01");
+  assertStringIncludes(result.stdout, "live read-back of audio-feed-tst01");
+});

@@ -66,6 +66,30 @@ fail()  { echo "FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
 pass()  { echo "ok:   $*"; }
 warn()  { echo "warn: $*" >&2; }
 
+# ere_escape <text> — escape ERE metacharacters so a title can be matched LITERALLY by
+# grep -E. The read-back used to grep the fixed string `"title": "<title>"` with -F,
+# which pinned ONE spacing: a compact `bd show --json` (no space after the colon) read
+# back as a PERMANENT false fail even though the stored title was exactly right. The
+# match is now `"title"[[:space:]]*:[[:space:]]*"<title>"`; the escaping keeps the
+# title literal, and a no-match still FAILs — unparseable output has never passed.
+ere_escape() {
+  printf '%s' "$1" \
+    | sed -e 's/\\/\\\\/g' \
+          -e 's/\./\\./g' \
+          -e 's/(/\\(/g' \
+          -e 's/)/\\)/g' \
+          -e 's/\[/\\[/g' \
+          -e 's/\]/\\]/g' \
+          -e 's/\*/\\*/g' \
+          -e 's/\^/\\^/g' \
+          -e 's/\$/\\$/g' \
+          -e 's/+/\\+/g' \
+          -e 's/?/\\?/g' \
+          -e 's/{/\\{/g' \
+          -e 's/}/\\}/g' \
+          -e 's/|/\\|/g'
+}
+
 # timed <label> <cmd...> — run under the shim as the nightly would, bound and timed.
 # Stdout lands in LAST_OUT and stderr in LAST_ERR, KEPT APART: `bd q` prints only the
 # id on stdout, so merging the streams let any dashed word on stderr (a title echo, a
@@ -160,6 +184,7 @@ fi
 # ---- 2. timed live round-trip -------------------------------------------------
 ts=$(date -u +%Y%m%dT%H%M%SZ)
 title="bd-durability-check $ts (auto-created by scripts/bd-durability-check.sh; safe to delete)"
+title_re="\"title\"[[:space:]]*:[[:space:]]*\"$(ere_escape "$title")\""
 timed "bd create (test bead)" bd q "$title" || true
 # Defect (b) of the first cut: `grep -oE '[a-z0-9]+-[a-z0-9]+' | tail -1` cannot span
 # the SECOND dash of `audio-feed-ro4tg` (it yields `audio-feed`), and `tail -1` let any
@@ -173,7 +198,7 @@ else
   pass "bd create printed a bare id: $test_id"
   if ! timed "bd show (live read-back of $test_id)" bd show "$test_id" --json; then
     fail "live read-back: bd show $test_id failed, so nothing about the stored bead is proven"
-  elif ! printf '%s' "${LAST_OUT:-}" | grep -qF "\"title\": \"$title\""; then
+  elif ! printf '%s' "${LAST_OUT:-}" | grep -qE -- "$title_re"; then
     fail "live read-back: bd show $test_id did not return the title that was created ($title): $(printf '%s' "${LAST_OUT:-}" | head -c 300)"
   else
     pass "live read-back: the title stored in the DB equals the title created"
@@ -201,7 +226,7 @@ else
     restored_root=$(dirname "$restored_beads")
     if ! timed "bd show (RESTORED read-back of $test_id)" env BEADS_DIR="$restored_beads" bd -C "$restored_root" show "$test_id" --json; then
       fail "restored read-back: bd show $test_id failed against $restored_beads"
-    elif ! printf '%s' "${LAST_OUT:-}" | grep -qF "\"title\": \"$title\""; then
+    elif ! printf '%s' "${LAST_OUT:-}" | grep -qE -- "$title_re"; then
       fail "restored copy does not hold the created title for $test_id (got: $(printf '%s' "${LAST_OUT:-}" | head -c 300))"
     else
       pass "round-trip proven: the created title is readable from the restored backup"
