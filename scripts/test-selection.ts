@@ -1516,6 +1516,99 @@ function readCallAt(source: string, index: number): boolean {
   return !/(?:import|export|from|require)\s*$/.test(before);
 }
 
+/** The Deno.Command methods that actually START the constructed process. A construction that none of
+ * these reaches is a value that executes nothing. */
+const COMMAND_START_METHODS = "spawn|output|outputSync|status|statusSync";
+
+function commandStartUsage(text: string, spans: Array<[number, number]>, offset: number): boolean {
+  const start = new RegExp(`\\.\\s*(?:${COMMAND_START_METHODS})\\s*\\(`, "g");
+  for (const match of text.matchAll(start)) {
+    if (!insideSpans(spans, offset + (match.index ?? 0))) return true;
+  }
+  return false;
+}
+
+/** The brace-balanced body that opens at `open`, string content excluded so braces inside strings
+ * cannot unbalance the count. */
+function balancedBody(source: string, spans: Array<[number, number]>, open: number): string {
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (insideSpans(spans, i)) continue;
+    const ch = source[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  return source.slice(open);
+}
+
+/**
+ * audio-feed-spawnlit: an EXECUTE call site earns its spawn credit only when the constructed command
+ * is actually STARTED. The hole this closes was live in the tree: `tests/exww_mutants_test.ts` carried a
+ * bare `new Deno.Command(Deno.execPath(), { args: [...literal proof path...] });` whose result was never
+ * awaited or run, and the execute relation credited the named proof as SPAWNED by that suite - a proof
+ * looking protected by a line that runs nothing, the exact MENTION class the census's own comment says
+ * it fixed ("a mention executes nothing", tests/evidence_census_test.ts). The real execution was and is
+ * `runProofIn` in scripts/exww-mutants.ts, a computed-path spawn this derivation deliberately cannot
+ * name (audio-feed-4kl3/9rer: a computed argument proves nothing).
+ *
+ * Started means one of three provable shapes:
+ *   1. CHAINED - the construction is directly followed by a start method: `.spawn()`, `.output()`,
+ *      `.outputSync()`, `.status()`, `.statusSync()` (measured on this tree: the repro_* executors chain
+ *      `.spawn()`, evidence_size_trap chains `.output()`, the modern-web checker chains `.outputSync()`);
+ *   2. HELD - assigned to a variable that is started later in the same file (`const cmd = new
+ *      Deno.Command(...); ... await cmd.output()` - fast_check_test, select_test, evidence_png_test);
+ *   3. HANDED TO A STARTER - passed as the direct argument of a call to a same-file function whose body
+ *      starts the commands it is given (`await runBounded(new Deno.Command(...))` where runBounded's body
+ *      calls `command.spawn()` - verify_s3uk_real_browser_test).
+ * A `return new Deno.Command(...)` with no chain is NOT credited (no measured case; fail closed), and a
+ * never-started construction contributes NOTHING - not to executedRelations and not to the relation:
+ * it is a mention, and a mention exercises nothing. Measured consequence: the exww mapping row's edge
+ * moves to EXECUTED_WITHOUT_SPAWN in tests/evidence_census_test.ts, where the census already keeps the
+ * honest form of "executed through a harness the spawn relation cannot name".
+ */
+function executeSiteStarted(
+  source: string,
+  spans: Array<[number, number]>,
+  at: number,
+  end: number,
+): boolean {
+  // 1. Chained: the construction expression is immediately followed by a start method.
+  if (/^\s*\.\s*(?:spawn|output|outputSync|status|statusSync)\s*\(/.test(source.slice(end + 1))) {
+    return true;
+  }
+  // Look back for the statement the construction sits in, so the same checks cover `new Deno.Command`
+  // and a destructured `Command` alike.
+  const rawPrefix = source.slice(Math.max(0, at - 200), at);
+  const prefix = rawPrefix.replace(/(?:await\s+)?new\s*$/, "");
+  // 2. Held in a variable that is started later in the file (a name collision with an unrelated variable
+  // can only OVER-credit, and only within one file - the fail-open direction this relation tolerates).
+  const decl = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?$/.exec(prefix);
+  if (decl?.[1]) {
+    const holder = new RegExp(`\\b${decl[1]}\\s*\\.\\s*(?:${COMMAND_START_METHODS})\\s*\\(`, "g");
+    for (const match of source.slice(end + 1).matchAll(holder)) {
+      if (!insideSpans(spans, end + 1 + (match.index ?? 0))) return true;
+    }
+  }
+  // 3. Handed to a same-file function whose body starts the commands it is given.
+  const callee = /([A-Za-z_$][\w$]*)\s*\(\s*$/.exec(prefix)?.[1];
+  if (callee) {
+    const fnDecl = new RegExp(`(?:async\\s+)?function\\s+${callee}\\b`).exec(source);
+    let open = -1;
+    if (fnDecl) open = source.indexOf("{", fnDecl.index + fnDecl[0].length);
+    else {
+      const arrow = new RegExp(
+        `(?:const|let|var)\\s+${callee}\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*(?::[^=]*)?=>`,
+      ).exec(source);
+      if (arrow) open = source.indexOf("{", arrow.index + arrow[0].length);
+    }
+    if (open >= 0 && commandStartUsage(balancedBody(source, spans, open), spans, open)) return true;
+  }
+  return false;
+}
+
 /**
  * audio-feed-es8y condition 1: DERIVE "who reads this" from the suites, instead of maintaining it beside them.
  *
@@ -2057,6 +2150,10 @@ export async function deriveReadRelationReport(
           }
         }
         const callText = source.slice(at, end + 1);
+        // audio-feed-spawnlit: an EXECUTE call earns credit only when the constructed command is STARTED
+        // (see executeSiteStarted). A never-started construction is a mention, not a spawn, and a mention
+        // contributes nothing - not even a read-shaped hint - because nothing here reads or runs.
+        if (isExecuteCall && !executeSiteStarted(source, spans, at, end)) continue;
         // The narrowed text is what an EXECUTE call can actually run (audio-feed-20c7); a read keeps the whole
         // call, because a read's path IS its argument.
         const scanText = isExecuteCall
