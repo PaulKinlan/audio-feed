@@ -234,16 +234,15 @@ Deno.test({
       // the relation is what audio-feed-4kl3 adds, and until then the gate selects this suite because the
       // delta includes this file. A comment asserting a derivation that does not exist is how a proof-script
       // delta would look covered while it was not, which is the defect class this whole bead exists about.
-      // audio-feed-coao: the narrow mapping row, stated in the only form the gate's relation derivation can
-      // prove. runProofIn spawns the proof through `timeout` with a COMPUTED path (join(dir, PROOF)), and the
-      // semantics check from audio-feed-4kl3 will not read that as an execute edge - deliberately, because a
-      // computed argument proves nothing. So the relation is stated here where the argument is a literal, and the
-      // assertion ties the literal to the very constant runProofIn spawns: rename the proof and THIS goes red,
-      // rather than the mapping quietly surviving the thing it claims to describe.
-      // The gate's relation derivation reads the ARGUMENT SHAPE, so this literal must stay inline - a variable
-      // would hide it and the relation would be lost. Deno.Command exposes no accessor for its arguments, so the
-      // coupling is made by asserting the same literal against PROOF_REL, the constant runProofIn actually
-      // spawns: rename the proof and this reddens rather than the mapping outliving the execution it describes.
+      // audio-feed-coao: the narrow mapping row, tied to the only form the gate can see. runProofIn spawns the
+      // proof through `timeout` with a COMPUTED path (join(dir, PROOF)), and the derivation will not read that
+      // as an execute edge - deliberately, because a computed argument proves nothing.
+      // audio-feed-spawnlit: this construction used to EARN the suite a derived spawn edge while running
+      // nothing - a mention, the class the census says it fixed. The derivation now credits only STARTED
+      // commands, so this line earns nothing and the proof's exercised status is stated in
+      // EXECUTED_WITHOUT_SPAWN (tests/evidence_census_test.ts). It stays as the coupling pin: the assertions
+      // below tie the literal to the constant runProofIn actually spawns, so renaming the proof reddens this
+      // rather than letting the mapping outlive the execution it describes.
       new Deno.Command(Deno.execPath(), {
         args: ["run", "scripts/exww-live-claims-browser-proof.ts"],
       });

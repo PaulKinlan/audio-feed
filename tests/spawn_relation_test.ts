@@ -54,7 +54,7 @@ async function withTempTree(
 const TREE: Record<string, string> = {
   "scripts/tool.ts": "export const t = 1;\n",
   "tests/spawn_test.ts":
-    'const TOOL = "scripts/tool.ts";\nexport function s(dir: string) {\n  return new Deno.Command("deno", { args: ["run", `${dir}/${TOOL}`] });\n}\nDeno.test("s", () => {});\n',
+    'const TOOL = "scripts/tool.ts";\nexport function s(dir: string) {\n  return new Deno.Command("deno", { args: ["run", `${dir}/${TOOL}`] }).spawn();\n}\nDeno.test("s", () => {});\n',
   "tests/read_test.ts":
     'export async function r() { return await Deno.readTextFile("../scripts/tool.ts"); }\nDeno.test("r", () => {});\n',
   "tests/string_test.ts":
@@ -162,9 +162,10 @@ const PASSED_NOT_EXECUTED: Record<string, string> = {
     'const TOOL = "scripts/tool.ts";\nDeno.test("cwd", () => {\n  new Deno.Command("deno", { args: ["eval", "1"], cwd: TOOL });\n});\n',
   "tests/windows_only_test.ts":
     'const TOOL = "scripts/tool.ts";\nDeno.test("win", () => {\n  new Deno.Command("deno", { args: ["eval", "1"], windowsRawArguments: TOOL });\n});\n',
-  // The control: the same constant, the same file, but in the position that IS executed.
+  // The control: the same constant, the same file, but in the position that IS executed - and the
+  // command STARTED (audio-feed-spawnlit: a never-started construction is a mention and earns nothing).
   "tests/args_control_test.ts":
-    'const TOOL = "scripts/tool.ts";\nDeno.test("runs", () => {\n  new Deno.Command("deno", { args: ["run", TOOL] });\n});\n',
+    'const TOOL = "scripts/tool.ts";\nDeno.test("runs", () => {\n  new Deno.Command("deno", { args: ["run", TOOL] }).output();\n});\n',
   // The consumer that 4kl3's narrowing would have silenced: a READ of the script.
   "tests/consumer_test.ts":
     'Deno.test("real", async () => {\n  const text = await Deno.readTextFile("../scripts/tool.ts");\n  if (!text.includes("correct")) throw new Error("tool changed");\n});\n',
@@ -259,7 +260,7 @@ Deno.test("audio-feed-20c7: stdout/stdin/clearEnv positions also earn no execute
       '{ args: ["eval", "1"], stdout: "piped", stdin: "null", clearEnv: true, cwd: TOOL });\n});\n',
     "tests/args_control_test.ts":
       'const TOOL = "scripts/tool.ts";\nDeno.test("runs", () => {\n  new Deno.Command("deno", ' +
-      '{ args: ["run", TOOL] });\n});\n',
+      '{ args: ["run", TOOL] }).output();\n});\n',
   }, async (root) => {
     const report = await deriveReadRelationReport(root, [
       "tests/stdout_test.ts",
@@ -285,13 +286,13 @@ const SEMANTICS_TREE: Record<string, string> = {
   "scripts/tool.ts": 'export const value = "correct";\n',
   // PROVEN: the runtime itself, which is how every real child fixture in this repo is spawned.
   "tests/execpath_test.ts":
-    'const FIXTURE = "scripts/tool.ts";\nDeno.test("execpath", () => {\n  new Deno.Command(Deno.execPath(), { args: ["run", "-A", "--unstable-kv", FIXTURE] });\n});\n',
+    'const FIXTURE = "scripts/tool.ts";\nDeno.test("execpath", () => {\n  new Deno.Command(Deno.execPath(), { args: ["run", "-A", "--unstable-kv", FIXTURE] }).output();\n});\n',
   // PROVEN: a named runner, with flags to skip before the program.
   "tests/node_test.ts":
-    'const TOOL = "scripts/tool.ts";\nDeno.test("node", () => {\n  new Deno.Command("node", { args: ["--experimental-strip-types", TOOL] });\n});\n',
+    'const TOOL = "scripts/tool.ts";\nDeno.test("node", () => {\n  new Deno.Command("node", { args: ["--experimental-strip-types", TOOL] }).output();\n});\n',
   // PROVEN: the path in the COMMAND position, which was already a relation before this bead.
   "tests/commandpos_test.ts":
-    'const TOOL = "scripts/tool.ts";\nDeno.test("command", () => {\n  new Deno.Command(TOOL, { args: [] });\n});\n',
+    'const TOOL = "scripts/tool.ts";\nDeno.test("command", () => {\n  new Deno.Command(TOOL, { args: [] }).status();\n});\n',
   // DATA: echoed, not executed - the reviewer's counterexample.
   "tests/echo_test.ts":
     'const TOOL = "scripts/tool.ts";\nDeno.test("echo unrelated", () => {\n  new Deno.Command("echo", { args: [TOOL] });\n});\n',
@@ -436,3 +437,53 @@ Deno.test("audio-feed-tziw: a read the RESOLVER can follow earns the .ts relatio
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-spawnlit: STARTED-NESS. The admission above is about WHAT a spawn
+// names; this pair is about WHETHER the construction spawns at all. Found live
+// in the tree: tests/exww_mutants_test.ts carried a bare
+// `new Deno.Command(Deno.execPath(), { args: [...literal proof path...] });`
+// whose value was discarded, and the execute relation credited the proof as
+// SPAWNED by that suite - a proof looking protected by a line that runs nothing.
+// ---------------------------------------------------------------------------
+
+const STARTED_TREE: Record<string, string> = {
+  "scripts/tool.ts": "export const t = 1;\n",
+  // The hole, verbatim in shape: a literal path in a construction whose result is discarded.
+  "tests/bare_construction_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("bare", () => {\n  new Deno.Command(Deno.execPath(), { args: ["run", TOOL] });\n});\n',
+  // The same literal, actually started.
+  "tests/started_construction_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("started", () => {\n  new Deno.Command(Deno.execPath(), { args: ["run", TOOL] }).output();\n});\n',
+};
+
+Deno.test(
+  "audio-feed-spawnlit: a NEVER-STARTED Deno.Command construction credits NO spawn, and a started one does",
+  async () => {
+    await withTempTree(STARTED_TREE, async (root) => {
+      const bare = await deriveReadRelationReport(root, ["tests/bare_construction_test.ts"]);
+      assertEquals(
+        bare.executedRelations.get("scripts/tool.ts"),
+        undefined,
+        "a bare new Deno.Command construction whose result is never awaited or run is a MENTION, and a mention " +
+          "executes nothing: it must not credit the named script as spawned. RED ON THE PREVIOUS BEHAVIOUR - the " +
+          'old derivation returned ["tests/bare_construction_test.ts"] here, which is exactly how the exww ' +
+          "mapping row's never-started literal bought tests/exww_mutants_test.ts a false spawn edge for " +
+          "scripts/exww-live-claims-browser-proof.ts (measured at origin/main 155a3386).",
+      );
+      assertEquals(
+        bare.relations.get("scripts/tool.ts"),
+        undefined,
+        "and the construction contributes nothing to the relation either - not executedRelations, not relations",
+      );
+
+      const started = await deriveReadRelationReport(root, ["tests/started_construction_test.ts"]);
+      assertEquals(
+        started.executedRelations.get("scripts/tool.ts"),
+        ["tests/started_construction_test.ts"],
+        "the SAME literal with the command STARTED earns the execute relation - the narrowing removes the " +
+          "mention's credit, never the spawn's",
+      );
+    });
+  },
+);
