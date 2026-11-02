@@ -86,6 +86,13 @@ export interface CleanupOptions {
   /** Environment variables to pass to child processes (lsof/ps). */
   env?: Record<string, string>;
   now?: number;
+  /**
+   * Injected current-user uid (audio-feed-nazjl). Defaults to the REAL probe (`Deno.uid()`),
+   * which needs `--allow-sys`; when the probe is unavailable ownership becomes "unknown" and the
+   * sweep proceeds. Tests inject a number so the other-owner skip is exercised without needing
+   * the permission the gate does not grant, and `null` reproduces the unavailable-probe path.
+   */
+  uid?: number | null;
   log?: (line: string) => void;
 }
 
@@ -193,10 +200,14 @@ export async function cleanupTestTemp(options: CleanupOptions): Promise<CleanupC
   // and ownership becomes "unknown" — the sweep then proceeds and lets the removal attempt
   // decide. A silent all-skip here would make the whole script a well-formatted no-op.
   let myUid: number | null = null;
-  try {
-    myUid = Deno.uid();
-  } catch {
-    log("cleanup-test-temp: uid unavailable (no --allow-sys); ownership check disabled");
+  if (options.uid !== undefined) {
+    myUid = options.uid;
+  } else {
+    try {
+      myUid = Deno.uid();
+    } catch {
+      log("cleanup-test-temp: uid unavailable (no --allow-sys); ownership check disabled");
+    }
   }
   let entries: Deno.DirEntry[] = [];
   try {
