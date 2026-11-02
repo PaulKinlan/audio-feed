@@ -16,14 +16,41 @@ import { esc } from "./html.ts";
 import { PASSKEY_CLIENT, renderShell, type Viewer, viewerOf } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 
-/** Only a same-site path: `/x`, never `//host` or `/\host`. */
+/**
+ * Where `?next=` may send a visitor after sign-in: a same-site path, `/x`.
+ *
+ * Solved by RESOLVING, not by rejecting prefixes. The URL parser removes ASCII tab,
+ * CR and LF from its input and treats `\` as `/` for http(s) BEFORE it decides what
+ * the host is, so any check on the raw string is checking a different string from the
+ * one the browser will resolve: `?next=%2F%09%2Fevil.com` decodes to `/\t/evil.com`,
+ * which is neither `//` nor `/\` for a prefix test but resolves to `//evil.com`. A
+ * prefix blacklist therefore has to enumerate the parser's rewriting rules and
+ * silently fails the day it misses one. Resolving against a throwaway origin and
+ * reading the parser's own answer cannot be bypassed that way: whatever the parser
+ * strips or normalises is already gone by the time `origin` is compared, so the
+ * checked value and the emitted value are the same value.
+ */
+const NEXT_BASE = "https://next.invalid";
+
 export function safeNext(raw: string | null, fallback = "/account"): string {
-  if (
-    !raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\") || raw === "/"
-  ) {
+  if (!raw || raw === "/" || !raw.startsWith("/")) return fallback;
+
+  let resolved: URL;
+  try {
+    resolved = new URL(raw, NEXT_BASE);
+  } catch {
+    // Stripping left something unparseable, e.g. `/\n//x` -> `///x`.
     return fallback;
   }
-  return raw;
+  if (resolved.origin !== NEXT_BASE) return fallback;
+
+  const reference = resolved.pathname + resolved.search + resolved.hash;
+  // The reference is parsed a SECOND time, relative to this page. It has to land back
+  // on the URL just validated: `/..//evil.com` is same-origin as a path, but its
+  // normalised pathname is `//evil.com`, which becomes protocol-relative on that
+  // second parse.
+  if (new URL(reference, NEXT_BASE).href !== resolved.href) return fallback;
+  return reference;
 }
 
 const CSS = `

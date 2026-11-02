@@ -10,6 +10,8 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
+import { safeNext } from "../src/routes/login.ts";
+import { jsonForScript } from "../src/routes/html.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { User } from "../src/types.ts";
 import {
@@ -439,6 +441,104 @@ Deno.test("GET /login only follows same-site next paths (audio-feed-8fc)", async
   assert(!html.includes("evil.example"), "a protocol-relative next is dropped");
   const ok = await (await get(fetch, "/login?next=%2Fadmin")).text();
   assertStringIncludes(ok, '"/admin"');
+});
+
+/**
+ * `?next=` is an open-redirect sink: `renderLoginPage` puts `safeNext`'s output straight
+ * into the Continue `<a href>` and into `location.assign(NEXT)` (audio-feed-5w1g5).
+ *
+ * These rows are the CLASS, not one payload: every character or encoding the URL parser
+ * removes, rewrites or reinterprets between the raw string and the host it resolves to.
+ * A prefix blacklist checks a different string from the one the browser resolves, so
+ * each row that the parser alone neutralises has to be a row here.
+ */
+const NEXT_REJECTED: readonly (string | null)[] = [
+  // Protocol-relative in the raw form.
+  "//evil.example",
+  "//evil.example/x",
+  "///evil.example",
+  "//evil.example:8080/x",
+  // Backslash is `/` for http(s), so this is the same thing spelled differently.
+  "/\\evil.example",
+  "/\\/evil.example",
+  "\\/evil.example",
+  // C0 controls the parser DELETES anywhere in its input: 0x09 tab, 0x0A LF, 0x0D CR.
+  // Each turns `/?/evil.example` into `//evil.example`.
+  "/\t/evil.example",
+  "/\n/evil.example",
+  "/\r/evil.example",
+  "/\t\\evil.example",
+  "/\t\t/evil.example",
+  "/\n//evil.example",
+  // Dot segments: same-origin as a raw path, but the normalised pathname is `//x`, which
+  // is protocol-relative when re-emitted as a reference.
+  "/..//evil.example",
+  "/.%2e//evil.example",
+  "/./\\evil.example",
+  // An absolute URL of any scheme: only the origin is what matters.
+  "https://evil.example",
+  "http://evil.example/x",
+  "javascript:alert(1)",
+  "data:text/html,x",
+  // Not a path at all, and nothing at all.
+  "evil.example",
+  "account",
+  "",
+  null,
+  "/",
+];
+
+const NEXT_KEPT: readonly (readonly [string, string])[] = [
+  // Legitimate same-site paths round-trip byte for byte.
+  ["/admin", "/admin"],
+  ["/account?x=1#y", "/account?x=1#y"],
+  ["/a//b", "/a//b"],
+  ["/account?next=%2F%2Fevil.example", "/account?next=%2F%2Fevil.example"],
+  ["/login?next=/account", "/login?next=/account"],
+];
+
+Deno.test("safeNext rejects every parser rewrite that could supply a host (audio-feed-5w1g5)", () => {
+  for (const raw of NEXT_REJECTED) {
+    assertEquals(safeNext(raw), "/account", `dropped: ${JSON.stringify(raw)}`);
+  }
+  for (const [raw, want] of NEXT_KEPT) {
+    assertEquals(safeNext(raw), want, `kept: ${JSON.stringify(raw)}`);
+  }
+});
+
+Deno.test("safeNext's output cannot resolve cross-origin on a second parse (audio-feed-5w1g5)", () => {
+  // The href is parsed again by the browser, so the emitted reference — not the raw input —
+  // is what decides the host. Every accepted candidate must land back on the same site.
+  const site = "https://audio.example.com";
+  for (const raw of [...NEXT_REJECTED, ...NEXT_KEPT.map(([raw]) => raw)]) {
+    assertEquals(
+      new URL(safeNext(raw as string | null), site).origin,
+      site,
+      `emitted reference escapes: ${JSON.stringify(raw)}`,
+    );
+  }
+});
+
+Deno.test("GET /login drops a percent-encoded parser strip in ?next (audio-feed-5w1g5)", async () => {
+  const { fetch } = app();
+  // searchParams.get() decodes ONCE, so these reach safeNext as the raw control-character
+  // forms above. Each was a live redirect at origin/main@155a3386.
+  const payloads = [
+    "%2F%09%2Fevil.example",
+    "%2F%0A%2Fevil.example",
+    "%2F%0D%2Fevil.example",
+    "%2F%0A%2F%2Fevil.example",
+    "%2F..%2F%2Fevil.example",
+    "%2F%2Fevil.example",
+    "%2F%5Cevil.example",
+  ];
+  for (const payload of payloads) {
+    const html = await (await get(fetch, `/login?next=${payload}`)).text();
+    assert(!html.includes("evil.example"), `dropped: ?next=${payload}`);
+    assertStringIncludes(html, jsonForScript("/account"), `falls back: ?next=${payload}`);
+  }
+  const ok = await (await get(fetch, "/login?next=%2Faccount%3Fx%3D1%23y")).text();
+  assertStringIncludes(ok, jsonForScript("/account?x=1#y"), "a legitimate next round-trips");
 });
 
 Deno.test("GET /admin: a signed-in non-admin gets 403 (audio-feed-8fc)", async () => {
