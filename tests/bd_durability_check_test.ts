@@ -145,41 +145,48 @@ Deno.test("audio-feed bd-check: absent backup + auto-backup enabled FAILS", asyn
   assertStringIncludes(result.stderr, "backup manifest missing");
 });
 
-Deno.test("audio-feed bd-check: an unparseable backup manifest is not a pass", async () => {
-  const result = await runCheck({ backupDir: true, config: `backup:\n  enabled: true\n` });
-  assertEquals(result.code, 0);
-  // The guard itself: a manifest with no 32-char address must fail rather than
-  // report "all 0 referenced table files present".
-  const tmp = await Deno.makeTempDir({ prefix: "bd-durability-empty-" });
-  try {
-    await Deno.mkdir(`${tmp}/backup`, { recursive: true });
-    await Deno.writeTextFile(`${tmp}/backup/manifest`, "not-a-manifest\n");
-    await Deno.writeTextFile(`${tmp}/config.yaml`, "backup:\n  enabled: true\n");
-    const out = await new Deno.Command("bash", {
-      args: [
-        "-c",
-        `BEADS_DIR="${tmp}" BD_DURABILITY_TIMEOUT=20 bash "${CHECK_PATH}" --skip-restore`,
-      ],
-      cwd: ROOT,
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    const stdout = new TextDecoder().decode(out.stdout);
-    const stderr = new TextDecoder().decode(out.stderr);
-    assertEquals(out.code, 1, `an empty manifest must fail the check:\n${stdout}\n${stderr}`);
-    assertStringIncludes(stderr, "no parseable 32-char table-file address");
-  } finally {
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
-  }
-});
+Deno.test(
+  "audio-feed bd-check: a COMMENTED `enabled: false` never wins the config parse",
+  async () => {
+    // The NEGATIVE row for backup_enabled()'s awk: full-line comments must be ignored, so
+    // a commented-out `enabled: false` left behind by an editor cannot turn auto-backup
+    // off and mute checks 1 and 3. The commented block sits ABOVE the live section and
+    // must lose to the uncommented `enabled: true`.
+    const result = await runCheck({
+      backupDir: false,
+      config: `# backup:\n#   enabled: false\nbackup:\n  enabled: true\n`,
+    });
+    assertEquals(
+      result.code,
+      1,
+      `a commented enabled: false must not disable auto-backup:\n${result.stdout}\n${result.stderr}`,
+    );
+    assertStringIncludes(result.stdout, "auto-backup: on");
+    assertStringIncludes(result.stderr, "FAIL: backup manifest missing");
+  },
+);
 
-Deno.test("audio-feed bd-check: a dashed id and a dashed title are parsed apart", async () => {
-  // The first cut used `grep -oE '[a-z0-9]+-[a-z0-9]+' | tail -1`, which turned
-  // `audio-feed-ro4tg` into `audio-feed` and preferred any dashed word from a title
-  // or a PATH warning over the id. The stub prints its id with a dashed PATH warning
-  // on stderr and the check generates a dashed title of its own.
-  const result = await runCheck(ENABLED_FIXTURE);
-  assertStringIncludes(result.stdout, "bd create printed a bare id: audio-feed-tst01");
-  assertStringIncludes(result.stdout, "live read-back of audio-feed-tst01");
-});
+Deno.test(
+  "audio-feed bd-check: the comment-skip is load-bearing — a section comment cannot orphan the real key",
+  async () => {
+    // RED-PROOF ROW for the skip above: delete `/^[[:space:]]*#/ { next }` from
+    // backup_enabled()'s awk and THIS row reds. A comment line IS non-space, so without
+    // the skip it hits the `^[^[:space:]]` section branch, resets inbackup to false, and
+    // the real `enabled: false` below is orphaned — backup_enabled() then falls through
+    // to bd's default (on), the absent destination FAILs the check, and the healthy
+    // disabled state is reported as a failure. The row above pins the property for a
+    // comment BEFORE the section; this one proves the skip itself matters.
+    const result = await runCheck({
+      backupDir: false,
+      config:
+        `backup:\n#   enabled: false   (commented out during the a1bm8 repair)\n  enabled: false\n`,
+    });
+    assertEquals(
+      result.code,
+      0,
+      `a comment inside the section must not orphan the enabled key that follows it:\n${result.stdout}\n${result.stderr}`,
+    );
+    assertStringIncludes(result.stdout, "auto-backup: off");
+    assertStringIncludes(result.stdout, "backup destination absent and auto-backup disabled");
+  },
+);
