@@ -8,13 +8,18 @@
  * definitions).
  */
 
-/** Escapes text interpolated into an HTML document. */
+/**
+ * Escapes text interpolated into an HTML document: text nodes AND double- or
+ * single-quoted attribute values (`&` first so the other replacements are not
+ * double-encoded).
+ */
 export function esc(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**

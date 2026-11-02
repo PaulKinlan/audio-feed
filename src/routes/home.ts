@@ -27,17 +27,8 @@ import { DEFAULT_NARRATION_VOICE } from "../tts/gemini.ts";
 import { renderShell, type Viewer } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 import { assetUrl } from "./assets.ts";
-import { jsonForScript } from "./html.ts";
+import { esc, jsonForScript } from "./html.ts";
 import { sessionUser } from "../auth/sessions.ts";
-
-/** Escapes text interpolated into the document. */
-function esc(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
 
 export interface HomePageOptions {
   /** Absolute origin, used to show real feed URLs rather than placeholders. */
