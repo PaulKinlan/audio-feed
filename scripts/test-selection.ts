@@ -336,7 +336,7 @@ const READ_CALLS = [
 ];
 
 /** Copy calls: a copy DEPENDS only on its SOURCE argument. */
-const COPY_CALLS = new Set(["copyFile", "copyFileSync"]);
+export const COPY_CALLS = new Set(["copyFile", "copyFileSync"]);
 
 /**
  * Strip comments and track string boundaries in a single character-level scan.
