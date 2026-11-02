@@ -447,3 +447,97 @@ Deno.test("a rejected --max-age-minutes deletes NOTHING — the CLI errors out b
     await Deno.remove(root, { recursive: true }).catch(() => {});
   }
 });
+
+Deno.test("cleanupTestTemp: an injected uid exercises the other-owner skip the gate cannot reach (audio-feed-nazjl)", async () => {
+  // WHY AN INJECTED UID: scripts/cleanup-test-temp.ts probes Deno.uid() ONCE, and without
+  // --allow-sys that throws, so ownership becomes unknown and the sweep proceeds. The gate's test
+  // flags do not grant --allow-sys, so the uid-KNOWN branch - the one the documented real
+  // invocation takes (AGENTS.md: --allow-sys) - was unreachable from any row. Injecting the uid
+  // makes the branch reachable without granting the permission, and without needing root to
+  // create a file owned by somebody else.
+  const root = await makeScratch();
+  try {
+    const mine = `${root}/nazjl-scratch-aaaa0011`;
+    await Deno.mkdir(mine);
+    await Deno.utime(mine, OLD.mtime, OLD.mtime);
+    const theirs = `${root}/nazjl-scratch-bbbb0022`;
+    await Deno.mkdir(theirs);
+    await Deno.utime(theirs, OLD.mtime, OLD.mtime);
+
+    const realUid = (Deno.statSync(mine) as { uid?: number }).uid;
+    assertEquals(
+      typeof realUid,
+      "number",
+      "the filesystem must report uid for this row to mean anything",
+    );
+    const foreignUid = (realUid as number) + 1000;
+
+    // Pass 1: our own uid, and the sweep we expect. The entry we call "theirs" is ours on disk,
+    // so it is removed - which is what proves the skip in pass 2 is caused by the uid and not by
+    // anything else about the entry.
+    const ownRun = await cleanupTestTemp({
+      tempRoot: root,
+      maxAgeMs: 60 * 60_000,
+      yes: true,
+      processCmdlines: () => [],
+      pathLiveness: () => Promise.resolve("clear"),
+      uid: realUid as number,
+    });
+    assertEquals(
+      ownRun.skippedOtherOwner,
+      0,
+      "a same-uid candidate is never skipped as another owner",
+    );
+    assertEquals(ownRun.removed, 2, "both stale in-scope entries are removed for their owner");
+    assertEquals(await exists(theirs), false);
+
+    // Pass 2 (the gap): a uid that differs from every entry's. Nothing may be removed, both are
+    // counted as another owner, and the count is reported rather than the deletion attempted.
+    const stranger = `${root}/nazjl-scratch-cccc0033`;
+    await Deno.mkdir(stranger);
+    await Deno.utime(stranger, OLD.mtime, OLD.mtime);
+
+    const theirRun = await cleanupTestTemp({
+      tempRoot: root,
+      maxAgeMs: 60 * 60_000,
+      yes: true,
+      processCmdlines: () => [],
+      pathLiveness: () => Promise.resolve("clear"),
+      uid: foreignUid,
+    });
+    assertEquals(theirRun.skippedOtherOwner, 1, "another owner's entry is counted, not deleted");
+    assertEquals(theirRun.removed, 0, "never delete a directory that belongs to another uid");
+    assertEquals(await exists(stranger), true, "the other owner's directory survives");
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("cleanupTestTemp: uid null is the unavailable-probe path and deletes nothing it cannot vouch for (audio-feed-nazjl)", async () => {
+  // null is what the real probe produces without --allow-sys. The sweep proceeds and lets the
+  // removal attempt decide: ownership is NOT claimed to be proven here, and this row pins that
+  // distinction so a future change cannot quietly start treating "unknown" as "mine".
+  const root = await makeScratch();
+  try {
+    const stale = `${root}/nazjl-scratch-dddd0044`;
+    await Deno.mkdir(stale);
+    await Deno.utime(stale, OLD.mtime, OLD.mtime);
+
+    const counts = await cleanupTestTemp({
+      tempRoot: root,
+      maxAgeMs: 60 * 60_000,
+      yes: true,
+      processCmdlines: () => [],
+      pathLiveness: () => Promise.resolve("clear"),
+      uid: null,
+    });
+    assertEquals(
+      counts.skippedOtherOwner,
+      0,
+      "an unknown uid must not be counted as another owner",
+    );
+    assertEquals(counts.removed, 1, "the removal attempt still decides, as documented");
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});
