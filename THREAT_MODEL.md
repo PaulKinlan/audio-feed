@@ -21,3 +21,19 @@ exhaustive analysis.
   `Origin` header are indistinguishable from the untrusted case and are dropped the same way — their
   violations are invisible by policy. Accepting them would require trusting origin-less requests on
   a cross-origin reporting endpoint, which is the surface this policy exists to close.
+
+## Unauthenticated `/health` — deploy fingerprint and backend-kind disclosure
+
+- **Decision** (audio-feed-1552, audio-feed-ciia; fallback behaviour on audio-feed-j9j1): the
+  unauthenticated `/health` route (`src/app.ts`) deliberately returns, to any caller without a
+  token or session: the storage backend KIND (`ctx.stores.describe`, e.g. `blobs=s3`), the deploy
+  id and its source, and the exact source commit SHA (`deploy.commit`).
+- **Why accepted:** production has no other observable identity — every other surface is token- or
+  session-gated — so this disclosure is what lets a landing be verified against the live deployment
+  ("which revision is actually running?") without Deno Deploy API tokens.
+- **Residual (documented, accepted):** the endpoint is an unauthenticated reconnaissance signal: it
+  names the storage backend and pins the running revision, which tells an attacker exactly which
+  version's bug classes to try. That is judged low-sensitivity operational metadata, not a secret.
+- **Scope note:** an earlier revision leaked the blob-store BUCKET NAME through the same route;
+  that leak is fixed and `Stores.describe` deliberately publishes the backend kind only
+  (audio-feed-tra9d).
