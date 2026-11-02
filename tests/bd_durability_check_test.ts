@@ -259,3 +259,31 @@ Deno.test("audio-feed bd-check: a dashed id and a dashed title are parsed apart"
   assertStringIncludes(result.stdout, "bd create printed a bare id: audio-feed-tst01");
   assertStringIncludes(result.stdout, "live read-back of audio-feed-tst01");
 });
+
+/**
+ * The DECLARATION this suite's two paths depend on (audio-feed-45s45). The fast gate derives this suite
+ * from the spawn literal below and the copyFile above, but the fleet's coverage oracle is a SEPARATE
+ * oracle (remote/check-coverage.py) that places a changed path by stem convention, import reference, or
+ * a spawn/exec match - and its stem arm requires COMPATIBLE extensions, so `.sh` is never placeable by a
+ * `.ts` suite there. .fleet/coverage-contract.json is the declared edge that lets the host say the path
+ * was placed; the host still requires the suite to have RUN, so the declaration cannot green a gate on
+ * its own. This row keeps it from rotting: renaming either shell file fails here instead of leaving a
+ * declaration that names nothing.
+ */
+const CONTRACT_PATH = ".fleet/coverage-contract.json";
+const DECLARED_PATHS = ["scripts/bd-durability-check.sh", "tests/fixtures/bd_stub.sh"];
+
+Deno.test("audio-feed bd-check: the coverage declaration names both shell paths and this suite", async () => {
+  const contract = JSON.parse(
+    await Deno.readTextFile(`${ROOT}/${CONTRACT_PATH}`),
+  ) as Record<string, string[]>;
+  for (const path of DECLARED_PATHS) {
+    const stat = await Deno.stat(`${ROOT}/${path}`);
+    assert(stat.isFile, `${path} is declared as covered but is not a file in the tree`);
+    assertEquals(
+      contract[path],
+      ["tests/bd_durability_check_test.ts"],
+      `${path} must be declared as covered by this suite`,
+    );
+  }
+});
