@@ -7,7 +7,8 @@
  *      - Verifies request access section and inputs on front door.
  *      - Submits request access form with email and display name.
  *      - Asserts honest pending response and zero capability/token leaks.
- *      - Proves pending token is refused for ingest, player, and feed (403).
+ *      - Proves pending token is refused for ingest (403), player (404, uniform with an unknown
+ *        token so the route is not an account-state oracle) and feed (403).
  *      - Captures initial and submitted desktop screenshots.
  *   3. Mobile (390x844):
  *      - Asserts zero horizontal overflow at 390px.
@@ -361,11 +362,26 @@ await runProof("request-access-browser-proof", async (checker) => {
       `status: ${ingestPending.status}`,
     );
 
+    // audio-feed-se8s8 (the audio-feed-7kdhb precedent): /listen/:token is UNAUTHENTICATED, so a
+    // 403 naming the account state is an oracle - the refusal is deliberately 404 and
+    // indistinguishable from an unknown token's. This proof asserted the old 403, and nothing gates
+    // this script, so it would have failed SILENTLY-LATE on the next evidence re-run of r97 rather
+    // than loudly in a gate. The body assertion is the part that matters: same shape, no disclosure.
+    // Byte-for-byte, not "contains": the ruling is that the refusal is INDISTINGUISHABLE from an
+    // unknown token's, and a body that merely mentions the right words still distinguishes. So the
+    // pending refusal is compared against a nonsense token's response on the same route.
     const playerPending = await fetch(`${BASE}/listen/${token}`);
+    const playerUnknown = await fetch(`${BASE}/listen/not-a-real-token-${Date.now()}`);
+    const pendingBody = await playerPending.text();
+    const unknownBody = await playerUnknown.text();
     check(
-      "pending user cannot access player (403 forbidden)",
-      playerPending.status === 403,
-      `status: ${playerPending.status}`,
+      "pending user cannot access player (404, byte-identical to an unknown token)",
+      playerPending.status === 404 &&
+        playerUnknown.status === playerPending.status &&
+        pendingBody === unknownBody,
+      `status: ${playerPending.status} vs unknown ${playerUnknown.status}; bodies equal: ${
+        pendingBody === unknownBody
+      }`,
     );
 
     const feedPending = await fetch(`${BASE}/feed/${token}/master.xml`);

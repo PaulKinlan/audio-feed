@@ -518,9 +518,14 @@ Deno.test("POST /api/request-access: spend gate authority & end-to-end access li
   const ingestErr = await ingestPending.json();
   assertEquals(ingestErr.error, "An approved user is required.");
 
-  // 3. Pending user CANNOT access player (403 forbidden)
+  // 3. Pending user CANNOT access player. The status is 404 and not 403 on purpose
+  // (audio-feed-se8s8, the audio-feed-7kdhb precedent): /listen/:token is unauthenticated, so a
+  // 403 naming the account state is an oracle for a caller holding a token - the refusal must be
+  // indistinguishable from an unknown token's. This row asserted 403 before that decision landed;
+  // the union gate caught it, which is exactly what the merger's merged-tree gate is for.
   const playerPending = await fetch(new Request(`${BASE}/listen/${token}`));
-  assertEquals(playerPending.status, 403);
+  assertEquals(playerPending.status, 404);
+  assertStringIncludes(await playerPending.text(), "Unknown feed");
 
   // 4. Pending user CANNOT access master feed (403 forbidden)
   const feedPending = await fetch(new Request(`${BASE}/feed/${token}/master.xml`));
