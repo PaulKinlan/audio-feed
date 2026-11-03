@@ -239,8 +239,22 @@ Deno.test("the token is the only credential, and it is checked", async () => {
       feedToken: "token-pending",
     }),
   );
-  // A suspended or pending subscriber must not get a player for paid output.
-  assertEquals((await fetch(get("/listen/token-pending"))).status, 403);
+  // A suspended or pending subscriber must not get a player for paid output — and the
+  // refusal must not DISCLOSE the account state (audio-feed-se8s8, the audio-feed-7kdhb
+  // precedent on /audio): a refusal that differs by moderation status tells a token
+  // holder both that the token is valid and what the status is. The pending token gets
+  // byte-for-byte what an unknown token gets, on the page and on the status poll alike.
+  const unknownPage = await fetch(get("/listen/nonsense"));
+  const unknownBody = await unknownPage.text();
+  assertStringIncludes(unknownBody, "Unknown feed");
+  const pendingPage = await fetch(get("/listen/token-pending"));
+  assertEquals(pendingPage.status, 404);
+  assertEquals(await pendingPage.text(), unknownBody);
+  const unknownPoll = await fetch(get("/listen/nonsense/status"));
+  const unknownPollBody = await unknownPoll.text();
+  const pendingPoll = await fetch(get("/listen/token-pending/status"));
+  assertEquals(pendingPoll.status, 404);
+  assertEquals(await pendingPoll.text(), unknownPollBody);
 });
 
 Deno.test("a hostile token cannot break out of the page's script (audio-feed-4xb)", async () => {
