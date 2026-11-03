@@ -160,8 +160,14 @@ Deno.test("audio route storage-miss 404s (GET, HEAD, direct-url) redact valid ca
   const VALID_MISSING_KEY = "user-secret-7/direct/never-existed.mp3";
 
   try {
-    // 1. GET storage-miss on default store
-    const { fetch: defaultFetch } = await app();
+    // 1. GET storage-miss on default store. The owner is seeded approved so the
+    // storage-miss path is genuinely the thing under test: since audio-feed-hqjcy an
+    // owner that is missing or unapproved is refused BEFORE any blob work, and that
+    // refusal has its own (also redacted) warn, pinned in case 4 below.
+    const { fetch: defaultFetch, stores: defaultStores } = await app();
+    await defaultStores.metadata.putUser(
+      makeUser({ id: "user-secret-7", status: "approved" }),
+    );
     const getRes = await defaultFetch(
       new Request(`${BASE}/audio/${VALID_MISSING_KEY}`, {
         headers: { Origin: BASE },
@@ -201,11 +207,14 @@ Deno.test("audio route storage-miss 404s (GET, HEAD, direct-url) redact valid ca
 
     // 3. direct-url miss on store with uniform direct URLs
     warnings.length = 0;
-    const { fetch: directFetch } = await app((inner) => {
+    const { fetch: directFetch, stores: directStores } = await app((inner) => {
       inner.url = (key) => Promise.resolve(`https://cdn.example.com/${key}`);
       inner.head = () => Promise.resolve(null);
       return inner;
     });
+    await directStores.metadata.putUser(
+      makeUser({ id: "user-secret-7", status: "approved" }),
+    );
 
     // Non-CORS request without Range triggers direct-url check
     const directRes = await directFetch(
@@ -221,6 +230,28 @@ Deno.test("audio route storage-miss 404s (GET, HEAD, direct-url) redact valid ca
     assert(
       !directWarn.includes("user-secret-7") && !directWarn.includes("never-existed.mp3"),
       `direct-url warn must not leak key: ${directWarn}`,
+    );
+
+    // 4. audio-feed-hqjcy: an unapproved owner is refused BEFORE any blob work; that
+    // early refusal's warn must redact the capability key exactly like the misses above.
+    warnings.length = 0;
+    const { fetch: pendingFetch, stores: pendingStores } = await app();
+    await pendingStores.metadata.putUser(
+      makeUser({ id: "user-pending-7", status: "pending" }),
+    );
+    const pendingRes = await pendingFetch(
+      new Request(`${BASE}/audio/user-pending-7/direct/never-existed.mp3`),
+    );
+    assertEquals(pendingRes.status, 404);
+    const pendingWarn = warnings.find((w) => w.includes("audio 404 (unauthorized)"));
+    assert(pendingWarn, "the pre-blob-work approval refusal must log its operator reason");
+    assert(
+      pendingWarn.includes('key "[redacted]"'),
+      `approval-refusal warn must be redacted: ${pendingWarn}`,
+    );
+    assert(
+      !pendingWarn.includes("never-existed.mp3"),
+      `approval-refusal warn must not leak key: ${pendingWarn}`,
     );
   } finally {
     console.warn = originalWarn;

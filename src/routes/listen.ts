@@ -648,7 +648,13 @@ export async function handleListen(
   const user = await getUserByFeedToken(ctx.stores.metadata, token);
   if (!user) return notFound("Unknown feed");
   if (user.status !== "approved") {
-    return forbidden(`Feed unavailable (status: ${user.status})`);
+    // Uniform 404 (audio-feed-se8s8, the audio-feed-7kdhb precedent on /audio): a refusal
+    // that names the moderation status tells the token holder both that the token is VALID
+    // and what the owning account's state is — a disclosure independent of authorization.
+    // The caller sees exactly what an unknown token sees; the reason stays on the
+    // operator's console, never in the response body.
+    console.warn(`[audio-feed] listen 404 (unapproved): user "${user.id}" is ${user.status}`);
+    return notFound("Unknown feed");
   }
 
   // ONE newest-first traversal serves the page rows and the panel window (audio-feed-3jb). Rows
@@ -765,7 +771,10 @@ export async function handleListenStatus(
   const user = await getUserByFeedToken(ctx.stores.metadata, token);
   if (!user) return notFound("Unknown feed");
   if (user.status !== "approved") {
-    return forbidden(`Feed unavailable (status: ${user.status})`);
+    // Same uniform 404 as the page (audio-feed-se8s8): no status detail to an
+    // unauthenticated caller; the operator-facing reason is the warn line only.
+    console.warn(`[audio-feed] listen 404 (unapproved): user "${user.id}" is ${user.status}`);
+    return notFound("Unknown feed");
   }
   const dbStart = performance.now();
   const activity = await playerActivity(ctx, user.id);

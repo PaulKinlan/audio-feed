@@ -342,6 +342,16 @@ export async function handleAudio(
     }
   }
 
+  // Approval BEFORE any blob work (audio-feed-hqjcy): a request whose owner is missing
+  // or not approved can never succeed, so it must not spend blob reads — nor mint a
+  // presigned URL on a redirecting store that is then discarded. This is the same
+  // decision the per-branch checks below used to make: the user resolves from
+  // canonicalUserId, and every candidate belongs to that owner (legacy candidates are
+  // appended only when their unique owner matches, audio-feed-65lf), so refusing here
+  // refuses exactly what they refused — one metadata read instead of store round trips.
+  const refusal = await checkUserApproval(ctx, canonicalKey, canonicalUserId);
+  if (refusal) return refusal;
+
   if (isHead) {
     let resolvedKey: string | null = null;
     let info = null;
@@ -358,9 +368,6 @@ export async function handleAudio(
       );
       return notFound("Unknown audio object");
     }
-
-    const refusal = await checkUserApproval(ctx, resolvedKey, canonicalUserId);
-    if (refusal) return refusal;
 
     return headResponse(info.size, {
       "content-type": info.contentType,
@@ -396,9 +403,6 @@ export async function handleAudio(
       }
       const info = await ctx.stores.blobs.head(key);
       if (info) {
-        const refusal = await checkUserApproval(ctx, key, canonicalUserId);
-        if (refusal) return refusal;
-
         // Counted when the redirect is ISSUED, not when the client finishes —
         // on a redirecting store the bytes never reach us, so this is the last
         // point at which anything is observable. The dashboard says
@@ -438,8 +442,6 @@ export async function handleAudio(
       object = await ctx.stores.blobs.get(key, range ? { range } : undefined);
     } catch (error) {
       if (error instanceof RangeNotSatisfiableError) {
-        const refusal = await checkUserApproval(ctx, key, canonicalUserId);
-        if (refusal) return refusal;
         return new Response(null, {
           status: 416,
           headers: {
@@ -461,12 +463,6 @@ export async function handleAudio(
       `[audio-feed] audio GET 404: key "${redactAudioKey(rawKey)}" not found in storage`,
     );
     return notFound("Unknown audio object");
-  }
-
-  const refusal = await checkUserApproval(ctx, resolvedKey, canonicalUserId);
-  if (refusal) {
-    await object.body.cancel?.();
-    return refusal;
   }
 
   const headers = new Headers({
