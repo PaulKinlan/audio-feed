@@ -901,7 +901,11 @@ Deno.test("token redaction: audio route 404 logs redacted key on disallowed or u
 
 Deno.test("token redaction: audio route storage-miss 404s (GET, HEAD, direct-url) redact valid capability keys (audio-feed-f9wf)", async () => {
   const VALID_MISSING_KEY = "user-secret-7/direct/never-existed.mp3";
-  const { fetch } = setupTestApp();
+  const { fetch, stores } = setupTestApp();
+  // Seed the owner approved (audio-feed-hqjcy): a missing owner is now refused
+  // BEFORE any blob work, so the storage-miss warns below need a real approved
+  // owner to be reached at all.
+  await stores.metadata.putUser(makeUser({ id: "user-secret-7", status: "approved" }));
 
   const loggedWarnings: unknown[][] = [];
   const originalWarn = console.warn;
@@ -939,6 +943,7 @@ Deno.test("token redaction: audio route storage-miss 404s (GET, HEAD, direct-url
     // 3. direct-url 404
     loggedWarnings.length = 0;
     const directStore = memoryStores();
+    await directStore.metadata.putUser(makeUser({ id: "user-secret-7", status: "approved" }));
     directStore.blobs.url = (key) => Promise.resolve(`https://cdn.example.com/${key}`);
     directStore.blobs.head = () => Promise.resolve(null);
     const { fetch: directFetch } = setupTestApp(directStore);
