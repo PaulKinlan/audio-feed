@@ -112,6 +112,7 @@ import { getUserByFeedToken } from "../auth/users.ts";
 import { sameOrigin } from "../auth/sessions.ts";
 import { extractClientIp, SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
 import { esc, jsonForScript } from "./html.ts";
+import { problem } from "../http.ts";
 import { assetUrl } from "./assets.ts";
 import { speculationRules } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
@@ -607,6 +608,73 @@ function logListenTiming(route: string, fields: Record<string, number>): void {
   console.log(JSON.stringify({ event: "listen.timing", route, ...fields }));
 }
 
+/**
+ * Rate limits for the capability GETs — the page and its status poll (audio-feed-l11jx).
+ *
+ * The token in the path is the whole credential, so these routes are public by design, exactly
+ * like `/audio/:key` (audio-feed-k21s0). What they are NOT is cheap: the page is a paged episode
+ * traversal (up to `LISTEN_RECENT_SCAN` scanned, `LISTEN_ROW_CAP` rows) plus batched article
+ * reads, and the poll runs the same window again. Before this there was no bound at all, so
+ * anyone holding — or guessing — a token could spend those reads as fast as they could ask.
+ *
+ * The pattern is copied from the audio route deliberately: one `SlidingWindowRateLimiter`, keyed
+ * on the client address, windowed in the shared store so the bound holds across isolates, and
+ * checked BEFORE the route touches a token or an episode. A refused request therefore costs one
+ * rate-window write and no tenant reads.
+ *
+ * The numbers, and why they differ from the audio route's 300-per-5-minutes:
+ *
+ * - PAGE 60/5min (12/min per address). A page load is a NAVIGATION, not a poll — 12 a minute is
+ *   far above a subscriber reloading impatiently, and a shared address with a dozen listeners
+ *   still fits. It is the expensive request, so it gets the tighter bound: at the observed cost
+ *   of a few hundred reads, this caps one address at roughly 25k reads per five minutes.
+ * - STATUS 120/5min (24/min per address). `src/assets/listen.js:1057` records the player's
+ *   cadence — "a 15s poll is not a 15s metronome" — which is 20 requests per five-minute
+ *   window, so this is SIX times one client's polling, enough for a household behind one
+ *   address with several devices, and still a hard bound on a hammer. The poll is also the
+ *   panel a subscriber watches while synthesis runs: refusing it degrades to a stale panel,
+ *   never to broken playback, which is the right thing to trade.
+ *
+ * Separate windows (not one shared bucket) because a page reload must not eat the polls that
+ * a player already open depends on.
+ */
+export const LISTEN_PAGE_RATE = { maxRequests: 60, windowMs: 5 * 60 * 1000 } as const;
+export const LISTEN_STATUS_RATE = { maxRequests: 120, windowMs: 5 * 60 * 1000 } as const;
+
+/** The two window namespaces — exported so tests exercise the SAME rows the handlers use. */
+export const LISTEN_PAGE_WINDOW = "listen_page";
+export const LISTEN_STATUS_WINDOW = "listen_status";
+
+/**
+ * Apply one listen-surface rate window, returning the refusal or null.
+ *
+ * Called FIRST in each handler, before `resolveTokenValue`: a token lookup is already a store
+ * read, and a garbage token must count against the bound too (the lesson of audio-feed-k21s0 —
+ * a limit that only applied to well-formed capabilities would leave probing free).
+ *
+ * The refusal is shaped like the audio route's (audio-feed-k21s0): `problem()`'s JSON body and
+ * a `retry-after` saying when the window opens again.
+ */
+async function refuseListenRead(
+  { ctx, req, remoteAddr }: RouteContext<AppContext>,
+  rate: { maxRequests: number; windowMs: number },
+  namespace: string,
+): Promise<Response | null> {
+  const limit = await new SlidingWindowRateLimiter(
+    rate,
+    ctx.stores.metadata,
+    namespace,
+  ).check(extractClientIp(req, Boolean(ctx.config.trustProxyHeaders), remoteAddr));
+  if (limit.allowed) return null;
+  const refused = problem({
+    status: 429,
+    title: "too_many_requests",
+    detail: "Too many listen requests from this client; retry later.",
+  });
+  refused.headers.set("retry-after", String(Math.max(1, Math.ceil(limit.resetMs / 1000))));
+  return refused;
+}
+
 /** The activity panel for the status poll: the same one-window derivation (audio-feed-3jb). */
 export async function playerActivity(
   ctx: AppContext,
@@ -640,8 +708,12 @@ export async function playerActivity(
 
 /** Resolve the token, load what the player renders, and serve the page. */
 export async function handleListen(
-  { ctx, req, params }: RouteContext<AppContext>,
+  route: RouteContext<AppContext>,
 ): Promise<Response> {
+  const { ctx, req, params } = route;
+  // Rate-limit before ANY store work (audio-feed-l11jx): see LISTEN_PAGE_RATE.
+  const refused = await refuseListenRead(route, LISTEN_PAGE_RATE, LISTEN_PAGE_WINDOW);
+  if (refused) return refused;
   const origin = resolveOrigin(ctx.config, req);
   const token = await resolveTokenValue(ctx, (params.token ?? "").trim());
   if (!token) return notFound("Unknown feed");
@@ -764,8 +836,12 @@ export async function handleListen(
  * response would show a subscriber work that finished minutes ago.
  */
 export async function handleListenStatus(
-  { ctx, params }: RouteContext<AppContext>,
+  route: RouteContext<AppContext>,
 ): Promise<Response> {
+  const { ctx, params } = route;
+  // The poll's own window, checked before the token lookup (audio-feed-l11jx).
+  const refused = await refuseListenRead(route, LISTEN_STATUS_RATE, LISTEN_STATUS_WINDOW);
+  if (refused) return refused;
   const token = await resolveTokenValue(ctx, (params.token ?? "").trim());
   if (!token) return notFound("Unknown feed");
   const user = await getUserByFeedToken(ctx.stores.metadata, token);
