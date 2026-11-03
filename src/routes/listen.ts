@@ -1004,7 +1004,16 @@ export async function handleListenRetry(
   const user = await getUserByFeedToken(ctx.stores.metadata, token);
   if (!user) return notFound("Unknown feed");
   if (!isSynthesisAuthorized(user)) {
-    return forbidden(`Retry unavailable (status: ${user.status})`);
+    // Uniform 404 (audio-feed-se8s8, the audio-feed-7kdhb precedent on /audio): a refusal
+    // that names the moderation status tells the token holder both that the token is VALID
+    // and what the owning account's state is — a disclosure independent of authorization.
+    // The retry button lives on the player page, which a non-approved account never
+    // receives, and the player's own handler renders any non-404/429 refusal as a generic
+    // "Could not retry" — so no legitimate user ever read the status prose this used to
+    // send. The caller sees exactly what an unknown token sees; the reason stays on the
+    // operator's console (user id + status, never the token), not in the response body.
+    console.warn(`[audio-feed] listen 404 (unapproved): user "${user.id}" is ${user.status}`);
+    return notFound("Unknown feed");
   }
 
   // Rate limits BEFORE the episode reads: a hammer should not get free KV reads any more

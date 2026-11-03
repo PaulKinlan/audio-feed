@@ -257,6 +257,43 @@ Deno.test("the token is the only credential, and it is checked", async () => {
   assertEquals(await pendingPoll.text(), unknownPollBody);
 });
 
+Deno.test("retry refuses an unapproved token with the uniform 404, byte-identical to an unknown one (audio-feed-se8s8)", async () => {
+  // The retry POST is the last member of the se8s8 disclosure class and had NO test
+  // coverage at all. The pin row (git history) recorded the pre-change behaviour:
+  // unknown token 404 {"error":"Unknown feed"}; pending and rejected tokens 403
+  // {"error":"Retry unavailable (status: pending|rejected)"} — an account-state
+  // oracle. The route now answers exactly what an unknown token sees.
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-pending", status: "pending", feedToken: "token-pending" }),
+  );
+  await stores.metadata.putUser(
+    makeUser({ id: "user-rejected", status: "rejected", feedToken: "token-rejected" }),
+  );
+  const ctx = { config, stores };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const retry = (token: string) =>
+    fetch(
+      new Request(`${BASE}/listen/${token}/episodes/ep-x/retry`, {
+        method: "POST",
+        headers: { origin: BASE },
+      }),
+    );
+
+  const unknown = await retry("token-unknown");
+  assertEquals(unknown.status, 404);
+  const unknownBody = await unknown.text();
+  assertEquals(unknownBody, '{"error":"Unknown feed"}');
+
+  const pending = await retry("token-pending");
+  assertEquals(pending.status, 404);
+  assertEquals(await pending.text(), unknownBody);
+
+  const rejected = await retry("token-rejected");
+  assertEquals(rejected.status, 404);
+  assertEquals(await rejected.text(), unknownBody);
+});
+
 Deno.test("a hostile token cannot break out of the page's script (audio-feed-4xb)", async () => {
   // Feed tokens are minted base36, but the page embeds whatever token resolved, so
   // the escape must hold for a token that is markup.
