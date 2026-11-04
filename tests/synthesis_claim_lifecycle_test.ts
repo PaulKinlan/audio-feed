@@ -2773,3 +2773,81 @@ Deno.test("audio-feed-aueh: intermediate claim lease expiry records claim.lifecy
   assert(abandonedLog, "expected abandoned claim event with severity=error for final attempt");
   assertEquals(abandonedLog.attempt, 3);
 });
+
+Deno.test("audio-feed-8iwis: a hung TTS turn at production defaults is recorded as the deadline that stopped it, never as a generic budget yield", async () => {
+  const { ctx, stores } = await setupEnv();
+
+  // THE ARITHMETIC THIS ROW IS ABOUT, in production's own numbers:
+  //   invocation window = DEFAULT_MAX_INVOCATION_DURATION_MS (90_000)
+  //                     - INVOCATION_FLUSH_MARGIN_MS  (5_000)   = 85_000ms armed deadline
+  //   per-turn ceiling  = DEFAULT_TIMEOUT_MS (120_000)             > 85_000, so unreachable
+  // The TTS stage's deadline is armed at `maxDurationMs - elapsed - flushMargin`, and the clock
+  // is frozen, so it lands at exactly 85_000ms. Advance to there and no further: the row drives
+  // the bound that really stops a hung provider rather than assuming host speed.
+  const time = controlledInvocationClock();
+  let releaseDeadline: () => void = () => {};
+  const inFlight = new Promise<void>((resolve) => {
+    releaseDeadline = resolve;
+  });
+  const fired = (async () => {
+    await inFlight;
+    await time.advance(85_000);
+  })();
+  fired.catch(() => {});
+
+  let paidCalls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    timeoutRetries: 0,
+    // A genuinely hung provider: the request never settles on its own, it can only be aborted.
+    fetchFn: (_url, init) => {
+      paidCalls++;
+      releaseDeadline();
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5_000,
+  });
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-8iwis",
+    maxAttempts: 2,
+    // Production defaults, NOT tightened: a tightened 100ms budget is what the sibling rows use
+    // to prove ORDER, and it is precisely why they cannot prove this one.
+    maxInvocationDurationMs: 90_000,
+    flushMarginMs: 5_000,
+    estimatedTurnDurationMs: 1,
+    clock: time.clock,
+  });
+
+  assertEquals(paidCalls, 1, "the paid TTS turn was in flight when the deadline fired");
+  assertEquals(result.failed.length, 0, "a deadline cut is a yield, not a failure");
+  assertEquals(result.yielded.length, 1, "the claim yields so the next tick can resume");
+
+  const records = await stores.metadata.listLogs({ sinceSeq: 0, limit: 500 });
+  const yields = records.filter((r) => (r.reason ?? "").includes("segments committed"));
+  assertEquals(yields.length, 1, "exactly one yield record for this claim");
+  const reason = yields[0]?.reason ?? "";
+
+  // THE PROPERTY: the record names the MECHANISM that stopped the turn - the deadline and its
+  // duration, and the stage it cut - so a hung provider is diagnosable from the episode alone.
+  assertStringIncludes(reason, "85000ms");
+  assertStringIncludes(reason, "narration_tts");
+  // AND THE REGRESSION: before this fix the record reads "invocation budget reached with 0 of
+  // N segments committed" - the category, with the deadline and the stage both thrown away.
+  assert(
+    !reason.startsWith("invocation budget reached"),
+    `the yield reason must open with the mechanism, not the category; got: ${reason}`,
+  );
+});

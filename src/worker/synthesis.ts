@@ -598,6 +598,32 @@ export function startClaimHeartbeat(
  * spend-guard 409 — are never dressed up as the provider's. Claim and mode make the record
  * actionable on their own: "claim 2/3" says the episode is about to be abandoned.
  */
+/**
+ * audio-feed-8iwis: the mechanism's own words for why a synthesis turn stopped.
+ *
+ * A yield or failure reason has to name what bounded the work, not the category it falls into:
+ * "the turn exceeded 85000ms" and "zero durable progress" describe different episodes, and
+ * only the first one is actionable for a hung provider.
+ *
+ * The TTS client wraps a turn failure as "TTS turn failed; ..." and keeps the root in
+ * `details` (audio-feed-bp6r), so a budget abort that landed inside a fetch is only nameable
+ * after the same unwrap `describeSynthesisFailure` performs. Anything without readable prose
+ * falls back to the caller's generic label rather than to an empty reason.
+ */
+export function stoppingMechanismMessage(
+  error: unknown,
+  fallback = "invocation budget reached",
+): string {
+  let root: unknown = error;
+  const seen = new Set<unknown>();
+  while (root instanceof GeminiTtsError && root.details instanceof Error && !seen.has(root)) {
+    seen.add(root);
+    root = root.details;
+  }
+  const message = root instanceof Error ? root.message : "";
+  return message.trim() || fallback;
+}
+
 export function describeSynthesisFailure(
   lastError: unknown,
   claimed: Pick<Episode, "attempts" | "mode">,
@@ -926,6 +952,17 @@ export function createGeminiSynthesizer(
     // constructor timeoutMs, so configure the deadline here — see
     // tests/tts_brittleness_test.ts, "the per-turn deadline is owned by the per-call option"
     // (audio-feed-1qvdl).
+    //
+    // audio-feed-8iwis: this is a ceiling on ONE provider request, NOT the bound on a hung
+    // turn. The turn runs inside withInvocationBudget, whose abort is armed at
+    // `maxDurationMs - elapsed - flushMargin`, so the bound that actually fires is
+    // min(this ceiling, that window) — and at production defaults the window is the smaller
+    // of the two: DEFAULT_MAX_INVOCATION_DURATION_MS (90_000) - INVOCATION_FLUSH_MARGIN_MS
+    // (5_000) = 85_000ms, strictly below DEFAULT_TIMEOUT_MS (120_000). So at defaults a hung
+    // turn is stopped by the invocation deadline and the worker must NAME that deadline (see
+    // the yield reason below); this ceiling only fires first when an operator sets it below
+    // the window (deps.perTurnTimeoutMs / TTS_TIMEOUT_MS), which is the case the per-turn
+    // deadline tests pin.
     const ttsOptions = {
       ...(leaseSignal ? { signal: leaseSignal } : {}),
       ...(wrappedResume ? { resume: wrappedResume } : (resume ? { resume } : {})),
@@ -2418,9 +2455,14 @@ async function runSynthesisBatchCore(
       } catch (error) {
         lastError = error;
         if (isInvocationBudgetAbort(error)) {
+          // audio-feed-8iwis: keep the abort's OWN text when it has one. A budget abort that
+          // landed inside a provider fetch comes back wrapped as "TTS turn failed; ...", so the
+          // deadline and stage are only nameable after unwrapping; rebuilding this as the
+          // constant "Invocation budget reached" threw both away and left the operator with a
+          // category ("zero durable progress") for a turn that was cut at a known deadline.
           const yieldErr = error instanceof SynthesisYieldError
             ? error
-            : new InvocationBudgetAbortError(0, 0, "Invocation budget reached");
+            : new InvocationBudgetAbortError(0, 0, stoppingMechanismMessage(error));
           lastError = yieldErr;
 
           // FOUR-PROPERTY SYNTHESIS INVOCATION INVARIANT (audio-feed-fsr3, audio-feed-o88z):
@@ -2501,9 +2543,15 @@ async function runSynthesisBatchCore(
                   phase: yieldPhase,
                   attempt: currentEpisode.attempts ?? 1,
                   claimOutcome: "yielded",
+                  // audio-feed-8iwis: the reason names the MECHANISM that stopped this turn
+                  // first, in the abort's own words (deadline ms + stage, or the segment
+                  // limit), so a hung provider reads as "deadline (85000ms) exceeded during
+                  // stage \"dialogue_tts\"" rather than as a generic budget yield.
                   reason: preTurnRefusal
-                    ? `invocation budget reached before any paid turn (0 initiated in this claim); no attempt consumed; resuming on a later tick`
-                    : `invocation budget reached with ${finalSegments} of ${
+                    ? `${
+                      stoppingMechanismMessage(yieldErr)
+                    }; refused before any paid turn (0 initiated in this claim); no attempt consumed; resuming on a later tick`
+                    : `${stoppingMechanismMessage(yieldErr)}; ${finalSegments} of ${
                       observedPlanSize(yieldErr) ??
                         yieldErr.totalTurns
                     } segments committed; resuming on a later tick`,
