@@ -10,6 +10,7 @@
 import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
+import { HttpError, problem, readCappedBody } from "../http.ts";
 import {
   clearSessionCookie,
   createSession,
@@ -43,6 +44,7 @@ import {
   createAdminAuthLimiter,
   extractClientIp,
   type FailedAuthLimiter,
+  SlidingWindowRateLimiter,
 } from "../auth/rate_limit.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
 import {
@@ -127,10 +129,95 @@ async function readSignedIn(ctx: AppContext, req: Request): Promise<User | Respo
   return user;
 }
 
+/**
+ * Per-address limit on the anonymous challenge write (audio-feed-plmhk).
+ *
+ * `loginOptions` is public by design — it is how a stranger starts signing in — and every
+ * request it serves writes a KV challenge row (`authenticationOptions` -> `putChallenge`,
+ * TTL 5 minutes, `CHALLENGE_TTL_MS`). The Origin wall refuses browser CSRF, not a direct
+ * caller, who can send any Origin it likes, so nothing bounded how often one client could
+ * spend those writes.
+ *
+ * The pattern is the one the `/listen` capability GETs use (audio-feed-l11jx): one
+ * `SlidingWindowRateLimiter`, keyed on the client address, windowed in the shared store so the
+ * bound holds across isolates, and checked BEFORE the handler mints a challenge. A refused
+ * request therefore costs one rate-window write and no challenge row.
+ *
+ * The numbers:
+ *
+ * - 60 per 5 minutes = 12 a minute per address. A sign-in attempt needs exactly ONE challenge,
+ *   and a person who closes the biometric prompt and retries needs two or three, so 20 people
+ *   behind one address (a household, an office NAT) each trying three times still fits inside
+ *   one window. It is the same quota as `LISTEN_PAGE_RATE`, deliberately: a sign-in attempt is a
+ *   page-level action, not a poll.
+ * - The window equals the challenge TTL (5 minutes), so one address can never hold more live
+ *   challenge rows than the quota allows: the bound is 60 rows per address, written at most
+ *   12 times a minute, instead of unbounded writes at line rate.
+ * - Keyed on the ADDRESS and nothing else: an anonymous caller has no identity yet, so a
+ *   per-token key would either not exist or be attacker-chosen. `extractClientIp` already maps
+ *   clients with no usable address to `UNADDRESSED_CLIENT_KEY`, which the limiter gives its own
+ *   deployment-sized bucket (audio-feed-0t8el) rather than one shared per-client quota.
+ */
+export const LOGIN_OPTIONS_RATE = { maxRequests: 60, windowMs: 5 * 60 * 1000 } as const;
+
+/** The window's namespace, so it cannot swap rows with another limiter (audio-feed-2zvc). */
+const LOGIN_OPTIONS_WINDOW = "login_options";
+
+/**
+ * The largest JSON body an account or ceremony route will read (audio-feed-81v7j).
+ *
+ * `loginVerify` and `registerOptions` are public and parse a body before any credential check,
+ * so the cap is the only thing standing between a stranger and an arbitrary allocation. 16 KiB
+ * is roughly ten times a real WebAuthn assertion (a clientDataJSON plus authenticator data and
+ * signature is around a kilobyte) and comfortably holds a registration attestation carrying an
+ * x5c certificate chain, so no genuine ceremony is anywhere near it, while an oversized body is
+ * refused before it is buffered. The pattern is cwv.ts's (audio-feed-6q9g): a declared
+ * `content-length` is a cheap fast path, and the read is bounded by construction.
+ */
+export const MAX_ACCOUNT_BODY_BYTES = 16 * 1024;
+
+/**
+ * Parse a JSON body, bounded by `MAX_ACCOUNT_BODY_BYTES` before anything is accumulated.
+ *
+ * Every caller here sends a small object — a setup link, a display name, a WebAuthn response — and
+ * two of them (`loginVerify`, `registerOptions`) are public and parse before any credential check,
+ * so the cap is applied at this one read rather than per route (audio-feed-81v7j). The refusal is
+ * thrown as `HttpError`, which the router already turns into a response, so each call site keeps
+ * its existing shape: a normal body is parsed exactly as before and an oversized one never is.
+ */
 async function body(req: Request): Promise<Record<string, unknown>> {
   if (!(req.headers.get("content-type") ?? "").includes("application/json")) return {};
-  const parsed = await req.json().catch(() => ({}));
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  // A declared size is a cheap fast path, nothing more: a chunked body declares none and a
+  // declared one can be a lie. The real bound is the read, below (the cwv.ts rule).
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_ACCOUNT_BODY_BYTES) {
+    throw new HttpError(payloadTooLarge());
+  }
+  if (!req.body) return {};
+  const capped = await readCappedBody(req.body, MAX_ACCOUNT_BODY_BYTES);
+  if (capped.overflow) throw new HttpError(payloadTooLarge());
+  try {
+    const bytes = new Uint8Array(capped.total);
+    let offset = 0;
+    for (const chunk of capped.chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    // Unchanged behaviour for a malformed body: the handlers' own validation answers it.
+    return {};
+  }
+}
+
+/** The 413 for a body over `MAX_ACCOUNT_BODY_BYTES`, in this tree's `problem()` shape. */
+function payloadTooLarge(): Response {
+  return problem({
+    status: 413,
+    title: "payload_too_large",
+    detail: "That request body is larger than this endpoint accepts.",
+  });
 }
 
 export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): AccountHandlers {
@@ -146,9 +233,28 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
   };
 
   return {
-    loginOptions: async ({ req }) => {
+    loginOptions: async ({ req, remoteAddr }) => {
       const refused = crossOrigin(ctx, req);
       if (refused) return refused;
+      // BEFORE the challenge write (audio-feed-plmhk): see LOGIN_OPTIONS_RATE. The refusal is
+      // prose rather than `problem()`'s machine title because the sign-in page's `post()` shows
+      // `error` to the person verbatim (`PASSKEY_CLIENT`, src/routes/shell.ts) — every other
+      // refusal in this file reads the same way — and it carries the `retry-after` header the
+      // listen and cwv refusals use, so a client is told when the window opens again.
+      const limit = await new SlidingWindowRateLimiter(
+        LOGIN_OPTIONS_RATE,
+        store,
+        LOGIN_OPTIONS_WINDOW,
+      ).check(extractClientIp(req, Boolean(ctx.config.trustProxyHeaders), remoteAddr));
+      if (!limit.allowed) {
+        return reply(
+          {
+            error: "Too many sign-in attempts from this network. Wait a few minutes and try again.",
+          },
+          429,
+          { "retry-after": String(Math.max(1, Math.ceil(limit.resetMs / 1000))) },
+        );
+      }
       return reply(
         await authenticationOptions(
           store,

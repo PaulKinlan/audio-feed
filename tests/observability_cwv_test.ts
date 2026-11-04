@@ -11,12 +11,8 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, type Stores } from "../src/config.ts";
 import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
-import {
-  createCwvHandler,
-  CWV_RATE_LIMIT,
-  limitBodyStream,
-  MAX_CWV_BODY_BYTES,
-} from "../src/routes/cwv.ts";
+import { createCwvHandler, CWV_RATE_LIMIT, MAX_CWV_BODY_BYTES } from "../src/routes/cwv.ts";
+import { limitBodyStream } from "../src/http.ts";
 import { buildObservabilityReport } from "../src/observability/admin_report.ts";
 import { cwvRating, cwvRecord, parseCwvReport } from "../src/observability/cwv.ts";
 import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../src/observability/spans.ts";

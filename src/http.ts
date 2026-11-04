@@ -24,6 +24,81 @@ export function xml(body: string, init?: ResponseInit): Response {
   });
 }
 
+/**
+ * Copy at most `cap + 1` bytes out of `source`, then fail.
+ *
+ * The point is that the BOUND IS THE STREAM, not a check afterwards (audio-feed-6q9g). Reading the raw
+ * body and comparing the running total means an attacker who sends one oversized chunk has already had
+ * that chunk handed to the handler before any check runs; a stream that cannot emit more than `cap + 1`
+ * bytes makes the limit a property of the shape of the data instead. `cap + 1` rather than `cap`
+ * because one byte past the limit is what distinguishes "exactly the limit" from "over it".
+ *
+ * What this does and does not bound, stated plainly: nothing beyond `cap + 1` bytes is ever copied into
+ * the handler's accumulation, and the source is cancelled on overflow. The platform may still hand the
+ * transformer a larger chunk internally - that is the runtime's buffer and not ours to size - but it
+ * never reaches the parse, and the bytes we hold are bounded by construction.
+ */
+export function limitBodyStream(
+  source: ReadableStream<Uint8Array>,
+  cap: number,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let emitted = 0;
+  let over = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (over) {
+        await reader.cancel().catch(() => {});
+        controller.error(new Error("body exceeds cap"));
+        return;
+      }
+      const { value, done } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      if (!value?.byteLength) return;
+      const room = cap + 1 - emitted;
+      if (value.byteLength >= room) {
+        over = true;
+        emitted += room;
+        controller.enqueue(value.subarray(0, room));
+        return;
+      }
+      emitted += value.byteLength;
+      controller.enqueue(value);
+    },
+    cancel(reason) {
+      over = true;
+      return reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
+/** Read a body that cannot yield more than `cap + 1` bytes; `overflow` means it tried to. */
+export async function readCappedBody(
+  body: ReadableStream<Uint8Array>,
+  cap: number,
+): Promise<{ chunks: Uint8Array[]; total: number; overflow: boolean }> {
+  const limited = limitBodyStream(body, cap).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    let read: ReadableStreamReadResult<Uint8Array>;
+    try {
+      read = await limited.read();
+    } catch {
+      return { chunks, total, overflow: true };
+    }
+    if (read.done) break;
+    if (!read.value?.byteLength) continue;
+    total += read.value.byteLength;
+    if (total > cap) return { chunks, total, overflow: true };
+    chunks.push(read.value);
+  }
+  return { chunks, total, overflow: false };
+}
+
 export interface ProblemInit {
   status: number;
   title: string;
