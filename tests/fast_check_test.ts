@@ -257,6 +257,13 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       exercises: [
         "tests/account_regenerate_test.ts",
         "tests/admin_throttle_test.ts",
+        // Added with the auth rate limit (audio-feed-plmhk / audio-feed-xohf6): the limit row POSTs
+        // /api/auth/login/options and the body-cap row POSTs /api/auth/login/verify and
+        // /api/auth/register/options, so both genuinely exercise this handler file rather than
+        // mentioning it. The audit said "audit its real handler before narrowing" - that is what
+        // this line records, not an automatic widening of the candidate set.
+        "tests/auth_body_cap_test.ts",
+        "tests/auth_login_options_limit_test.ts",
         "tests/auth_routes_test.ts",
         "tests/feed_discovery_test.ts",
         "tests/webmcp_admin_forms_test.ts",
