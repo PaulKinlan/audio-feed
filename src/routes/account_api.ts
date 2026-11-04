@@ -10,6 +10,7 @@
 import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
+import { HttpError, problem, readCappedBody } from "../http.ts";
 import {
   clearSessionCookie,
   createSession,
@@ -162,10 +163,61 @@ export const LOGIN_OPTIONS_RATE = { maxRequests: 60, windowMs: 5 * 60 * 1000 } a
 /** The window's namespace, so it cannot swap rows with another limiter (audio-feed-2zvc). */
 const LOGIN_OPTIONS_WINDOW = "login_options";
 
+/**
+ * The largest JSON body an account or ceremony route will read (audio-feed-81v7j).
+ *
+ * `loginVerify` and `registerOptions` are public and parse a body before any credential check,
+ * so the cap is the only thing standing between a stranger and an arbitrary allocation. 16 KiB
+ * is roughly ten times a real WebAuthn assertion (a clientDataJSON plus authenticator data and
+ * signature is around a kilobyte) and comfortably holds a registration attestation carrying an
+ * x5c certificate chain, so no genuine ceremony is anywhere near it, while an oversized body is
+ * refused before it is buffered. The pattern is cwv.ts's (audio-feed-6q9g): a declared
+ * `content-length` is a cheap fast path, and the read is bounded by construction.
+ */
+export const MAX_ACCOUNT_BODY_BYTES = 16 * 1024;
+
+/**
+ * Parse a JSON body, bounded by `MAX_ACCOUNT_BODY_BYTES` before anything is accumulated.
+ *
+ * Every caller here sends a small object — a setup link, a display name, a WebAuthn response — and
+ * two of them (`loginVerify`, `registerOptions`) are public and parse before any credential check,
+ * so the cap is applied at this one read rather than per route (audio-feed-81v7j). The refusal is
+ * thrown as `HttpError`, which the router already turns into a response, so each call site keeps
+ * its existing shape: a normal body is parsed exactly as before and an oversized one never is.
+ */
 async function body(req: Request): Promise<Record<string, unknown>> {
   if (!(req.headers.get("content-type") ?? "").includes("application/json")) return {};
-  const parsed = await req.json().catch(() => ({}));
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  // A declared size is a cheap fast path, nothing more: a chunked body declares none and a
+  // declared one can be a lie. The real bound is the read, below (the cwv.ts rule).
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_ACCOUNT_BODY_BYTES) {
+    throw new HttpError(payloadTooLarge());
+  }
+  if (!req.body) return {};
+  const capped = await readCappedBody(req.body, MAX_ACCOUNT_BODY_BYTES);
+  if (capped.overflow) throw new HttpError(payloadTooLarge());
+  try {
+    const bytes = new Uint8Array(capped.total);
+    let offset = 0;
+    for (const chunk of capped.chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    // Unchanged behaviour for a malformed body: the handlers' own validation answers it.
+    return {};
+  }
+}
+
+/** The 413 for a body over `MAX_ACCOUNT_BODY_BYTES`, in this tree's `problem()` shape. */
+function payloadTooLarge(): Response {
+  return problem({
+    status: 413,
+    title: "payload_too_large",
+    detail: "That request body is larger than this endpoint accepts.",
+  });
 }
 
 export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): AccountHandlers {
