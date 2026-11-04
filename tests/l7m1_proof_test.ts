@@ -36,7 +36,17 @@ import { MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
  * environmental unknown, never a product assertion.
  */
 export const REAP_POLL_HEADROOM = 4;
-export const REAP_POLL_MS = REAP_POLL_HEADROOM * MEASURED_STARVED_POLL_MS;
+
+/**
+ * The reap ceiling for a given starved-poll floor, as a PURE function so the derivation can be
+ * asked a question it did not come with (audio-feed-p3hmf): a literal cannot answer
+ * `reapPollMs(16_000)`, so the rule becomes falsifiable instead of declarable.
+ */
+export function reapPollMs(floorMs: number): number {
+  return REAP_POLL_HEADROOM * floorMs;
+}
+
+export const REAP_POLL_MS = reapPollMs(MEASURED_STARVED_POLL_MS);
 
 export const EXPECTED_01_PNG_BLOB = "835349478343356b90b84dc6070b77e0f76328ed";
 export const EXPECTED_02_PNG_BLOB = "de50533128d33b9b160a600d14a3de7477dc99e6";
@@ -547,24 +557,38 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory c
 
 Deno.test("audio-feed-admwt: the ESRCH reap ceiling stays derived from the measured starved-poll floor", () => {
   assertEquals(REAP_POLL_HEADROOM, 4);
-  assertEquals(REAP_POLL_MS, REAP_POLL_HEADROOM * MEASURED_STARVED_POLL_MS);
-  assertEquals(REAP_POLL_MS / REAP_POLL_HEADROOM, MEASURED_STARVED_POLL_MS);
   assert(
     REAP_POLL_MS > 2500,
     "the reap ceiling must exceed the old fixed 2500ms that reded a starved reaper",
   );
-  // The value assertions above stay green on a literal 32_000 (= 4 x 8_000): they pin a VALUE,
-  // not the DERIVATION. So pin this file's reap-constant region itself - it must name the
-  // derivation's factors and never spell the value as a literal.
-  const source = Deno.readTextFileSync(new URL("l7m1_proof_test.ts", import.meta.url));
-  const start = source.indexOf("export const REAP_POLL_HEADROOM");
-  const end = source.indexOf("export const EXPECTED_01_PNG_BLOB");
-  assert(start !== -1 && end > start, "reap-constant region markers vanished from this file");
-  const region = source.slice(start, end);
-  assertStringIncludes(region, "REAP_POLL_HEADROOM");
-  assertStringIncludes(region, "MEASURED_STARVED_POLL_MS");
-  assert(
-    !region.includes("32_000") && !region.includes("32000"),
-    "REAP_POLL_MS must stay derived from the named factors, never spelled as a literal",
+  // A VALUE assertion cannot answer "is this derived?" - a literal equal to the product
+  // satisfies it (audio-feed-p3hmf: 4 * 8_000 stayed green through three mutants). So ask the
+  // RULE instead: a synthetic floor a literal could not have anticipated.
+  assertEquals(reapPollMs(16_000), 64_000, "the ceiling must track the floor, not today's value");
+  assertEquals(reapPollMs(1), REAP_POLL_HEADROOM);
+  assertEquals(reapPollMs(MEASURED_STARVED_POLL_MS), REAP_POLL_MS);
+  assertEquals(REAP_POLL_MS, 4 * MEASURED_STARVED_POLL_MS, "4x the measured floor, on the nose");
+  // The rule is pinned above, but the SITE is not: a literal equal to reapPollMs(floor) still
+  // passes every value assertion (measured - `4 * 8_000` and `32_000` both stay green because
+  // they equal the product today). So pin the definition line itself: comments stripped first,
+  // because a comment naming the factors is exactly how the fake passed the previous guard.
+  const definition = codeOnly(
+    Deno.readTextFileSync(new URL("l7m1_proof_test.ts", import.meta.url)),
+  ).split("\n").find((line) => line.startsWith("export const REAP_POLL_MS ="));
+  assertEquals(
+    definition,
+    "export const REAP_POLL_MS = reapPollMs(MEASURED_STARVED_POLL_MS);",
+    "REAP_POLL_MS must be the RULE applied to the measured floor, not a literal that equals it today",
   );
 });
+
+/**
+ * Strip line and block comments so a check about CODE cannot be satisfied by PROSE. A comment that
+ * names the factors is not a derivation (audio-feed-p3hmf: `4 * 8_000 // HEADROOM x FLOOR` passed
+ * every text and value check the previous guard had).
+ */
+function codeOnly(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|\s)\/\/.*$/gm, "$1");
+}
