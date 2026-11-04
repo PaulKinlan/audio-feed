@@ -453,7 +453,8 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory c
       `target process group -${pgid} was STILL RUNNING ${REAP_POLL_MS}ms ` +
         `(${REAP_POLL_HEADROOM} x the ${MEASURED_STARVED_POLL_MS}ms measured starved-poll floor) ` +
         `after SIGKILL: the group's last member had not been reaped yet - environmental ` +
-        `(starved reaper under load, audio-feed-admwt), not a product failure`,
+        `(starved reaper under load or the process group is SIGKILL-immune, audio-feed-admwt), ` +
+        `not necessarily a product failure`,
     );
 
     // 3. Confirm child process was terminated by SIGKILL mid-run
@@ -547,8 +548,23 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory c
 Deno.test("audio-feed-admwt: the ESRCH reap ceiling stays derived from the measured starved-poll floor", () => {
   assertEquals(REAP_POLL_HEADROOM, 4);
   assertEquals(REAP_POLL_MS, REAP_POLL_HEADROOM * MEASURED_STARVED_POLL_MS);
+  assertEquals(REAP_POLL_MS / REAP_POLL_HEADROOM, MEASURED_STARVED_POLL_MS);
   assert(
     REAP_POLL_MS > 2500,
     "the reap ceiling must exceed the old fixed 2500ms that reded a starved reaper",
+  );
+  // The value assertions above stay green on a literal 32_000 (= 4 x 8_000): they pin a VALUE,
+  // not the DERIVATION. So pin this file's reap-constant region itself - it must name the
+  // derivation's factors and never spell the value as a literal.
+  const source = Deno.readTextFileSync(new URL("l7m1_proof_test.ts", import.meta.url));
+  const start = source.indexOf("export const REAP_POLL_HEADROOM");
+  const end = source.indexOf("export const EXPECTED_01_PNG_BLOB");
+  assert(start !== -1 && end > start, "reap-constant region markers vanished from this file");
+  const region = source.slice(start, end);
+  assertStringIncludes(region, "REAP_POLL_HEADROOM");
+  assertStringIncludes(region, "MEASURED_STARVED_POLL_MS");
+  assert(
+    !region.includes("32_000") && !region.includes("32000"),
+    "REAP_POLL_MS must stay derived from the named factors, never spelled as a literal",
   );
 });
