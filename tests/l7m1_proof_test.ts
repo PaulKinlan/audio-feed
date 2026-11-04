@@ -22,6 +22,21 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import process from "node:process";
+import { MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
+
+/**
+ * audio-feed-admwt: the ESRCH reap poll's ceiling is DERIVED, not a fixed attempt count.
+ * A SIGKILLed process group disappears only once its last member is reaped, and under gate
+ * load a starved reaper legitimately exceeded the old 50x50ms = 2500ms empirical ceiling
+ * (red at tree a380ba58, ~9min into the suite; the same row passed 3/3 in isolation). The
+ * bound follows the fleet shape - a stated multiple of the MEASURED starved-poll floor
+ * (scripts/proof-cdp.ts, audio-feed-6gst1), the same derivation as PAGE_ALIVE_PROBE_MS
+ * (tests/sticky_scroll_state_test.ts). Reaping is not something this row can hurry along,
+ * so the figure is a ceiling that never delays a green run and only reds as an
+ * environmental unknown, never a product assertion.
+ */
+export const REAP_POLL_HEADROOM = 4;
+export const REAP_POLL_MS = REAP_POLL_HEADROOM * MEASURED_STARVED_POLL_MS;
 
 export const EXPECTED_01_PNG_BLOB = "835349478343356b90b84dc6070b77e0f76328ed";
 export const EXPECTED_02_PNG_BLOB = "de50533128d33b9b160a600d14a3de7477dc99e6";
@@ -416,25 +431,29 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory c
       })`,
     );
 
-    // 2. Confirm the target process group is GONE via bounded poll for ESRCH
+    // 2. Confirm the target process group is GONE via bounded poll for ESRCH (audio-feed-admwt):
+    // the ceiling is REAP_POLL_MS (4 x the measured starved-poll floor), not a fixed count.
     let esrchConfirmed = false;
-    const maxPollAttempts = 50; // 50 * 50ms = 2500ms max
-    for (let i = 0; i < maxPollAttempts; i++) {
+    const reapDeadline = Date.now() + REAP_POLL_MS;
+    while (Date.now() < reapDeadline) {
       try {
-        process.kill(-pgid, 0);
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        process.kill(-pgid, 0); // STILL RUNNING -> keep polling, never a failure
       } catch (err: unknown) {
         if ((err as { code?: string })?.code === "ESRCH") {
-          esrchConfirmed = true;
+          esrchConfirmed = true; // GONE -> proceed
           break;
         }
         throw err;
       }
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assertEquals(
       esrchConfirmed,
       true,
-      `target process group -${pgid} must be gone (process.kill(-pgid, 0) raising ESRCH)`,
+      `target process group -${pgid} was STILL RUNNING ${REAP_POLL_MS}ms ` +
+        `(${REAP_POLL_HEADROOM} x the ${MEASURED_STARVED_POLL_MS}ms measured starved-poll floor) ` +
+        `after SIGKILL: the group's last member had not been reaped yet - environmental ` +
+        `(starved reaper under load, audio-feed-admwt), not a product failure`,
     );
 
     // 3. Confirm child process was terminated by SIGKILL mid-run
@@ -523,4 +542,13 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory c
     }
     await Deno.remove(tempRoot, { recursive: true });
   }
+});
+
+Deno.test("audio-feed-admwt: the ESRCH reap ceiling stays derived from the measured starved-poll floor", () => {
+  assertEquals(REAP_POLL_HEADROOM, 4);
+  assertEquals(REAP_POLL_MS, REAP_POLL_HEADROOM * MEASURED_STARVED_POLL_MS);
+  assert(
+    REAP_POLL_MS > 2500,
+    "the reap ceiling must exceed the old fixed 2500ms that reded a starved reaper",
+  );
 });
