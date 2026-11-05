@@ -955,6 +955,100 @@ Deno.test("POST /api/admin/users/:id/sources with all-invalid modes returns 400"
   assertStringIncludes(body.error, "valid audio mode is required");
 });
 
+Deno.test("admin add-source answers a store failure with a fixed detail (audio-feed-4ppes)", async () => {
+  // THE DEFECT this pins: the admin catch-all answered with
+  // `String((error as Error)?.message ?? error)`, so a store or provider failure raised inside
+  // subscribeToFeed (putSource, listSources, insertArticleWithEpisodeIfAbsent, appendLog) was
+  // echoed to the admin caller verbatim - KV key, user id and blob path included. An admin
+  // session is not a licence to read bucket paths.
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  const storeMessage =
+    'kv put failed for ["source","user-1","stratechery"] at blob://audio-store/private-bucket';
+  stores.metadata.putSource = () => Promise.reject(new Error(storeMessage));
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({ feedUrl: "https://stratechery.com/feed/" }),
+    }),
+  );
+  const body = await res.json();
+  const raw = JSON.stringify(body);
+  // BOTH fragments, because a check that only looks for the bucket path passes a key-only leak.
+  assert(
+    !raw.includes('"source","user-1","stratechery"'),
+    `store key must not reach the admin caller: ${raw}`,
+  );
+  assert(
+    !raw.includes("private-bucket"),
+    `blob path must not reach the admin caller: ${raw}`,
+  );
+  assertEquals(body.error, "Could not subscribe to that feed.");
+  assertEquals(res.status, 502);
+});
+
+Deno.test("admin create-user answers a store failure with a fixed detail (audio-feed-4ppes)", async () => {
+  // Same leak on the sibling catch-all: createUser's atomic insert can fail on the store, and
+  // that text carries the KV key and the bucket path.
+  const { fetch, stores } = app();
+  const storeMessage =
+    'kv put failed for ["user","new-user-1","newcomer@example.com"] at blob://audio-store/private-bucket';
+  stores.metadata.insertUser = () => Promise.reject(new Error(storeMessage));
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({ email: "newcomer@example.com" }),
+    }),
+  );
+  const body = await res.json();
+  const raw = JSON.stringify(body);
+  assert(
+    !raw.includes('"user","new-user-1","newcomer@example.com"'),
+    `store key must not reach the admin caller: ${raw}`,
+  );
+  assert(
+    !raw.includes("private-bucket"),
+    `blob path must not reach the admin caller: ${raw}`,
+  );
+  assertEquals(body.error, "Could not create that user.");
+  assertEquals(res.status, 502);
+});
+
+Deno.test("admin create-user still answers a duplicate email as a duplicate (audio-feed-4ppes)", async () => {
+  // The old arm decided 409 by regex-matching /already registered|taken/i on the raw exception
+  // text. Classifying the error must not lose that answer: a duplicate still says so, with 409.
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", email: "dup@example.com", status: "approved" }),
+  );
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({ email: "dup@example.com" }),
+    }),
+  );
+  const body = await res.json();
+  assertEquals(res.status, 409);
+  assertStringIncludes(String(body.error).toLowerCase(), "already registered");
+});
+
 Deno.test("list-sourced user in openManage populates feedToken from sources response and master feed returns 200", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
