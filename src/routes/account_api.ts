@@ -10,7 +10,8 @@
 import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
-import { HttpError, problem, readCappedBody } from "../http.ts";
+import { MAX_ACCOUNT_BODY_BYTES, payloadTooLarge, readCappedJson } from "../http.ts";
+export { MAX_ACCOUNT_BODY_BYTES, payloadTooLarge };
 import {
   clearSessionCookie,
   createSession,
@@ -175,8 +176,6 @@ const LOGIN_OPTIONS_WINDOW = "login_options";
  * refused before it is buffered. The pattern is cwv.ts's (audio-feed-6q9g): a declared
  * `content-length` is a cheap fast path, and the read is bounded by construction.
  */
-export const MAX_ACCOUNT_BODY_BYTES = 16 * 1024;
-
 /**
  * Parse a JSON body, bounded by `MAX_ACCOUNT_BODY_BYTES` before anything is accumulated.
  *
@@ -186,40 +185,7 @@ export const MAX_ACCOUNT_BODY_BYTES = 16 * 1024;
  * thrown as `HttpError`, which the router already turns into a response, so each call site keeps
  * its existing shape: a normal body is parsed exactly as before and an oversized one never is.
  */
-async function body(req: Request): Promise<Record<string, unknown>> {
-  if (!(req.headers.get("content-type") ?? "").includes("application/json")) return {};
-  // A declared size is a cheap fast path, nothing more: a chunked body declares none and a
-  // declared one can be a lie. The real bound is the read, below (the cwv.ts rule).
-  const declared = Number(req.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_ACCOUNT_BODY_BYTES) {
-    throw new HttpError(payloadTooLarge());
-  }
-  if (!req.body) return {};
-  const capped = await readCappedBody(req.body, MAX_ACCOUNT_BODY_BYTES);
-  if (capped.overflow) throw new HttpError(payloadTooLarge());
-  try {
-    const bytes = new Uint8Array(capped.total);
-    let offset = 0;
-    for (const chunk of capped.chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    // Unchanged behaviour for a malformed body: the handlers' own validation answers it.
-    return {};
-  }
-}
-
-/** The 413 for a body over `MAX_ACCOUNT_BODY_BYTES`, in this tree's `problem()` shape. */
-function payloadTooLarge(): Response {
-  return problem({
-    status: 413,
-    title: "payload_too_large",
-    detail: "That request body is larger than this endpoint accepts.",
-  });
-}
+const body = readCappedJson;
 
 export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): AccountHandlers {
   const store = ctx.stores.metadata;

@@ -93,10 +93,68 @@ export async function readCappedBody(
     if (read.done) break;
     if (!read.value?.byteLength) continue;
     total += read.value.byteLength;
-    if (total > cap) return { chunks, total, overflow: true };
+    if (total > cap) {
+      await limited.cancel().catch(() => {});
+      return { chunks, total, overflow: true };
+    }
     chunks.push(read.value);
   }
   return { chunks, total, overflow: false };
+}
+
+/**
+ * The largest JSON body an account, ceremony, or sources route will read (audio-feed-81v7j, audio-feed-xqkes).
+ *
+ * 16 KiB is comfortably above passkey assertions/attestations, feed subscription URLs,
+ * and display names/profiles, while ensuring oversized bodies are refused before buffering.
+ */
+export const MAX_ACCOUNT_BODY_BYTES = 16 * 1024;
+
+/** The 413 for a body over a cap, in this tree's `problem()` shape. */
+export function payloadTooLarge(
+  detail = "That request body is larger than this endpoint accepts.",
+): Response {
+  return problem({
+    status: 413,
+    title: "payload_too_large",
+    detail,
+  });
+}
+
+/**
+ * Parse a JSON body, bounded by `cap` (defaults to `MAX_ACCOUNT_BODY_BYTES`) before anything is accumulated.
+ *
+ * Fast path: a declared `content-length` over `cap` is refused immediately with 413 HttpError
+ * without touching the body stream.
+ * Content-type: non-JSON content types return `{}` without reading the body.
+ * Read bound: streamed/chunked bodies (which omit Content-Length or may report an untruthful one)
+ * are read through `limitBodyStream` via `readCappedBody`, which caps the read to at most `cap + 1`
+ * bytes and cancels the stream before throwing 413 HttpError.
+ */
+export async function readCappedJson(
+  req: Request,
+  cap: number = MAX_ACCOUNT_BODY_BYTES,
+): Promise<Record<string, unknown>> {
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > cap) {
+    throw new HttpError(payloadTooLarge());
+  }
+  if (!(req.headers.get("content-type") ?? "").includes("application/json")) return {};
+  if (!req.body) return {};
+  const capped = await readCappedBody(req.body, cap);
+  if (capped.overflow) throw new HttpError(payloadTooLarge());
+  try {
+    const bytes = new Uint8Array(capped.total);
+    let offset = 0;
+    for (const chunk of capped.chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 export interface ProblemInit {
