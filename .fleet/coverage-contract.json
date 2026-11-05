@@ -19,5 +19,27 @@
   ],
   "src/routes/account_api.ts": [
     "tests/auth_body_cap_test.ts"
+  ],
+  "src/assets/tooltip-client.js": [
+    "tests/anchor_positioning_test.ts"
+  ],
+  "src/assets/listen.js": [
+    "tests/badging_test.ts",
+    "tests/listen_activity_test.ts",
+    "tests/anchor_positioning_test.ts",
+    "tests/temporal_test.ts",
+    "tests/dialog_closedby_test.ts"
+  ],
+  "src/assets/listen.css": [
+    "tests/content_visibility_test.ts",
+    "tests/css_escape_guard_test.ts",
+    "tests/listen_activity_test.ts",
+    "tests/anchor_positioning_test.ts",
+    "tests/share_test.ts"
+  ],
+  "src/assets/admin.css": [
+    "tests/anchor_positioning_test.ts",
+    "tests/admin_asset_test.ts",
+    "tests/admin_ui_test.ts"
   ]
 }
