@@ -44,6 +44,7 @@ import { isOutdated, PROMPT_VERSION } from "../tts/prompt_version.ts";
 import { resolveOrigin } from "../origin.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
 import { badRequest, type ComposeDeps, forbidden, notFound } from "./shared.ts";
+import { readCappedJson } from "../http.ts";
 import { episodeScan } from "./ingest.ts";
 import { deleteUserSource, regenerableUser, regenerateUserEpisodes } from "./account.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
@@ -497,10 +498,12 @@ export function createAdminCreateUserSourceHandler(
     const user = await ctx.stores.metadata.getUser(userId);
     if (!user) return notFound("Unknown user");
 
-    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown; codeHandling?: unknown } = {};
-    if ((req.headers.get("content-type") ?? "").includes("application/json")) {
-      body = await req.json().catch(() => ({}));
-    }
+    const body = (await readCappedJson(req)) as {
+      feedUrl?: unknown;
+      title?: unknown;
+      modes?: unknown;
+      codeHandling?: unknown;
+    };
     if (typeof body.feedUrl !== "string" || body.feedUrl.trim() === "") {
       return Response.json({ error: "A feed URL is required." }, {
         status: 400,
