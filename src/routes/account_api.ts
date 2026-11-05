@@ -47,6 +47,7 @@ import {
   SlidingWindowRateLimiter,
 } from "../auth/rate_limit.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
+import { screenErrorForLogging } from "../observability/error_screen.ts";
 import {
   articleUrl,
   type DiscoveredFeed,
@@ -490,7 +491,22 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         );
         return reply({ source: { id: source.id, title: source.title }, poll }, 201);
       } catch (error) {
-        return reply({ error: String((error as Error)?.message ?? error) }, 422);
+        // audio-feed-rt6q6: this response is read by the account holder, so its message must
+        // be one this codebase wrote. An IngestError detail is authored for the user ("That
+        // URL is not an RSS or Atom feed.") and is shown as-is — the same rule the sibling
+        // discoverFeed handler below applies, and the same split bcf40e39 landed for the
+        // /api/sources subscriber path. Anything else is a store, provider or transport
+        // failure whose text can carry a store key, a bucket path or a provider message, so
+        // it is screened into the log seam (the same screen src/server.ts applies to an
+        // unhandled error) and answered with a fixed detail instead of the throw.
+        if (error instanceof IngestError) {
+          return reply({ error: error.message }, 422);
+        }
+        const screened = screenErrorForLogging(error);
+        console.warn(
+          `[audio-feed] source add failed for user ${user.id}: ${screened.message}`,
+        );
+        return reply({ error: "Could not subscribe to that feed." }, 502);
       }
     },
 
