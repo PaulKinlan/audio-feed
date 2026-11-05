@@ -89,6 +89,23 @@ Per-entry-point reach measured at `fe894a2c` (the same record): `app` 91, `compo
 the four fail-closed paths (`stillUncovered`, relation failure, `changedFiles === null`, empty set)
 still resolve to the FULL suite.
 
+### What `coverage: KNOWN` means for a browser asset (fleet/cov-assets, tip `83a5e462`)
+
+The asset entries tip `83a5e462` added to `.fleet/coverage-contract.json` (`src/assets/tooltip-client.js`,
+`listen.js`, `listen.css`, `admin.css`) make `coverage: KNOWN` assert an OBSERVATION, not execution: one
+named suite read that exact file and asserted on its bytes in the same run. It cannot assert execution,
+because none is attributable for these files: no Deno suite imports `src/assets/*.js` as a module —
+`src/routes/shell.ts:26` pulls `tooltip-client.js` only as `import ... with { type: "text" }`, the same
+text form the suites use on the `.css` sheets — and the one suite that runs asset code compiles an
+extracted body with `new Function` (`tests/temporal_test.ts:118,206`), which Deno coverage cannot
+attribute to any file. An entry only names candidates; the host oracle still requires one of them to have
+EXECUTED (`is_suite_executed`, `~/fleet/remote/check-coverage.py:554,781`, a fleet-side file outside this
+repo), and a mapping whose named candidates all stayed unrun still lands the path in `unmapped`
+(`check-coverage.py:794-799`), so an entry can never make an unrun suite count nor exempt a path from
+execution. The JSON cannot carry this note itself (a flat path → suite-array map with no comment or
+metadata syntax, and no key outside that shape exists in it), so this subsection is the field's
+definition of record.
+
 ### The three whole-tree scanners are a SUBSET of a `src/` selection, not the selection
 
 Three suites text-read the whole source tree instead of importing one file, so they appear in any
