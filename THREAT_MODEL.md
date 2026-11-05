@@ -284,14 +284,18 @@ routes, listed separately because the attacker's position there is different.
   next connects. On `activate` the worker also sweeps superseded `audio-feed-shell-*` AND
   `audio-feed-offline-*` generations, so a future cache version bump cannot leave the old
   generation installed forever.
-- **Cache bounding and eviction (audio-feed-g3noh):** the offline audio cache is strictly bounded
-  to `MAX_OFFLINE_EPISODES` = 20 entries (derived from the 100-episode playlist ceiling, ~43MB per
-  15-min WAV episode, and the ~1GB mobile browser quota ceiling). Both writers — the player's
-  foreground download (`src/assets/listen.js`) and the service worker's `backgroundfetchsuccess`
-  handler (`src/routes/pwa.ts`) — stamp entries with a write-time `x-stored-at` header and perform
-  oldest-first eviction whenever total entries exceed the budget. Eviction never touches the shell
-  cache, never evicts the episode currently being played, and an evicted episode remains fully
-  playable online without disrupting playback semantics.
+- **Cache bounding and eviction (audio-feed-g3noh, audio-feed-cby):** the offline audio cache is
+  strictly bounded to `MAX_OFFLINE_BYTES` = 640 MiB (640 * 1024 * 1024 bytes) as primary budget,
+  with `MAX_OFFLINE_EPISODES` = 20 entries as a secondary guard.
+  Derivation: 640 MiB ~ 3.9 h of audio at 48,000 B/s (24kHz 16-bit mono WAV), ~61% of a 1 GB mobile
+  quota ceiling, leaving headroom for shell cache, HTTP responses, and IndexedDB without risking
+  quota eviction or storage crashes even with worst-case 64-segment episodes.
+  Both writers — the player's foreground download (`src/assets/listen.js`) and the service worker's
+  `backgroundfetchsuccess` handler (`src/routes/pwa.ts`) — stamp entries with a write-time `x-stored-at`
+  header and perform oldest-first eviction after every put. Eviction never touches the shell cache,
+  protects the freshly written entry (and on the client, the currently playing episode), and stops
+  when only protected entries remain. An evicted episode remains fully playable online without disrupting
+  playback semantics.
 - **Why purge by name instead of sweeping keys:** the audio URLs in this cache are public capability
   URLs (`/audio/<key>`; the key IS the capability) and carry no feed token, so there are no
   token-bearing keys to match — a key sweep would be a no-op with extra reads. The navigation cache

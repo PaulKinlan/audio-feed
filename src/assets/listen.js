@@ -60,6 +60,7 @@
  * @property {string} [userId]
  * @property {string} [origin]
  * @property {string} [offlineCache]
+ * @property {number} [maxOfflineBytes]
  * @property {number} [maxOfflineEpisodes]
  * @property {PlayerEpisode[]} [episodes]
  * @property {PlayerActivity} [activity]
@@ -109,6 +110,7 @@ const DATA = dataElement
 const TOKEN = DATA.token ?? "";
 const ORIGIN = DATA.origin ?? "";
 const OFFLINE_CACHE = DATA.offlineCache ?? "audio-feed-offline-v1";
+const MAX_OFFLINE_BYTES = DATA.maxOfflineBytes ?? 640 * 1024 * 1024;
 const MAX_OFFLINE_EPISODES = DATA.maxOfflineEpisodes ?? 20;
 const EPISODES = DATA.episodes ?? [];
 const ACTIVITY = DATA.activity ?? { inProgress: [], failed: [], playable: EPISODES.length };
@@ -642,47 +644,122 @@ function stampResponse(res) {
 }
 
 /**
- * Bound the offline audio cache so it cannot grow without limit (audio-feed-g3noh).
- * Evicts oldest entries first based on x-stored-at header (or Date / insertion order).
+ * Bound the offline audio cache so it cannot grow without limit (audio-feed-cby).
+ * Enforces MAX_OFFLINE_BYTES as primary budget and MAX_OFFLINE_EPISODES as secondary guard.
+ *
+ * SIZE DERIVATION:
+ * 640 MiB ~ 3.9 h of audio at 48,000 B/s, ~61% of a 1 GB quota, so shell cache +
+ * responses + IndexedDB fit with headroom, and even one worst-case 64-segment
+ * episode cannot blow the quota.
+ *
+ * SIZE DETERMINATION:
+ * Size is obtained from the Content-Length header on the response when present and valid.
+ * When Content-Length is absent, we clone the response and buffer it to get the body's
+ * byteLength. If size cannot be determined or is non-positive, it falls back to maxBytes
+ * so a missing size never silently counts as 0 and lets the cache grow without bound.
+ *
+ * EVICTION & PROTECTION SEMANTICS:
+ * Evicts oldest entries first based on x-stored-at header (or Date / insertion order)
+ * until totalBytes <= maxBytes and totalEntries <= maxEntries. Stops when only protected
+ * entries remain.
  * Never evicts the entry currently being played (audio.src / current.audioUrl)
- * or the protectedUrl just written.
+ * nor any protectedUrl passed (such as the freshly written entry).
+ *
+ * KNOWN LIMITATION OF TIMESTAMP ORDERING:
+ * A future x-stored-at (clock skew or legacy entry) makes an entry sort newest and effectively
+ * immortal until 20 fresher writes accumulate.
+ *
  * Only touches OFFLINE_CACHE; never touches SHELL_CACHE.
  * @param {Cache} store
- * @param {string} [protectedUrl]
+ * @param {string | Iterable<string>} [protectedUrls]
+ * @param {number} [maxBytes]
  * @param {number} [maxEntries]
  */
-async function boundOfflineAudio(store, protectedUrl, maxEntries = MAX_OFFLINE_EPISODES) {
+async function boundOfflineAudio(
+  store,
+  protectedUrls,
+  maxBytes = MAX_OFFLINE_BYTES,
+  maxEntries = MAX_OFFLINE_EPISODES,
+) {
   const requests = await store.keys();
-  if (requests.length <= maxEntries) return;
+  if (requests.length === 0) return;
+
+  const protectedSet = new Set();
+  if (protectedUrls) {
+    if (typeof protectedUrls === "string") {
+      protectedSet.add(protectedUrls);
+    } else if (Symbol.iterator in Object(protectedUrls)) {
+      for (const u of protectedUrls) if (u) protectedSet.add(u);
+    }
+  }
+  const activePlayingUrl = (audio && audio.src) ? audio.src : (current ? current.audioUrl : null);
+  if (activePlayingUrl) {
+    protectedSet.add(activePlayingUrl);
+  }
 
   const entries = await Promise.all(
     requests.map(async (req, index) => {
       const res = await store.match(req);
-      const rawStored = res?.headers.get("x-stored-at");
+      const url = typeof req === "string" ? req : req.url;
+
+      const rawStored = res?.headers?.get("x-stored-at");
       const storedAt = rawStored ? Number(rawStored) : NaN;
       let timestamp = Number.isFinite(storedAt) ? storedAt : NaN;
       if (!Number.isFinite(timestamp)) {
-        const rawDate = res?.headers.get("date");
+        const rawDate = res?.headers?.get("date");
         timestamp = rawDate ? Date.parse(rawDate) : NaN;
       }
-      const url = typeof req === "string" ? req : req.url;
+
+      let size = NaN;
+      const cl = res?.headers?.get("content-length");
+      if (cl) {
+        const parsed = Number(cl);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+          size = parsed;
+        }
+      }
+      if (!Number.isFinite(size) && res) {
+        try {
+          if (typeof res.clone === "function") {
+            const buf = await res.clone().arrayBuffer();
+            size = buf.byteLength;
+          } else if (typeof res.arrayBuffer === "function") {
+            const buf = await res.arrayBuffer();
+            size = buf.byteLength;
+          }
+        } catch {
+          // unable to buffer clone
+        }
+      }
+      if (!Number.isFinite(size) || size <= 0) {
+        size = maxBytes;
+      }
+
       return {
         req,
         url,
+        size,
         time: Number.isFinite(timestamp) ? timestamp : index,
         index,
       };
     }),
   );
 
-  const activePlayingUrl = (audio && audio.src) ? audio.src : (current ? current.audioUrl : null);
-  const evictable = entries.filter((e) => e.url !== activePlayingUrl && e.url !== protectedUrl);
+  let totalBytes = entries.reduce((acc, e) => acc + e.size, 0);
+  let totalEntries = entries.length;
+
+  if (totalBytes <= maxBytes && totalEntries <= maxEntries) return;
+
+  const evictable = entries.filter((e) => !protectedSet.has(e.url));
   evictable.sort((a, b) => a.time - b.time || a.index - b.index);
 
-  const evictCount = requests.length - maxEntries;
-  for (let i = 0; i < evictCount && i < evictable.length; i++) {
-    const target = evictable[i];
-    if (target) await store.delete(target.req);
+  for (const target of evictable) {
+    if (totalBytes <= maxBytes && totalEntries <= maxEntries) {
+      break;
+    }
+    await store.delete(target.req);
+    totalBytes -= target.size;
+    totalEntries -= 1;
   }
 }
 

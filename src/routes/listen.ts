@@ -118,7 +118,7 @@ import { speculationRules } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 import { blobStoreDirectUrlOrigin } from "../storage/mod.ts";
 import { enclosureUrl } from "../feed/adapter.ts";
-import { MAX_OFFLINE_EPISODES, OFFLINE_CACHE } from "./pwa.ts";
+import { MAX_OFFLINE_BYTES, MAX_OFFLINE_EPISODES, OFFLINE_CACHE } from "./pwa.ts";
 import {
   type AudioMode,
   type Episode,
@@ -228,6 +228,7 @@ export function renderListenPage(
     userId,
     origin: new URL(feedUrl).origin,
     offlineCache: OFFLINE_CACHE,
+    maxOfflineBytes: MAX_OFFLINE_BYTES,
     maxOfflineEpisodes: MAX_OFFLINE_EPISODES,
     episodes,
     activity: activity ?? { inProgress: [], failed: [], playable: episodes.length },

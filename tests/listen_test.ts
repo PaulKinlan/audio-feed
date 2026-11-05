@@ -14,7 +14,12 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { MAX_OFFLINE_EPISODES, OFFLINE_CACHE, SHELL_CACHE } from "../src/routes/pwa.ts";
+import {
+  MAX_OFFLINE_BYTES,
+  MAX_OFFLINE_EPISODES,
+  OFFLINE_CACHE,
+  SHELL_CACHE,
+} from "../src/routes/pwa.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { createServiceWorkerHarness } from "./service_worker_harness.ts";
 import type { BackgroundFetchRecordStub } from "./service_worker_harness.ts";
@@ -944,16 +949,21 @@ Deno.test(
   async () => {
     const client = assetBody("listen.js")!;
 
+    assertStringIncludes(
+      client,
+      "const MAX_OFFLINE_BYTES = DATA.maxOfflineBytes ?? 640 * 1024 * 1024",
+    );
     assertStringIncludes(client, "const MAX_OFFLINE_EPISODES = DATA.maxOfflineEpisodes ?? 20");
     assertStringIncludes(client, 'headers.set("x-stored-at", String(Date.now()))');
     assertStringIncludes(client, "async function boundOfflineAudio(");
     assertStringIncludes(client, "await boundOfflineAudio(store, episode.audioUrl)");
     assertStringIncludes(client, "async function syncSavedUI(");
 
-    // Verify player page injects maxOfflineEpisodes: 20
+    // Verify player page injects maxOfflineEpisodes: 20 and maxOfflineBytes: 671088640
     const { fetch } = await seeded();
     const pageRes = await fetch(get(`/listen/${TOKEN}`));
     const html = await pageRes.text();
+    assertStringIncludes(html, '"maxOfflineBytes":671088640');
     assertStringIncludes(html, '"maxOfflineEpisodes":20');
   },
 );
@@ -998,17 +1008,19 @@ Deno.test(
     const fn = new Function(
       "store",
       "protectedUrl",
+      "maxBytes",
       "maxEntries",
       "audio",
       "current",
       `
+      const MAX_OFFLINE_BYTES = 640 * 1024 * 1024;
       const MAX_OFFLINE_EPISODES = 20;
       ${boundFnSrc}
-      return boundOfflineAudio(store, protectedUrl, maxEntries);
+      return boundOfflineAudio(store, protectedUrl, maxBytes, maxEntries);
     `,
     );
 
-    await fn(fakeStore, undefined, 20, { src: activeUrl }, null);
+    await fn(fakeStore, undefined, MAX_OFFLINE_BYTES, 20, { src: activeUrl }, null);
 
     // ep-active was the oldest (t=1), but because it is actively playing, it MUST NOT be evicted!
     // ep-2 (t=2) was next oldest, so it must be evicted instead.
@@ -1018,6 +1030,308 @@ Deno.test(
       entries.has(`${BASE}/audio/ep-2.wav`),
       false,
       "next oldest non-playing episode must be evicted",
+    );
+  },
+);
+
+Deno.test(
+  "offline audio cache byte-triggered eviction evicts oldest entries when exceeding MAX_OFFLINE_BYTES even when under MAX_OFFLINE_EPISODES (audio-feed-cby)",
+  async () => {
+    const harness = await swHarness();
+
+    // 2 entries of 400 MB each (total 800 MB > 640 MB MAX_OFFLINE_BYTES).
+    // 2 entries is well under the 20-entry cap (2 < 20).
+    const fourHundredMB = 400 * 1024 * 1024;
+    harness.seedCache(
+      OFFLINE_CACHE,
+      `${BASE}/audio/ep-big-1.wav`,
+      new Response("dummy-body-1", {
+        status: 200,
+        headers: {
+          "x-stored-at": "1000",
+          "content-length": String(fourHundredMB),
+        },
+      }),
+    );
+
+    // Dispatch backgroundfetchsuccess with second 400 MB record.
+    await harness.dispatch("backgroundfetchsuccess", {
+      registration: {
+        matchAll: () =>
+          Promise.resolve([
+            audioRecord(
+              "ep-big-2.wav",
+              new Response("dummy-body-2", {
+                status: 200,
+                headers: { "content-length": String(fourHundredMB) },
+              }),
+            ),
+          ]),
+      },
+    });
+
+    const cached = harness.cachedUrls(OFFLINE_CACHE);
+    // Under entry cap (1 <= 20), but eviction triggered because 800 MB > 640 MB.
+    assertEquals(cached.length, 1, "cache must be bounded to 1 entry due to MAX_OFFLINE_BYTES");
+    assertEquals(
+      cached.includes(`${BASE}/audio/ep-big-1.wav`),
+      false,
+      "older 400 MB entry must be evicted",
+    );
+    assertEquals(
+      cached.includes(`${BASE}/audio/ep-big-2.wav`),
+      true,
+      "newer 400 MB entry must survive",
+    );
+  },
+);
+
+Deno.test(
+  "foregroundDownload bounds the offline audio cache after put, and removing the bounding call fails the test (audio-feed-cby)",
+  async () => {
+    const client = assetBody("listen.js")!;
+    const entries = new Map<string, Response>();
+    const fakeStore = {
+      keys: () => Promise.resolve([...entries.keys()].map((u) => new Request(u))),
+      match: (req: Request | string) => {
+        const u = typeof req === "string" ? req : req.url;
+        const res = entries.get(u);
+        return Promise.resolve(res ? res.clone() : undefined);
+      },
+      put: (req: Request | string, res: Response) => {
+        const u = typeof req === "string" ? req : req.url;
+        entries.set(u, res);
+        return Promise.resolve();
+      },
+      delete: (req: Request | string) => {
+        const u = typeof req === "string" ? req : req.url;
+        entries.delete(u);
+        return Promise.resolve(true);
+      },
+    };
+
+    // Seed 20 entries (at MAX_OFFLINE_EPISODES cap)
+    for (let i = 1; i <= 20; i++) {
+      entries.set(
+        `${BASE}/audio/ep-${i}.wav`,
+        new Response(`payload-${i}`, {
+          status: 200,
+          headers: {
+            "x-stored-at": String(1000 + i),
+            "content-length": "100",
+          },
+        }),
+      );
+    }
+    assertEquals(entries.size, 20);
+
+    // Extract stampResponse, boundOfflineAudio, and foregroundDownload from client
+    const stampSrc = client.slice(
+      client.indexOf("function stampResponse("),
+      client.indexOf("async function boundOfflineAudio("),
+    );
+    const boundFnSrc = client.slice(
+      client.indexOf("async function boundOfflineAudio("),
+      client.indexOf("async function syncSavedUI("),
+    );
+    const fgFnSrc = client.slice(
+      client.indexOf("async function foregroundDownload("),
+      client.indexOf("async function downloadEpisode("),
+    );
+
+    const fn = new Function(
+      "fetchMock",
+      "setDownloadStateMock",
+      "syncSavedUIMock",
+      "audio",
+      "current",
+      `
+      const MAX_OFFLINE_BYTES = 640 * 1024 * 1024;
+      const MAX_OFFLINE_EPISODES = 20;
+      const fetch = fetchMock;
+      const setDownloadState = setDownloadStateMock;
+      const syncSavedUI = syncSavedUIMock;
+      ${stampSrc}
+      ${boundFnSrc}
+      ${fgFnSrc}
+      return foregroundDownload;
+    `,
+    );
+
+    const foregroundDownload = fn(
+      (_url: string) =>
+        Promise.resolve(
+          new Response("new-payload", {
+            status: 200,
+            headers: { "content-length": "100" },
+          }),
+        ),
+      () => {},
+      () => Promise.resolve(),
+      null,
+      null,
+    );
+
+    const fakeButton = { dataset: {} };
+    await foregroundDownload(
+      { id: "ep-21", audioUrl: `${BASE}/audio/ep-21.wav` },
+      fakeButton,
+      fakeStore,
+    );
+
+    // Bounding inside foregroundDownload must enforce MAX_OFFLINE_EPISODES = 20
+    assertEquals(entries.size, 20, "foregroundDownload must bound the cache to 20 entries");
+    assertEquals(entries.has(`${BASE}/audio/ep-1.wav`), false, "oldest entry must be evicted");
+    assertEquals(
+      entries.has(`${BASE}/audio/ep-21.wav`),
+      true,
+      "newly downloaded entry must be saved",
+    );
+  },
+);
+
+Deno.test(
+  "cache bounding buffers body byteLength when Content-Length is absent and never counts missing size as zero (audio-feed-cby)",
+  async () => {
+    const client = assetBody("listen.js")!;
+    const entries = new Map<string, Response>();
+    const fakeStore = {
+      keys: () => Promise.resolve([...entries.keys()].map((u) => new Request(u))),
+      match: (req: Request | string) => {
+        const u = typeof req === "string" ? req : req.url;
+        const res = entries.get(u);
+        if (!res) return Promise.resolve(undefined);
+        try {
+          return Promise.resolve(res.clone());
+        } catch {
+          return Promise.resolve(res);
+        }
+      },
+      delete: (req: Request | string) => {
+        const u = typeof req === "string" ? req : req.url;
+        entries.delete(u);
+        return Promise.resolve(true);
+      },
+    };
+
+    // Seed two entries with NO Content-Length header, but real body payloads of 600 bytes and 700 bytes.
+    // Budget is set to 1000 bytes.
+    // If missing Content-Length were counted as 0, total bytes would be 0 <= 1000 (no eviction).
+    // By buffering clone body byteLength, total bytes = 1300 > 1000, which triggers eviction.
+    const body1 = new Uint8Array(600);
+    const body2 = new Uint8Array(700);
+    entries.set(
+      `${BASE}/audio/ep-no-cl-1.wav`,
+      new Response(body1, {
+        headers: { "x-stored-at": "100" },
+      }),
+    );
+    entries.set(
+      `${BASE}/audio/ep-no-cl-2.wav`,
+      new Response(body2, {
+        headers: { "x-stored-at": "200" },
+      }),
+    );
+    assertEquals(entries.size, 2);
+
+    const boundFnSrc = client.slice(
+      client.indexOf("async function boundOfflineAudio("),
+      client.indexOf("async function syncSavedUI("),
+    );
+    const fn = new Function(
+      "store",
+      "protectedUrls",
+      "maxBytes",
+      "maxEntries",
+      "audio",
+      "current",
+      `
+      const MAX_OFFLINE_BYTES = 640 * 1024 * 1024;
+      const MAX_OFFLINE_EPISODES = 20;
+      ${boundFnSrc}
+      return boundOfflineAudio(store, protectedUrls, maxBytes, maxEntries);
+    `,
+    );
+
+    // Call boundOfflineAudio with maxBytes = 1000, maxEntries = 20
+    await fn(fakeStore, undefined, 1000, 20, null, null);
+
+    assertEquals(
+      entries.size,
+      1,
+      "missing Content-Length was buffered and not counted as zero; over-budget entry evicted",
+    );
+    assertEquals(
+      entries.has(`${BASE}/audio/ep-no-cl-1.wav`),
+      false,
+      "older un-sized entry evicted",
+    );
+    assertEquals(entries.has(`${BASE}/audio/ep-no-cl-2.wav`), true, "newer un-sized entry kept");
+
+    // Also verify that an entry whose size cannot even be read falls back to maxBytes, not 0
+    const unreadableRes = {
+      headers: new Headers({ "x-stored-at": "300" }),
+      clone: () => {
+        throw new Error("stream unreadable");
+      },
+    };
+    entries.set(`${BASE}/audio/ep-unreadable.wav`, unreadableRes as unknown as Response);
+    // At maxBytes = 1000, adding unreadable entry (treated as 1000) with ep-no-cl-2 (700) = 1700 > 1000.
+    await fn(fakeStore, undefined, 1000, 20, null, null);
+    assertEquals(
+      entries.has(`${BASE}/audio/ep-no-cl-2.wav`),
+      false,
+      "unreadable entry counted as maxBytes and forced oldest eviction",
+    );
+  },
+);
+
+Deno.test(
+  "service worker background fetch protects the just-written entry even with older timestamps or future-stamped entries (audio-feed-cby)",
+  async () => {
+    const harness = await swHarness();
+
+    // Fill OFFLINE_CACHE to MAX_OFFLINE_EPISODES (20) with future timestamps (e.g. t = Date.now() + 10_000_000).
+    for (let i = 1; i <= MAX_OFFLINE_EPISODES; i++) {
+      harness.seedCache(
+        OFFLINE_CACHE,
+        `${BASE}/audio/ep-future-${i}.wav`,
+        new Response(`payload-${i}`, {
+          status: 200,
+          headers: {
+            "x-stored-at": String(Date.now() + 10_000_000 + i),
+            "content-length": "100",
+          },
+        }),
+      );
+    }
+    assertEquals(harness.cachedUrls(OFFLINE_CACHE).length, MAX_OFFLINE_EPISODES);
+
+    // Now background fetch stores a new record. Its write time is Date.now(), which is
+    // MUCH OLDER than all the future-stamped entries in the cache!
+    // Without protecting the just-written entry, it would sort oldest and be immediately evicted.
+    // With explicit protection, it MUST survive, evicting one of the future-stamped entries instead.
+    await harness.dispatch("backgroundfetchsuccess", {
+      registration: {
+        matchAll: () =>
+          Promise.resolve([
+            audioRecord(
+              "ep-just-written.wav",
+              new Response("just-written-payload", {
+                status: 200,
+                headers: { "content-length": "100" },
+              }),
+            ),
+          ]),
+      },
+    });
+
+    const cached = harness.cachedUrls(OFFLINE_CACHE);
+    assertEquals(cached.length, MAX_OFFLINE_EPISODES);
+    assertEquals(
+      cached.includes(`${BASE}/audio/ep-just-written.wav`),
+      true,
+      "the service worker must protect the just-written entry from immediate eviction",
     );
   },
 );
