@@ -106,6 +106,24 @@ export const MAX_TTS_OUTPUT_TOKENS = 16_384;
  * (MAX_NARRATION_BYTES, src/ingest/upload.ts).
  */
 export const MAX_TTS_SEGMENTS = 64;
+/** audio-feed-zxv2k: This bounds only NEW decoded PCM produced in one synthesis invocation.
+ * Stored segments were paid for on earlier ticks and are validated on replay, not charged again.
+ * Overage yields after durable segment commits; the final continuous episode may exceed 60 minutes.
+ * Paul's per-episode wording conflicts with his no-truncation, one-episode continuation request;
+ * the residual published duration needs confirmation. */
+export const MAX_NEW_PCM_SECONDS_PER_INVOCATION = 60 * 60;
+/** The defaults used by writeWavHeader; cap arithmetic must track the actual output format. */
+export const WAV_SAMPLE_RATE = 24_000;
+export const WAV_CHANNELS = 1;
+export const WAV_BITS_PER_SAMPLE = 16;
+export const MAX_NEW_PCM_BYTES_PER_INVOCATION = MAX_NEW_PCM_SECONDS_PER_INVOCATION *
+  WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_BITS_PER_SAMPLE / 8;
+/** RIFF's 32-bit chunk-size field bounds a single published WAV, independently of tick budgets. */
+export const MAX_PUBLICATION_PCM_BYTES = Math.floor(
+  (0xffff_ffff - 36) /
+    (WAV_CHANNELS * WAV_BITS_PER_SAMPLE / 8),
+) * (WAV_CHANNELS * WAV_BITS_PER_SAMPLE / 8);
+
 /**
  * Per-attempt deadline: a hung request must not hold a synthesis worker forever. 120s answers the
  * 2026-10-09 incident (audio-feed-bp6r): 9vns measured segments at 45-55s wall-clock, and the
@@ -609,9 +627,9 @@ export function writeWavHeader(
     bitsPerSample?: number;
   } = {},
 ): void {
-  const sampleRate = options.sampleRate ?? 24000;
-  const numChannels = options.numChannels ?? 1;
-  const bitsPerSample = options.bitsPerSample ?? 16;
+  const sampleRate = options.sampleRate ?? WAV_SAMPLE_RATE;
+  const numChannels = options.numChannels ?? WAV_CHANNELS;
+  const bitsPerSample = options.bitsPerSample ?? WAV_BITS_PER_SAMPLE;
 
   const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
   const blockAlign = (numChannels * bitsPerSample) / 8;
@@ -1684,12 +1702,72 @@ export function decodedFromWav(bytes: Uint8Array): DecodedAudioResult {
   };
 }
 
+/** Measure actual decoded PCM, never a duration estimate or a compressed byte count. */
+function ttsPcmBytes(audio: DecodedAudioResult): number {
+  if (audio.format === "pcm") return audio.rawBytes.byteLength;
+  if (audio.format === "wav") {
+    const info = parseWavHeader(audio.rawBytes);
+    if (
+      info.audioFormat !== 1 || info.dataLength <= 0 ||
+      info.dataOffset + info.dataLength !== audio.rawBytes.byteLength ||
+      info.dataLength % info.blockAlign !== 0
+    ) {
+      throw new GeminiTtsError("Stored TTS segment has incomplete PCM data", 400);
+    }
+    return info.dataLength;
+  }
+  throw new GeminiTtsError("TTS duration cap requires decoded PCM audio", 400);
+}
+
+/** Convert decoded PCM duration to the canonical writer format for a 60-minute comparison. */
+function canonicalDurationBytes(audio: DecodedAudioResult): number {
+  const actualBytes = ttsPcmBytes(audio);
+  const rate = audio.sampleRate * audio.channels * audio.bitsPerSample;
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new GeminiTtsError("TTS segment has invalid PCM format", 400);
+  }
+  return actualBytes * (WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_BITS_PER_SAMPLE) / rate;
+}
+
+function invocationPcmBudget() {
+  let newlyProduced = 0;
+  return {
+    stored(audio: DecodedAudioResult) {
+      if (canonicalDurationBytes(audio) > MAX_NEW_PCM_BYTES_PER_INVOCATION) {
+        throw new GeminiTtsError("Stored TTS segment exceeds the invocation PCM limit", 400);
+      }
+      return audio;
+    },
+    produced(audio: DecodedAudioResult, completed: number, total: number) {
+      const bytes = canonicalDurationBytes(audio);
+      if (bytes > MAX_NEW_PCM_BYTES_PER_INVOCATION) {
+        throw new GeminiTtsError("One TTS segment exceeds the invocation PCM limit", 400);
+      }
+      if (newlyProduced + bytes > MAX_NEW_PCM_BYTES_PER_INVOCATION) {
+        // No incomplete segment is committed. Previously committed turns are replayed next tick.
+        throw new SynthesisYieldError(
+          completed,
+          total,
+          "Synthesis reached new-PCM invocation limit",
+        );
+      }
+      newlyProduced += bytes;
+      return audio;
+    },
+  };
+}
+
 export function joinTtsAudio(
   chunks: readonly DecodedAudioResult[],
   allowTruncated = false,
 ): DecodedAudioResult {
   if (chunks.length === 0) throw new GeminiTtsError("Narration contained no spoken text", 400);
-  if (chunks.length === 1) return chunks[0]!;
+  if (chunks.length === 1) {
+    if (ttsPcmBytes(chunks[0]!) > MAX_PUBLICATION_PCM_BYTES) {
+      throw new GeminiTtsError("Episode exceeds the RIFF WAV publication limit", 400);
+    }
+    return chunks[0]!;
+  }
   const first = chunks[0]!;
   const pcm = chunks.map((chunk) => {
     if (
@@ -1713,6 +1791,9 @@ export function joinTtsAudio(
   // and construct rawBytes as a subarray at offset 44. This eliminates duplicate memory
   // allocations and extra full-buffer copies during multi-segment audio stitching.
   const totalPcmLength = pcm.reduce((total, bytes) => total + bytes.length, 0);
+  if (totalPcmLength > MAX_PUBLICATION_PCM_BYTES) {
+    throw new GeminiTtsError("Episode exceeds the RIFF WAV publication limit", 400);
+  }
   const wavBuffer = new Uint8Array(44 + totalPcmLength);
   writeWavHeader(wavBuffer, totalPcmLength, {
     sampleRate: first.sampleRate,
@@ -1958,11 +2039,12 @@ export class GeminiTtsClient {
       );
     }
     assertTextSeams(prompt, segments);
+    const pcmBudget = invocationPcmBudget();
     try {
-      return await runManagedTurns({
+      return await runManagedTurns<string, DecodedAudioResult>({
         segments,
         maxTurns: MAX_TTS_SEGMENTS,
-        request: async (segment) => {
+        request: async (segment, completed) => {
           const prepared = options.resume
             ? await options.resume.prepare(segment, voice)
             : "synthesize";
@@ -1972,11 +2054,12 @@ export class GeminiTtsClient {
               409,
             );
           }
-          if (prepared !== "synthesize") return decodedFromWav(prepared.wav);
+          if (prepared !== "synthesize") return pcmBudget.stored(decodedFromWav(prepared.wav));
           const decoded = await this.sendRequest(
             buildSingleVoiceRequest(segment, voice, options.temperature, style),
             segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
           );
+          pcmBudget.produced(decoded, completed.length, segments.length);
           // A truncated segment must never be persisted as resumable: decodedFromWav would
           // serve it later as STOP-complete. Only complete audio becomes resume material.
           // The stage signal rides along so the segment put is abortable (audio-feed-y9kk).
@@ -2058,11 +2141,12 @@ export class GeminiTtsClient {
     const sourceText = turns.map((turn) => turn.text).join("");
     const batchText = () => batches.flatMap((part) => part.map((turn) => turn.text));
     assertTextSeams(sourceText, batchText());
+    const pcmBudget = invocationPcmBudget();
     try {
-      return await runManagedTurns({
+      return await runManagedTurns<DialogueTurn[], DecodedAudioResult>({
         segments: batches,
         maxTurns: MAX_TTS_SEGMENTS,
-        request: async (part) => {
+        request: async (part, completed) => {
           // Attribution is part of the identity: the same sentences spoken by swapped
           // speakers are different audio, and must not reuse each other's segments.
           const segmentText = part.map((turn) => `${turn.speaker}\u0001${turn.text}`).join(
@@ -2078,11 +2162,12 @@ export class GeminiTtsClient {
               409,
             );
           }
-          if (prepared !== "synthesize") return decodedFromWav(prepared.wav);
+          if (prepared !== "synthesize") return pcmBudget.stored(decodedFromWav(prepared.wav));
           const decoded = await this.sendRequest(
             buildDialogueRequest(part, speakers, options.temperature),
             batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
           );
+          pcmBudget.produced(decoded, completed.length, batches.length);
           if (!decoded.truncated) {
             // The stage signal rides along so the segment put is abortable (audio-feed-y9kk).
             await options.resume?.commit(segmentText, decoded, dialogueVoice, options.signal);

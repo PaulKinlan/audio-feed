@@ -45,6 +45,7 @@ import {
   GeminiTtsClient,
   GeminiTtsError,
   GeminiTtsTruncatedError,
+  MAX_PUBLICATION_PCM_BYTES,
   MAX_TTS_INPUT_BYTES,
   MAX_TTS_SEGMENTS,
   ttsClientConfig,
@@ -2644,6 +2645,19 @@ async function runSynthesisBatchCore(
     const audioDurationSeconds = audio.durationSeconds;
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
     const audioByteLength = bytes.byteLength;
+    // Fail before publication even for injected synthesizers that bypass Gemini's stitcher.
+    if (audioByteLength > MAX_PUBLICATION_PCM_BYTES + 44) {
+      const error = "Episode exceeds the RIFF WAV publication limit";
+      const wrote = await metadata.completeEpisode(
+        unsynthesized(currentEpisode, error),
+        opts.owner,
+      );
+      if (wrote) {
+        result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+      } else result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+      continue;
+    }
+
     audio = null; // Free decoded audio result structure and intermediate references (audio-feed-sp38)
 
     // audio-feed-aqms: the upload estimate must be honest about PAYLOAD SIZE. The flat
