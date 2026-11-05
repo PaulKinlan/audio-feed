@@ -167,7 +167,7 @@ export function createAdminSetRoleHandler(
   return async ({ params, req, remoteAddr }) => {
     const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
-    const body = await req.json().catch(() => ({})) as { isAdmin?: unknown };
+    const body = (await readCappedJson(req)) as { isAdmin?: unknown };
     if (typeof body.isAdmin !== "boolean") {
       return Response.json({ error: "isAdmin must be true or false." }, { status: 400 });
     }
@@ -271,7 +271,7 @@ export function createCreateUserHandler(
     const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
-    let body: {
+    const body = (await readCappedJson(req)) as {
       email?: unknown;
       displayName?: unknown;
       voice?: unknown;
@@ -279,10 +279,7 @@ export function createCreateUserHandler(
       isAdmin?: unknown;
       codeHandling?: unknown;
       dailyEpisodeBudget?: unknown;
-    } = {};
-    if ((req.headers.get("content-type") ?? "").includes("application/json")) {
-      body = await req.json().catch(() => ({}));
-    }
+    };
     if (typeof body.email !== "string" || body.email.trim() === "") {
       return Response.json({ error: "An email address is required." }, {
         status: 400,
@@ -702,8 +699,11 @@ export function createAdminRegenerateFeedHandler(
     const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
-    const body: { scope?: unknown; sourceId?: unknown; mode?: unknown } = await req.json()
-      .catch(() => ({}));
+    const body = (await readCappedJson(req)) as {
+      scope?: unknown;
+      sourceId?: unknown;
+      mode?: unknown;
+    };
     const scope = body.scope ?? "outdated";
     if (scope !== "outdated" && scope !== "all" && scope !== "failed") {
       return badRequest('scope must be "outdated", "all", or "failed".');

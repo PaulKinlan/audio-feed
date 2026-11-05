@@ -556,7 +556,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       if (!isSynthesisAuthorized(user)) {
         return reply({ error: "Your account is not approved for audio." }, 403);
       }
-      const b = await req.json().catch(() => ({})) as { scope?: unknown };
+      const b = (await body(req)) as { scope?: unknown };
       const scope = b.scope === "failed" ? "failed" : b.scope === "all" ? "all" : "outdated";
       return reply({ ok: true, queued: await deps.regenerateOutdated(user.id, scope) });
     },
