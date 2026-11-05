@@ -13,6 +13,7 @@ import {
   WAV_BITS_PER_SAMPLE,
   WAV_CHANNELS,
   WAV_SAMPLE_RATE,
+  writeWavHeader,
 } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { formatNarrationPrompt } from "../src/tts/gemini.ts";
@@ -172,6 +173,29 @@ Deno.test("audio-feed-zxv2k: an individually over-cap turn is terminal and canno
   assert(error instanceof Error);
   assertStringIncludes(error.message, "invocation PCM limit");
   assertEquals(committed, 0);
+});
+
+Deno.test("audio-feed-zxv2k: an over-cap resumed segment rejects the resume instead of paying for the rest", async () => {
+  const overCapPcm = MAX_NEW_PCM_BYTES_PER_INVOCATION + 2;
+  const storedWav = new Uint8Array(44 + overCapPcm);
+  writeWavHeader(storedWav, overCapPcm);
+  const paid: number[] = [];
+  let prepared = 0;
+  const error = await assertRejects(() =>
+    mockClient(paid).synthesizeNarration(article, {
+      resume: {
+        prepare: () => {
+          prepared++;
+          return Promise.resolve(prepared === 1 ? { wav: storedWav } : "synthesize");
+        },
+        commit: () => Promise.resolve(),
+      },
+    })
+  );
+  assert(error instanceof Error);
+  assertStringIncludes(error.message, "Stored TTS segment exceeds the invocation PCM limit");
+  assertEquals(prepared, 1, "the over-cap stored segment stops the run at its first segment");
+  assertEquals(paid.length, 0, "resuming an over-cap episode never pays for a later turn");
 });
 
 Deno.test("audio-feed-zxv2k: resumed WAV PCM must be complete before the next paid turn", async () => {
