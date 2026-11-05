@@ -1049,6 +1049,61 @@ Deno.test("admin create-user still answers a duplicate email as a duplicate (aud
   assertStringIncludes(String(body.error).toLowerCase(), "already registered");
 });
 
+Deno.test("admin create-user answers a non-duplicate store failure that merely SAYS already registered with 502, not 409 (audio-feed-4ppes)", async () => {
+  // THE DISCRIMINATOR between the two classification mechanisms. The old arm answered 409 by
+  // regex-matching /already registered|taken/i on the raw exception text; the current arm answers
+  // 409 only for a real DuplicateUserEmailError. A duplicate-lookalike — a store failure whose
+  // text happens to contain "already registered" — separates them: the regex arm wrongly 409s
+  // it, the type arm answers the generic 502. Both of the rows above stay green under either
+  // mechanism, because a real duplicate's message also contains "already registered".
+  const { fetch, stores } = app();
+  const lookalikeMessage =
+    'kv put failed: user already registered in index ["user","lookalike@example.com"]';
+  stores.metadata.insertUser = () => Promise.reject(new Error(lookalikeMessage));
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({ email: "lookalike@example.com" }),
+    }),
+  );
+  const body = await res.json();
+  const raw = JSON.stringify(body);
+  assert(res.status !== 409, `a non-duplicate failure must not answer 409: got ${res.status}`);
+  assertEquals(res.status, 502);
+  assertEquals(body.error, "Could not create that user.");
+  assert(
+    !raw.includes("already registered"),
+    `the lookalike store text must not reach the admin caller: ${raw}`,
+  );
+});
+
+Deno.test("admin create-user answers the real duplicate signal (insertUser false) with 409 and the fixed detail (audio-feed-4ppes)", async () => {
+  // The reverse pin, driven at the same seam as the row above: the store signals a duplicate
+  // atomically by resolving false, createUser classifies that into DuplicateUserEmailError,
+  // and the handler answers 409 with the exact fixed detail.
+  const { fetch, stores } = app();
+  stores.metadata.insertUser = () => Promise.resolve(false);
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({ email: "really-dup@example.com" }),
+    }),
+  );
+  const body = await res.json();
+  assertEquals(res.status, 409);
+  assertEquals(body.error, "That email is already registered.");
+});
+
 Deno.test("list-sourced user in openManage populates feedToken from sources response and master feed returns 200", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
