@@ -218,12 +218,27 @@ routes, listed separately because the attacker's position there is different.
   audio-feed-ukuka the periodic feed poll has consumed the same row too, so its accepted article
   fetches count against that same 50 rather than sitting outside it; initial subscription polls
   (5 items per source, bounded separately) and `POST /api/sources` discovery (which fetches a feed
-  document, not an article) remain outside the window. (b) Unmitigated, unrecorded until now:
-  ingested article text reaches the synthesis prompt with no sanitisation or injection boundary
-  anywhere under `src/synthesis/`, `src/tts/`, `src/worker/` — a hostile feed can make the
-  subscriber's own podcast narration say attacker-chosen things. The blast radius is narration
-  audio, not code execution, but it is a real content-integrity surface. Candidate bead, not filed
-  here.
+  document, not an article) remain outside the window. (b) Prompt injection and content
+  integrity (partly mitigated, recorded — audio-feed-o9wew): publisher-supplied text reaches the
+  reasoning LLM under delimiter fencing rather than raw. In `src/worker/script.ts`
+  (`buildScriptPrompt`, `:180-213`), every publisher-controlled field (`title`, `author`, `summary`,
+  `body`) is length-capped before fencing (`capped()`, `:189`, bound `DEFAULT_MAX_BODY_CHARS`
+  12,000 chars, `:49`), enclosed in field-specific XML-like tags (`<article_title>`,
+  `<article_author>`, `<article_summary>`, `<article_body>`, `:124-138`), stripped to a fixed point
+  of all fence-tag variants across all four names (`UNTRUSTED_FENCE_TAG` and `fencedRegion`,
+  `:153-172`), and framed as untrusted data to analyze rather than instructions to follow
+  (`:192-195`). The repo pins this structural invariant in `tests/prompt_census_test.ts:42` (mutant
+  test at `:254-282`). The prompt is sent to Gemini `generateContent` with Google Search grounding
+  (`src/worker/script.ts:468`), while the TTS builders (`src/tts/gemini.ts:1421`, `:1498`, `:2207`)
+  are transcript-only without prompt instructions (`tests/prompt_census_test.ts:49-53`). What the
+  fence CANNOT defend against: a fence reduces delimiter breakout and payload size, but does not
+  eliminate semantic prompt injection. Injections that survive within the 12,000-character cap can
+  still attempt to bias the model's reasoning or grounded retrieval; model-level instruction following
+  is not guaranteed; and output-side effects in generated dialogue turns flow directly into TTS
+  narration (`src/worker/synthesis.ts:1094`, `src/tts/gemini.ts:2116`). On the direct narration path,
+  article text is read aloud verbatim. The blast radius remains narration audio content integrity,
+  not code execution or server compromise.
+
 
 ### Boundary 7 — Static, well-known and public pages
 
