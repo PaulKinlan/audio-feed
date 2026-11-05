@@ -28,6 +28,8 @@
 import { DOMParser, parseHTML } from "npm:linkedom@0.18.12";
 import { clean, type ExtractedArticle, fetchArticle, fetchFeedDocument, plainText } from "./url.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
+import { ingestCreationLimiter } from "../compose/ingest.ts";
+import type { RateLimitResult } from "../auth/rate_limit.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import {
@@ -166,7 +168,7 @@ export interface PollDependencies {
   /** Test seam: how an article body is obtained. Defaults to the real fetcher. */
   fetchArticle?: (url: string, signal?: AbortSignal) => Promise<ExtractedArticle>;
   signal?: AbortSignal;
-  /** Items considered per poll, newest first. Bounds both work and spend. */
+  /** Unseen items selected per poll, newest first; URL lookups have a separate scan bound. */
   maxItems?: number;
 }
 
@@ -174,11 +176,44 @@ export interface PollResult {
   items: number;
   queued: number;
   skipped: number;
+  deferred: number;
   failed: number;
   errors: string[];
 }
 
 export const DEFAULT_MAX_ITEMS = 10;
+/** Ten windows of the default ten selected items: at most 100 URL lookups per source per poll. */
+export const MAX_FEED_ITEMS_EXAMINED = 100;
+
+/** Select new URLs in order, looking beyond already-seen items but never scanning indefinitely. */
+async function selectUnseenItems(
+  ctx: AppContext,
+  source: Source,
+  all: FeedItem[],
+  maxItems: number,
+  offset: number,
+): Promise<
+  { items: FeedItem[]; skipped: number; nextOffset: number; exhausted: boolean; examined: number }
+> {
+  const start = Number.isSafeInteger(offset) && offset >= 0 && offset < all.length ? offset : 0;
+  const items: FeedItem[] = [];
+  let skipped = 0;
+  let index = start;
+  while (index < all.length && index - start < MAX_FEED_ITEMS_EXAMINED && items.length < maxItems) {
+    const item = all[index++]!;
+    if (await ctx.stores.metadata.findArticleByUrl(source.userId, item.link)) skipped++;
+    else items.push(item);
+  }
+  const examined = index - start;
+  return {
+    items,
+    skipped,
+    examined,
+    nextOffset: index < all.length ? index : 0,
+    exhausted: examined === MAX_FEED_ITEMS_EXAMINED && index < all.length &&
+      items.length < maxItems,
+  };
+}
 
 /** Fetch a feed, queue an episode for each new item, and record the poll. */
 export async function pollFeedSource(
@@ -186,7 +221,14 @@ export async function pollFeedSource(
   source: Source,
   deps: PollDependencies = {},
 ): Promise<PollResult> {
-  const result: PollResult = { items: 0, queued: 0, skipped: 0, failed: 0, errors: [] };
+  const result: PollResult = {
+    items: 0,
+    queued: 0,
+    skipped: 0,
+    deferred: 0,
+    failed: 0,
+    errors: [],
+  };
   if (!source.feedUrl) {
     result.errors.push("source has no feedUrl");
     await ctx.stores.metadata.putSource({
@@ -197,15 +239,11 @@ export async function pollFeedSource(
     return result;
   }
 
-  // Bounded by maxItems (DEFAULT_MAX_ITEMS = 10) and lastPolledAt cadence (audio-feed-l9l63).
-  // Feed polling is deliberately excluded from refuseIngestOverCreationCap to avoid dropping
-  // new published articles from subscribed feeds when an inbox user has reached their creation cap.
-  let items: FeedItem[];
+  // Bounded by maxItems (DEFAULT_MAX_ITEMS = 10) per source; the shared creation
+  // allowance defers (never refuses or marks seen) items beyond the subscriber's budget.
+  let allItems: FeedItem[];
   try {
-    items = (await loadFeedItems(source.feedUrl, deps)).slice(
-      0,
-      deps.maxItems ?? DEFAULT_MAX_ITEMS,
-    );
+    allItems = await loadFeedItems(source.feedUrl, deps);
   } catch (error) {
     const errorMsg = String((error as Error)?.message ?? error);
     console.error(
@@ -239,13 +277,64 @@ export async function pollFeedSource(
     return result;
   }
 
-  await queueItems(ctx, source, items, deps, result);
+  const user = await ctx.stores.metadata.getUser(source.userId);
+  if (!user) throw new Error(`Feed poll subscriber ${source.userId} no longer exists`);
+  const saved = await ctx.stores.metadata.getSource(source.userId, source.id);
+  const scanOffset = saved?.feedScanOffset ?? source.feedScanOffset ?? 0;
+  const selection = await selectUnseenItems(
+    ctx,
+    source,
+    allItems,
+    deps.maxItems ?? DEFAULT_MAX_ITEMS,
+    scanOffset,
+  );
+  result.skipped = selection.skipped;
+  if (selection.exhausted) {
+    await ctx.stores.metadata.appendLog({
+      time: new Date().toISOString(),
+      severity: "warn",
+      type: "feed.poll.scan_exhausted",
+      message:
+        `Feed poll scan window exhausted for source ${source.id}: examined ${selection.examined}, selected ${selection.items.length}, remaining unknown ${
+          allItems.length - scanOffset - selection.examined
+        }`,
+      process: "cron",
+      job: "feed-poll",
+      userId: source.userId,
+      correlationId: crypto.randomUUID(),
+      context: {
+        sourceId: source.id,
+        examined: selection.examined,
+        selected: selection.items.length,
+        remainingUnknown: allItems.length - scanOffset - selection.examined,
+      },
+    });
+  }
+  const limiter = ingestCreationLimiter(ctx, user);
+  await queueItems(ctx, source, selection.items, deps, result, limiter);
+  if (result.deferred > 0) {
+    const { remaining } = await limiter.peek(source.userId);
+    await ctx.stores.metadata.appendLog({
+      time: new Date().toISOString(),
+      severity: "warn",
+      type: "feed.poll.deferred",
+      message:
+        `Feed poll deferred ${result.deferred} item(s) for source ${source.id}; remaining allowance ${remaining}`,
+      process: "cron",
+      job: "feed-poll",
+      userId: source.userId,
+      correlationId: crypto.randomUUID(),
+      context: { sourceId: source.id, deferred: result.deferred, remaining },
+    });
+  }
 
   const pollError = result.errors[0] ??
     (result.failed > 0 ? `${result.failed} article(s) failed extraction` : undefined);
 
   await ctx.stores.metadata.putSource({
     ...source,
+    // A deferred URL cannot be passed by the cursor: retry this same window later.
+    feedScanOffset: result.deferred > 0 ? scanOffset : selection.nextOffset,
     lastPolledAt: new Date().toISOString(),
     lastPollError: pollError,
   });
@@ -298,6 +387,35 @@ function extractTextFromHtml(rawHtml: string): string {
  */
 const ARTICLE_FETCH_CONCURRENCY = 4;
 
+/**
+ * Give back the creation credit `reservation` took when the article+episode pair did
+ * not commit (audio-feed-ukuka review).
+ *
+ * The credit is charged BEFORE the CAS insert, so a lost CAS (`inserted === false`) or a
+ * store throw would otherwise spend one of the subscriber's daily creations on nothing,
+ * silently shrinking their allowance. `release` removes only the exact timestamp this
+ * reservation recorded, so it cannot free budget that was not charged here.
+ *
+ * A failed release logs and continues: it leaves the credit spent — the behaviour this
+ * replaces — where throwing would mask the failure the poll is already reporting.
+ */
+async function releaseCredit(
+  limiter: ReturnType<typeof ingestCreationLimiter> | undefined,
+  userId: string,
+  reservation: RateLimitResult | undefined,
+): Promise<void> {
+  if (!limiter || reservation?.recordedAt === undefined) return;
+  try {
+    await limiter.release(userId, reservation.recordedAt);
+  } catch (error) {
+    console.error(
+      `[audio-feed] could not release an unused creation credit for user "${userId}": ${
+        String((error as Error)?.message ?? error)
+      }`,
+    );
+  }
+}
+
 /** Queue an episode per item that the store has not already seen. */
 async function queueItems(
   ctx: AppContext,
@@ -305,6 +423,7 @@ async function queueItems(
   items: FeedItem[],
   deps: PollDependencies,
   result: PollResult,
+  limiter?: ReturnType<typeof ingestCreationLimiter>,
 ): Promise<void> {
   result.items = items.length;
   const mode: AudioMode = source.modes[0] ?? "direct";
@@ -313,6 +432,12 @@ async function queueItems(
     const existing = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
     if (existing) {
       result.skipped++;
+      return;
+    }
+    // A peek does not consume a credit. Do not fetch or mark an over-budget item
+    // as seen: the next poll must be able to discover it again.
+    if (limiter && !(await limiter.peek(source.userId)).allowed) {
+      result.deferred++;
       return;
     }
     let extracted: ExtractedArticle;
@@ -379,6 +504,19 @@ async function queueItems(
       return;
     }
 
+    // The atomic check shares the ingest/upload counter and reserves one credit
+    // before the pair commits. Concurrent sources cannot each spend the last slot.
+    // An unsuccessful check never writes an article or episode. The admission is
+    // kept so the credit can be given back if the pair does not commit.
+    let reservation: RateLimitResult | undefined;
+    if (limiter) {
+      const attempt = await limiter.check(source.userId);
+      if (!attempt.allowed) {
+        result.deferred++;
+        return;
+      }
+      reservation = attempt;
+    }
     const now = new Date().toISOString();
     const articleId = newArticleId();
     const article: Article = {
@@ -413,11 +551,20 @@ async function queueItems(
       description: article.excerpt,
       createdAt: now,
     };
-    const inserted = await ctx.stores.metadata.insertArticleWithEpisodeIfAbsent(
-      article,
-      episode,
-    );
+    // audio-feed-ukuka: a reservation that ends in no committed pair is refunded, or a
+    // CAS loss or store failure would spend a credit and produce no episode.
+    let inserted: boolean;
+    try {
+      inserted = await ctx.stores.metadata.insertArticleWithEpisodeIfAbsent(
+        article,
+        episode,
+      );
+    } catch (error) {
+      await releaseCredit(limiter, source.userId, reservation);
+      throw error;
+    }
     if (!inserted) {
+      await releaseCredit(limiter, source.userId, reservation);
       result.skipped++;
       return;
     }
@@ -493,7 +640,14 @@ export async function subscribeToFeed(
   // Deliberately NOT subject to refuseIngestOverCreationCap: capping subscriptions by the rolling 24h
   // creation limiter would refuse legitimate subscriptions when a user has exhausted their ingest slots.
   // The subscription path is bounded instead by this 5-item ceiling and insertArticleWithEpisodeIfAbsent CAS deduplication.
-  const result: PollResult = { items: 0, queued: 0, skipped: 0, failed: 0, errors: [] };
+  const result: PollResult = {
+    items: 0,
+    queued: 0,
+    skipped: 0,
+    deferred: 0,
+    failed: 0,
+    errors: [],
+  };
   await queueItems(ctx, source, items.slice(0, deps.maxItems ?? 5), deps, result);
   await ctx.stores.metadata.putSource({ ...source, lastPolledAt: new Date().toISOString() });
   return { source, poll: result };

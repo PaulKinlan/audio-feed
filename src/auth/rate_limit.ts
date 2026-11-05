@@ -56,6 +56,12 @@ export interface RateLimitResult {
   allowed: boolean;
   remaining: number;
   resetMs: number;
+  /**
+   * The timestamp this `check` recorded in the window — set only when the hit was
+   * admitted and committed. Hand it to `release` to give the credit back when the
+   * work it reserved was never done (audio-feed-ukuka).
+   */
+  recordedAt?: number;
 }
 
 /**
@@ -209,7 +215,48 @@ export class SlidingWindowRateLimiter {
       allowed: true,
       remaining: Math.max(0, config.maxRequests - active.length),
       resetMs: config.windowMs,
+      recordedAt: now,
     };
+  }
+
+  /**
+   * Give back ONE credit recorded at exactly `recordedAt` — the `recordedAt` of a
+   * `check` whose work did not happen (audio-feed-ukuka).
+   *
+   * WHAT THIS MUST NOT DO: it removes at most one entry, and only one whose value
+   * EQUALS `recordedAt`, so it cannot clear older hits or free budget the caller
+   * never reserved. Rolling back a reservation that was already released (or one
+   * this process never made) is a no-op and reports `false`.
+   *
+   * Two concurrent admissions in the same millisecond are indistinguishable to a
+   * timestamp, but that is harmless: one release removes one of them, which is
+   * the same count as removing the caller's own.
+   *
+   * Returns `true` only when a hit was actually removed and the removal committed.
+   */
+  async release(key: string, recordedAt: number): Promise<boolean> {
+    const config = this.#configFor(key);
+    // Set by the mutation that is actually committed: the callback re-runs on a
+    // lost CAS race, and only the last run decides.
+    let removed = false;
+    const write = await this.#store.atomicUpdate<number[]>(
+      this.#row(key),
+      (current) => {
+        removed = false;
+        const entries = current ?? [];
+        const at = entries.indexOf(recordedAt);
+        // Nothing was recorded at that instant: leave the row untouched, rather
+        // than rewriting it to a value that would only look like a refund.
+        if (at === -1) return null;
+        const next = entries.slice();
+        next.splice(at, 1);
+        removed = true;
+        return next;
+      },
+      // Same housekeeping TTL as `check`: a row released down to empty still expires.
+      config.windowMs * 2,
+    );
+    return write.committed && removed;
   }
 
   /** Reset the window for `key` (a successful auth, or a test). */
