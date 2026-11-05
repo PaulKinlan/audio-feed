@@ -28,6 +28,20 @@ import type { AppContext } from "../app.ts";
 export const OFFLINE_CACHE = "audio-feed-offline-v1";
 export const SHELL_CACHE = "audio-feed-shell-v2";
 
+/**
+ * Maximum number of episodes retained in the offline audio cache (audio-feed-g3noh).
+ *
+ * DERIVATION:
+ * 1. LISTEN_ROW_CAP = 100 (src/routes/listen.ts:469): the player UI renders at most 100 rows.
+ * 2. An average synthesized episode is ~15-20 min of speech (THREAT_MODEL.md:314).
+ * 3. At 24kHz 16-bit mono WAV (48,000 bytes/s), a 15-minute episode is ~43.2 MB.
+ * 4. Mobile browser storage quotas (e.g. iOS WebKit PWA / Safari) allocate ~1 GB of origin
+ *    storage before quota warnings, storage errors, or unprompted eviction.
+ * 5. 20 episodes (~860 MB) provides ~5-7 hours of offline listening (1/5 of the total playlist)
+ *    while staying safely below the 1 GB quota ceiling.
+ */
+export const MAX_OFFLINE_EPISODES = 20;
+
 export const MANIFEST = {
   name: "Audio Feed",
   short_name: "AudioFeed",
@@ -89,7 +103,46 @@ export function handleServiceWorker(_ctx: RouteContext<AppContext>): Response {
 "use strict";
 const SHELL_CACHE = ${JSON.stringify(SHELL_CACHE)};
 const OFFLINE_CACHE = ${JSON.stringify(OFFLINE_CACHE)};
+const MAX_OFFLINE_EPISODES = ${MAX_OFFLINE_EPISODES};
 const PRECACHE = ["/manifest.json", "/icon.svg"];
+
+/**
+ * Bound the offline audio cache so it cannot grow without limit (audio-feed-g3noh).
+ * Keeps at most MAX_OFFLINE_EPISODES entries, evicting oldest-first by x-stored-at
+ * timestamp header (falling back to Date header or Cache keys() insertion order).
+ * Only touches OFFLINE_CACHE; never touches SHELL_CACHE.
+ */
+async function boundOfflineAudio(cache, maxEntries = MAX_OFFLINE_EPISODES) {
+  const requests = await cache.keys();
+  if (requests.length <= maxEntries) return;
+
+  const entries = await Promise.all(
+    requests.map(async (req, index) => {
+      const res = await cache.match(req);
+      const rawStored = res?.headers.get("x-stored-at");
+      const storedAt = rawStored ? Number(rawStored) : NaN;
+      let timestamp = Number.isFinite(storedAt) ? storedAt : NaN;
+      if (!Number.isFinite(timestamp)) {
+        const rawDate = res?.headers.get("date");
+        timestamp = rawDate ? Date.parse(rawDate) : NaN;
+      }
+      return {
+        req,
+        time: Number.isFinite(timestamp) ? timestamp : index,
+        index,
+      };
+    }),
+  );
+
+  // Oldest first: lowest timestamp. Ties broken by insertion order (index).
+  entries.sort((a, b) => a.time - b.time || a.index - b.index);
+
+  const evictCount = requests.length - maxEntries;
+  for (let i = 0; i < evictCount && i < entries.length; i++) {
+    const target = entries[i];
+    if (target) await cache.delete(target.req);
+  }
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -285,13 +338,23 @@ self.addEventListener("backgroundfetchsuccess", (event) => {
           records.slice(at, at + STORE_BATCH).map(async (record) => {
             const response = await record.responseReady;
             if (response && response.ok) {
-              await offline.put(record.request, response);
+              const headers = new Headers(response.headers);
+              headers.set("x-stored-at", String(Date.now()));
+              const stamped = new Response(response.body, {
+                status: response.status,
+                statusText: response.statusText,
+                headers,
+              });
+              await offline.put(record.request, stamped);
               return 1;
             }
             return 0;
           }),
         );
         stored += results.reduce((total, value) => total + value, 0);
+      }
+      if (stored > 0) {
+        await boundOfflineAudio(offline);
       }
       // The OS notification is the only surface a subscriber sees once the tab is
       // closed, so it states the outcome rather than staying on "downloading".

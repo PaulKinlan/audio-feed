@@ -56,6 +56,8 @@ interface StubCache {
   put(request: Request | string, response: Response): Promise<void>;
   match(request: Request | string): Promise<Response | undefined>;
   addAll(urls: string[]): Promise<void>;
+  keys(request?: Request | string): Promise<Request[]>;
+  delete(request: Request | string): Promise<boolean>;
 }
 
 const keyOf = (request: Request | string): string =>
@@ -79,10 +81,28 @@ export function createServiceWorkerHarness(
         cache.set(keyOf(request), response);
         return Promise.resolve();
       },
-      match: (request) => Promise.resolve(cache.get(keyOf(request))),
+      match: (request) => {
+        const stored = cache.get(keyOf(request));
+        if (!stored) return Promise.resolve(undefined);
+        try {
+          return Promise.resolve(stored.clone());
+        } catch {
+          return Promise.resolve(stored);
+        }
+      },
       addAll: (urls) => {
         for (const url of urls) cache.set(url, new Response(null, { status: 200 }));
         return Promise.resolve();
+      },
+      keys: (request?: Request | string) => {
+        if (!request) {
+          return Promise.resolve([...cache.keys()].map((url) => new Request(url)));
+        }
+        const key = keyOf(request);
+        return Promise.resolve(cache.has(key) ? [new Request(key)] : []);
+      },
+      delete: (request: Request | string) => {
+        return Promise.resolve(cache.delete(keyOf(request)));
       },
     });
   };

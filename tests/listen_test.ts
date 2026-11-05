@@ -14,7 +14,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { OFFLINE_CACHE, SHELL_CACHE } from "../src/routes/pwa.ts";
+import { MAX_OFFLINE_EPISODES, OFFLINE_CACHE, SHELL_CACHE } from "../src/routes/pwa.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { createServiceWorkerHarness } from "./service_worker_harness.ts";
 import type { BackgroundFetchRecordStub } from "./service_worker_harness.ts";
@@ -775,6 +775,253 @@ Deno.test("activation sweeps superseded offline-cache generations while preservi
   );
 });
 
+Deno.test(
+  "offline audio cache is bounded at MAX_OFFLINE_EPISODES: background fetch evicts oldest entries and keeps newest (audio-feed-g3noh)",
+  async () => {
+    const harness = await swHarness();
+
+    // Seed MAX_OFFLINE_EPISODES (20) entries into OFFLINE_CACHE with explicit x-stored-at stamps:
+    // ep-1 was stored at t=1001, ep-2 at t=1002, ..., ep-20 at t=1020.
+    for (let i = 1; i <= MAX_OFFLINE_EPISODES; i++) {
+      harness.seedCache(
+        OFFLINE_CACHE,
+        `${BASE}/audio/ep-${i}.wav`,
+        new Response(`payload-${i}`, {
+          status: 200,
+          headers: { "x-stored-at": String(1000 + i) },
+        }),
+      );
+    }
+    assertEquals(
+      harness.cachedUrls(OFFLINE_CACHE).length,
+      MAX_OFFLINE_EPISODES,
+      `initial cache has exactly ${MAX_OFFLINE_EPISODES} entries`,
+    );
+
+    // Dispatch backgroundfetchsuccess with 5 new records (ep-21..ep-25).
+    // Total inserted is now 25 entries (N = 25 > budget 20).
+    const newRecords: BackgroundFetchRecordStub[] = [];
+    for (let i = MAX_OFFLINE_EPISODES + 1; i <= MAX_OFFLINE_EPISODES + 5; i++) {
+      newRecords.push(
+        audioRecord(
+          `ep-${i}.wav`,
+          new Response(`payload-${i}`, { status: 200 }),
+        ),
+      );
+    }
+
+    const outcome = await harness.dispatch("backgroundfetchsuccess", {
+      registration: { matchAll: () => Promise.resolve(newRecords) },
+    });
+    assertEquals(outcome.waits, 1, "handler must extend event lifetime");
+
+    const cached = harness.cachedUrls(OFFLINE_CACHE);
+    // 1. Total remaining must be capped at MAX_OFFLINE_EPISODES
+    assertEquals(
+      cached.length,
+      MAX_OFFLINE_EPISODES,
+      `cache must be bounded to ${MAX_OFFLINE_EPISODES} entries`,
+    );
+
+    // 2. The 5 oldest (ep-1..ep-5) must be gone
+    for (let i = 1; i <= 5; i++) {
+      assertEquals(
+        cached.includes(`${BASE}/audio/ep-${i}.wav`),
+        false,
+        `oldest episode ep-${i}.wav must be evicted`,
+      );
+    }
+
+    // 3. The newest entries (ep-6..ep-25) must survive
+    for (let i = 6; i <= MAX_OFFLINE_EPISODES + 5; i++) {
+      assertEquals(
+        cached.includes(`${BASE}/audio/ep-${i}.wav`),
+        true,
+        `newer episode ep-${i}.wav must survive in cache`,
+      );
+    }
+
+    // 4. A fresh read of the newest episode hits the cache and returns 200
+    const readHit = await harness.dispatch("fetch", {
+      request: new Request(`${BASE}/audio/ep-25.wav`),
+    });
+    assertEquals(readHit.response?.status, 200);
+    assertEquals(await readHit.response?.text(), "payload-25");
+
+    // 5. A read of an evicted episode misses the offline cache (and triggers network fetch or 503)
+    const readMiss = await harness.dispatch("fetch", {
+      request: new Request(`${BASE}/audio/ep-1.wav`),
+    });
+    // In harness, un-stubbed audio fetch rejects and returns 503 ("Could not load this episode's audio")
+    assertEquals(readMiss.response?.status, 503);
+  },
+);
+
+Deno.test(
+  "offline cache eviction orders by x-stored-at timestamp, preserving newer downloads regardless of key order (audio-feed-g3noh)",
+  async () => {
+    const harness = await swHarness();
+
+    // Insert 19 background records
+    const initialRecords: BackgroundFetchRecordStub[] = [];
+    for (let i = 1; i <= 19; i++) {
+      initialRecords.push(
+        audioRecord(`ep-${i}.wav`, new Response(`content-${i}`, { status: 200 })),
+      );
+    }
+    await harness.dispatch("backgroundfetchsuccess", {
+      registration: { matchAll: () => Promise.resolve(initialRecords) },
+    });
+
+    // Seed two entries: ep-oldest was stored in the past (t=100), ep-newest was stored in the future (Date.now() + 1_000_000)
+    harness.seedCache(
+      OFFLINE_CACHE,
+      `${BASE}/audio/ep-oldest.wav`,
+      new Response("old", { status: 200, headers: { "x-stored-at": "100" } }),
+    );
+    harness.seedCache(
+      OFFLINE_CACHE,
+      `${BASE}/audio/ep-newest.wav`,
+      new Response("new", {
+        status: 200,
+        headers: { "x-stored-at": String(Date.now() + 1_000_000) },
+      }),
+    );
+
+    // Total in cache is now 21 (> 20). Adding one more record via background fetch triggers eviction.
+    await harness.dispatch("backgroundfetchsuccess", {
+      registration: {
+        matchAll: () =>
+          Promise.resolve([
+            audioRecord("ep-extra.wav", new Response("extra", { status: 200 })),
+          ]),
+      },
+    });
+
+    const urls = harness.cachedUrls(OFFLINE_CACHE);
+    assertEquals(urls.length, MAX_OFFLINE_EPISODES);
+    assertEquals(urls.includes(`${BASE}/audio/ep-oldest.wav`), false, "ep-oldest must be evicted");
+    assertEquals(urls.includes(`${BASE}/audio/ep-newest.wav`), true, "ep-newest must survive");
+    assertEquals(urls.includes(`${BASE}/audio/ep-extra.wav`), true, "ep-extra must survive");
+  },
+);
+
+Deno.test(
+  "offline cache eviction never touches the shell cache (audio-feed-g3noh)",
+  async () => {
+    const harness = await swHarness();
+    harness.seedCache(SHELL_CACHE, `${BASE}/manifest.json`, new Response("{}", { status: 200 }));
+    harness.seedCache(SHELL_CACHE, `${BASE}/icon.svg`, new Response("<svg/>", { status: 200 }));
+
+    // Fill OFFLINE_CACHE past budget
+    for (let i = 1; i <= MAX_OFFLINE_EPISODES + 5; i++) {
+      harness.seedCache(
+        OFFLINE_CACHE,
+        `${BASE}/audio/ep-${i}.wav`,
+        new Response(`p-${i}`, { status: 200, headers: { "x-stored-at": String(i) } }),
+      );
+    }
+
+    await harness.dispatch("backgroundfetchsuccess", {
+      registration: {
+        matchAll: () =>
+          Promise.resolve([
+            audioRecord("ep-trigger.wav", new Response("trigger", { status: 200 })),
+          ]),
+      },
+    });
+
+    // Shell cache must be 100% untouched
+    assertEquals(harness.cachedUrls(SHELL_CACHE), [
+      `${BASE}/manifest.json`,
+      `${BASE}/icon.svg`,
+    ]);
+  },
+);
+
+Deno.test(
+  "the player client defines MAX_OFFLINE_EPISODES, stamps responses with x-stored-at, and bounds the cache (audio-feed-g3noh)",
+  async () => {
+    const client = assetBody("listen.js")!;
+
+    assertStringIncludes(client, "const MAX_OFFLINE_EPISODES = DATA.maxOfflineEpisodes ?? 20");
+    assertStringIncludes(client, 'headers.set("x-stored-at", String(Date.now()))');
+    assertStringIncludes(client, "async function boundOfflineAudio(");
+    assertStringIncludes(client, "await boundOfflineAudio(store, episode.audioUrl)");
+    assertStringIncludes(client, "async function syncSavedUI(");
+
+    // Verify player page injects maxOfflineEpisodes: 20
+    const { fetch } = await seeded();
+    const pageRes = await fetch(get(`/listen/${TOKEN}`));
+    const html = await pageRes.text();
+    assertStringIncludes(html, '"maxOfflineEpisodes":20');
+  },
+);
+
+Deno.test(
+  "client-side offline cache bounding never evicts the actively playing episode (audio-feed-g3noh)",
+  async () => {
+    const client = assetBody("listen.js")!;
+    const entries = new Map<string, Response>();
+    const fakeStore = {
+      keys: () => Promise.resolve([...entries.keys()].map((u) => new Request(u))),
+      match: (req: Request | string) => {
+        const u = typeof req === "string" ? req : req.url;
+        return Promise.resolve(entries.get(u));
+      },
+      delete: (req: Request | string) => {
+        const u = typeof req === "string" ? req : req.url;
+        entries.delete(u);
+        return Promise.resolve(true);
+      },
+    };
+
+    // Seed 21 entries: ep-active (t=1, oldest), ep-2 (t=2), ... ep-21 (t=21)
+    const activeUrl = `${BASE}/audio/ep-active.wav`;
+    entries.set(
+      activeUrl,
+      new Response("active", { headers: { "x-stored-at": "1" } }),
+    );
+    for (let i = 2; i <= 21; i++) {
+      entries.set(
+        `${BASE}/audio/ep-${i}.wav`,
+        new Response(`p-${i}`, { headers: { "x-stored-at": String(i) } }),
+      );
+    }
+    assertEquals(entries.size, 21);
+
+    // Evaluate boundOfflineAudio with audio.src = activeUrl
+    const boundFnSrc = client.slice(
+      client.indexOf("async function boundOfflineAudio("),
+      client.indexOf("async function syncSavedUI("),
+    );
+    const fn = new Function(
+      "store",
+      "protectedUrl",
+      "maxEntries",
+      "audio",
+      "current",
+      `
+      const MAX_OFFLINE_EPISODES = 20;
+      ${boundFnSrc}
+      return boundOfflineAudio(store, protectedUrl, maxEntries);
+    `,
+    );
+
+    await fn(fakeStore, undefined, 20, { src: activeUrl }, null);
+
+    // ep-active was the oldest (t=1), but because it is actively playing, it MUST NOT be evicted!
+    // ep-2 (t=2) was next oldest, so it must be evicted instead.
+    assertEquals(entries.size, 20, "cache must be bounded to 20");
+    assertEquals(entries.has(activeUrl), true, "currently playing episode must survive eviction");
+    assertEquals(
+      entries.has(`${BASE}/audio/ep-2.wav`),
+      false,
+      "next oldest non-playing episode must be evicted",
+    );
+  },
+);
+
 Deno.test("the icon is served as SVG (audio-feed-4xb)", async () => {
   const { fetch } = await seeded();
   const res = await fetch(get("/icon.svg"));
@@ -835,7 +1082,7 @@ Deno.test("the download promises a background fetch only after confirming one (a
   // The fallback is the path that runs everywhere. Background Fetch is Chrome-only
   // and not Baseline, so this is the MAJORITY path and must not be a stub.
   assertStringIncludes(client, "const response = await fetch(episode.audioUrl)");
-  assertStringIncludes(client, "await store.put(episode.audioUrl, response)");
+  assertStringIncludes(client, "await store.put(episode.audioUrl, stamped)");
 
   // And the cache confirmation is a bounded poll, not a single read: the page's
   // `progress` event fires when the RECORD settles, while the service worker

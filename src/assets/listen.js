@@ -60,6 +60,7 @@
  * @property {string} [userId]
  * @property {string} [origin]
  * @property {string} [offlineCache]
+ * @property {number} [maxOfflineEpisodes]
  * @property {PlayerEpisode[]} [episodes]
  * @property {PlayerActivity} [activity]
  * @property {boolean} [offlineEnabled]
@@ -108,6 +109,7 @@ const DATA = dataElement
 const TOKEN = DATA.token ?? "";
 const ORIGIN = DATA.origin ?? "";
 const OFFLINE_CACHE = DATA.offlineCache ?? "audio-feed-offline-v1";
+const MAX_OFFLINE_EPISODES = DATA.maxOfflineEpisodes ?? 20;
 const EPISODES = DATA.episodes ?? [];
 const ACTIVITY = DATA.activity ?? { inProgress: [], failed: [], playable: EPISODES.length };
 const OFFLINE_ENABLED = DATA.offlineEnabled ?? true;
@@ -626,6 +628,82 @@ async function isCached(episode) {
   const store = await openOfflineCache();
   if (!store) return false;
   return Boolean(await store.match(episode.audioUrl));
+}
+
+/** @param {Response} res */
+function stampResponse(res) {
+  const headers = new Headers(res.headers);
+  headers.set("x-stored-at", String(Date.now()));
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  });
+}
+
+/**
+ * Bound the offline audio cache so it cannot grow without limit (audio-feed-g3noh).
+ * Evicts oldest entries first based on x-stored-at header (or Date / insertion order).
+ * Never evicts the entry currently being played (audio.src / current.audioUrl)
+ * or the protectedUrl just written.
+ * Only touches OFFLINE_CACHE; never touches SHELL_CACHE.
+ * @param {Cache} store
+ * @param {string} [protectedUrl]
+ * @param {number} [maxEntries]
+ */
+async function boundOfflineAudio(store, protectedUrl, maxEntries = MAX_OFFLINE_EPISODES) {
+  const requests = await store.keys();
+  if (requests.length <= maxEntries) return;
+
+  const entries = await Promise.all(
+    requests.map(async (req, index) => {
+      const res = await store.match(req);
+      const rawStored = res?.headers.get("x-stored-at");
+      const storedAt = rawStored ? Number(rawStored) : NaN;
+      let timestamp = Number.isFinite(storedAt) ? storedAt : NaN;
+      if (!Number.isFinite(timestamp)) {
+        const rawDate = res?.headers.get("date");
+        timestamp = rawDate ? Date.parse(rawDate) : NaN;
+      }
+      const url = typeof req === "string" ? req : req.url;
+      return {
+        req,
+        url,
+        time: Number.isFinite(timestamp) ? timestamp : index,
+        index,
+      };
+    }),
+  );
+
+  const activePlayingUrl = (audio && audio.src) ? audio.src : (current ? current.audioUrl : null);
+  const evictable = entries.filter((e) => e.url !== activePlayingUrl && e.url !== protectedUrl);
+  evictable.sort((a, b) => a.time - b.time || a.index - b.index);
+
+  const evictCount = requests.length - maxEntries;
+  for (let i = 0; i < evictCount && i < evictable.length; i++) {
+    const target = evictable[i];
+    if (target) await store.delete(target.req);
+  }
+}
+
+/** Sync episode download buttons and saved count after cache mutations/evictions. */
+async function syncSavedUI() {
+  await refreshDownloaded();
+  for (const ep of EPISODES) {
+    const isSaved = downloaded.has(ep.id);
+    const row = list.querySelector(`li[data-episode-id="${ep.id}"]`);
+    if (row) {
+      const btn = /** @type {HTMLButtonElement | null} */ (row.querySelector(".btn-download"));
+      if (btn && btn.dataset.state !== "working") {
+        setDownloadState(btn, isSaved ? "saved" : "idle");
+        btn.setAttribute(
+          "aria-label",
+          isSaved ? "Saved offline: " + ep.title : "Save offline: " + ep.title,
+        );
+      }
+    }
+  }
+  updateCounts();
 }
 
 // ---- episode rows -------------------------------------------------------
@@ -1669,7 +1747,10 @@ async function foregroundDownload(episode, button, store) {
   setDownloadState(button, "working", "0%");
   const response = await fetch(episode.audioUrl);
   if (!response.ok) throw new Error("HTTP " + response.status);
-  await store.put(episode.audioUrl, response);
+  const stamped = stampResponse(response);
+  await store.put(episode.audioUrl, stamped);
+  await boundOfflineAudio(store, episode.audioUrl);
+  await syncSavedUI();
 }
 
 /** @param {PlayerEpisode} episode @param {HTMLButtonElement} button */
@@ -1689,6 +1770,7 @@ async function downloadEpisode(episode, button) {
   try {
     const viaBackground = await tryBackgroundFetch(episode, button);
     if (viaBackground === "success") {
+      await syncSavedUI();
       markSaved(episode, button);
       say("Saved for offline listening.", "ok");
       return;
