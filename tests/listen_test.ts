@@ -1268,7 +1268,8 @@ Deno.test(
     );
     assertEquals(entries.has(`${BASE}/audio/ep-no-cl-2.wav`), true, "newer un-sized entry kept");
 
-    // Also verify that an entry whose size cannot even be read falls back to maxBytes, not 0
+    // Also verify that an entry whose size cannot even be read is NOT charged maxBytes:
+    // an unmeasurable entry cannot be counted, so only IT is dropped — never the library.
     const unreadableRes = {
       headers: new Headers({ "x-stored-at": "300" }),
       clone: () => {
@@ -1276,12 +1277,18 @@ Deno.test(
       },
     };
     entries.set(`${BASE}/audio/ep-unreadable.wav`, unreadableRes as unknown as Response);
-    // At maxBytes = 1000, adding unreadable entry (treated as 1000) with ep-no-cl-2 (700) = 1700 > 1000.
+    // The old fallback charged maxBytes (1000) for the unreadable entry, which alone
+    // exceeded the budget and evicted the counted 700 B entry with it.
     await fn(fakeStore, undefined, 1000, 20, null, null);
     assertEquals(
       entries.has(`${BASE}/audio/ep-no-cl-2.wav`),
+      true,
+      "ONE unmeasurable entry must not evict the counted library",
+    );
+    assertEquals(
+      entries.has(`${BASE}/audio/ep-unreadable.wav`),
       false,
-      "unreadable entry counted as maxBytes and forced oldest eviction",
+      "the unmeasurable entry is dropped itself",
     );
   },
 );
@@ -1332,6 +1339,138 @@ Deno.test(
       cached.includes(`${BASE}/audio/ep-just-written.wav`),
       true,
       "the service worker must protect the just-written entry from immediate eviction",
+    );
+  },
+);
+
+Deno.test(
+  "ONE unmeasurable entry is dropped alone and does not evict the rest of the offline library (audio-feed-cby)",
+  async () => {
+    const harness = await swHarness();
+
+    // A countable library of 10 small episodes, under both budgets.
+    for (let i = 1; i <= 10; i++) {
+      harness.seedCache(
+        OFFLINE_CACHE,
+        `${BASE}/audio/ep-lib-${i}.wav`,
+        new Response(`payload-${i}`, {
+          status: 200,
+          headers: { "x-stored-at": String(1000 + i), "content-length": "100" },
+        }),
+      );
+    }
+    // ONE unmeasurable entry: no Content-Length and a body that cannot be buffered.
+    // The old fallback charged it maxBytes — the ENTIRE 640 MiB budget — so this single
+    // entry alone put the cache over budget and the bound evicted all 10 episodes.
+    const unmeasurable = {
+      headers: new Headers({ "x-stored-at": "9999" }), // newest stamp, but size unknown
+      clone: () => {
+        throw new Error("stream unreadable");
+      },
+    };
+    harness.seedCache(
+      OFFLINE_CACHE,
+      `${BASE}/audio/ep-unmeasurable.wav`,
+      unmeasurable as unknown as Response,
+    );
+
+    // A normal background-fetch write triggers a bound pass.
+    await harness.dispatch("backgroundfetchsuccess", {
+      registration: {
+        matchAll: () =>
+          Promise.resolve([
+            audioRecord(
+              "ep-new.wav",
+              new Response("new-payload", {
+                status: 200,
+                headers: { "content-length": "100" },
+              }),
+            ),
+          ]),
+      },
+    });
+
+    const cached = harness.cachedUrls(OFFLINE_CACHE);
+    assertEquals(
+      cached.filter((u) => u.includes("ep-lib-")).length,
+      10,
+      "ONE unmeasurable entry must NOT evict the rest of the library",
+    );
+    assertEquals(
+      cached.includes(`${BASE}/audio/ep-unmeasurable.wav`),
+      false,
+      "the unmeasurable entry itself is dropped (it cannot be counted)",
+    );
+    assertEquals(
+      cached.includes(`${BASE}/audio/ep-new.wav`),
+      true,
+      "the newly written entry survives",
+    );
+  },
+);
+
+Deno.test(
+  "the service worker bounds ONCE per batch, protecting EVERY URL that batch wrote (audio-feed-cby)",
+  async () => {
+    const harness = await swHarness();
+
+    // Three future-stamped 300 MB entries (they sort newest; 900 MB over the 640 MB
+    // budget, but no bound has run on them yet — bounding only runs on a write).
+    const threeHundredMB = 300 * 1024 * 1024;
+    for (let i = 1; i <= 3; i++) {
+      harness.seedCache(
+        OFFLINE_CACHE,
+        `${BASE}/audio/ep-fut-${i}.wav`,
+        new Response(`payload-${i}`, {
+          status: 200,
+          headers: {
+            "x-stored-at": String(Date.now() + 10_000_000 + i),
+            "content-length": String(threeHundredMB),
+          },
+        }),
+      );
+    }
+
+    // One batch writes TWO 300 MB records. Per-record bounding protected only its own
+    // record each pass, so the second pass (protecting only record 2) treated record 1
+    // as ordinary evictable and dropped it. Bounding once after the batch protects both.
+    await harness.dispatch("backgroundfetchsuccess", {
+      registration: {
+        matchAll: () =>
+          Promise.resolve([
+            audioRecord(
+              "ep-batch-1.wav",
+              new Response("batch-payload-1", {
+                status: 200,
+                headers: { "content-length": String(threeHundredMB) },
+              }),
+            ),
+            audioRecord(
+              "ep-batch-2.wav",
+              new Response("batch-payload-2", {
+                status: 200,
+                headers: { "content-length": String(threeHundredMB) },
+              }),
+            ),
+          ]),
+      },
+    });
+
+    const cached = harness.cachedUrls(OFFLINE_CACHE);
+    assertEquals(
+      cached.includes(`${BASE}/audio/ep-batch-1.wav`),
+      true,
+      "the FIRST batch member must survive: the whole batch is protected in the single pass",
+    );
+    assertEquals(
+      cached.includes(`${BASE}/audio/ep-batch-2.wav`),
+      true,
+      "the second batch member must survive",
+    );
+    assertEquals(
+      cached.filter((u) => u.includes("ep-fut-")).length,
+      0,
+      "eviction comes from the future-stamped over-budget entries",
     );
   },
 );

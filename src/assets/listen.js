@@ -651,12 +651,16 @@ function stampResponse(res) {
  * 640 MiB ~ 3.9 h of audio at 48,000 B/s, ~61% of a 1 GB quota, so shell cache +
  * responses + IndexedDB fit with headroom, and even one worst-case 64-segment
  * episode cannot blow the quota.
+ * NOTE: a maximum-size episode (64 segments, ~580 MB) is ~91% of the 640 MiB budget,
+ * so the bound only has real headroom once an episode size cap exists.
  *
  * SIZE DETERMINATION:
  * Size is obtained from the Content-Length header on the response when present and valid.
  * When Content-Length is absent, we clone the response and buffer it to get the body's
- * byteLength. If size cannot be determined or is non-positive, it falls back to maxBytes
- * so a missing size never silently counts as 0 and lets the cache grow without bound.
+ * byteLength. If size still cannot be determined or is non-positive, that ONE entry is
+ * dropped: an entry whose size cannot be known cannot be counted against a byte budget,
+ * so it cannot be kept (charging maxBytes here would let a single bad response evict
+ * the entire library, over and over).
  *
  * EVICTION & PROTECTION SEMANTICS:
  * Evicts oldest entries first based on x-stored-at header (or Date / insertion order)
@@ -697,7 +701,7 @@ async function boundOfflineAudio(
     protectedSet.add(activePlayingUrl);
   }
 
-  const entries = await Promise.all(
+  const measured = await Promise.all(
     requests.map(async (req, index) => {
       const res = await store.match(req);
       const url = typeof req === "string" ? req : req.url;
@@ -711,6 +715,9 @@ async function boundOfflineAudio(
       }
 
       let size = NaN;
+      // LIMITATION (report-only): Content-Length is used verbatim and never cross-checked
+      // against the buffered body, so an understated header understates the total and
+      // silently violates the bound.
       const cl = res?.headers?.get("content-length");
       if (cl) {
         const parsed = Number(cl);
@@ -732,7 +739,12 @@ async function boundOfflineAudio(
         }
       }
       if (!Number.isFinite(size) || size <= 0) {
-        size = maxBytes;
+        // If its size cannot be known, it cannot be counted — drop ONLY this entry and
+        // say so. Never charge maxBytes here: one unmeasurable entry would then alone
+        // exceed the budget and each following bound would evict the whole library.
+        console.warn("boundOfflineAudio: dropped unmeasurable entry (size unknown):", url);
+        await store.delete(req);
+        return null;
       }
 
       return {
@@ -744,6 +756,7 @@ async function boundOfflineAudio(
       };
     }),
   );
+  const entries = measured.filter((entry) => entry !== null);
 
   let totalBytes = entries.reduce((acc, e) => acc + e.size, 0);
   let totalEntries = entries.length;
