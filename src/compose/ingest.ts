@@ -14,6 +14,8 @@ import { sameOrigin, sessionUser } from "../auth/sessions.ts";
 import type { EpisodeQuery, MetadataStore } from "../storage/mod.ts";
 import type { Episode } from "../types.ts";
 import { resolveOrigin } from "../origin.ts";
+import { DEFAULT_DAILY_EPISODE_BUDGET } from "../config.ts";
+import { dailyEpisodeBudgetFor } from "../worker/synthesis.ts";
 import { approvedUserFor, type ComposeDeps, forbidden, presentedToken } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
@@ -97,10 +99,14 @@ export async function authorizeIngest(
  * Creation is the quantity a token actually chooses, and it is countable BEFORE the Article+Episode
  * pair commits (`enqueueInboxArticle`), so the cap sits here.
  *
- * WHY 50: it is `DEFAULT_DAILY_EPISODE_BUDGET` (src/config.ts). The cap can therefore never refuse
- * a day the completion budget would have paid for in full, so it changes no legitimate outcome —
- * it only stops a token queueing episodes the budget was never going to fund. Worst case per
- * subscriber per day goes from unbounded to 50 creations x `maxAttempts` 3 = 150 paid attempts.
+ * WHY THE CAP IS THE BUDGET: it is the SAME number the completion budget charges against —
+ * `dailyEpisodeBudgetFor(user, ctx.config.defaultDailyEpisodeBudget)` (src/worker/synthesis.ts):
+ * the subscriber's own budget when they have one, else the configured deployment default, else
+ * `DEFAULT_DAILY_EPISODE_BUDGET` (src/config.ts). Resolving it here rather than hardcoding the
+ * constant is what keeps the cap from refusing a legitimate subscriber when an operator raises
+ * DEFAULT_DAILY_EPISODE_BUDGET or sets a personal budget: the cap and the budget read the same
+ * number by construction, so the cap never refuses a day the budget would fund. Worst case per
+ * subscriber per day goes from unbounded to budget creations x `maxAttempts` 3 paid attempts.
  *
  * WHY 24 HOURS, NOT A UTC DAY: the limiter is a sliding window; a rolling 24 hours cannot be reset
  * by waiting for midnight, and it needs no day key.
@@ -111,7 +117,10 @@ export async function authorizeIngest(
  * unaffected by this bound, and a person adding a handful of articles a day is two orders of
  * magnitude inside it.
  */
-export const INGEST_CREATION_RATE = { maxRequests: 50, windowMs: 24 * 60 * 60 * 1000 } as const;
+export const INGEST_CREATION_RATE = {
+  maxRequests: DEFAULT_DAILY_EPISODE_BUDGET,
+  windowMs: 24 * 60 * 60 * 1000,
+} as const;
 
 /** Exported so tests exercise the SAME window row the handlers write. */
 export const INGEST_CREATION_WINDOW = "ingest_creation";
@@ -133,20 +142,27 @@ export async function refuseIngestOverCreationCap(
   ctx: AppContext,
   user: User,
 ): Promise<Response | null> {
+  // The SAME resolution the synthesis spend check applies for this subscriber, from the SAME
+  // config object — a hardcoded literal here would refuse submissions a raised or personal
+  // budget happily funds. tests/ingest_creation_cap_test.ts pins this relation.
+  const { limit: creationLimit } = dailyEpisodeBudgetFor(
+    user,
+    ctx.config.defaultDailyEpisodeBudget,
+  );
+  const rate = { maxRequests: creationLimit, windowMs: INGEST_CREATION_RATE.windowMs };
   const limit = await new SlidingWindowRateLimiter(
-    INGEST_CREATION_RATE,
+    rate,
     ctx.stores.metadata,
     INGEST_CREATION_WINDOW,
   ).check(user.id);
   if (limit.allowed) return null;
   return Response.json(
     {
-      error:
-        `Episode creation limit reached: at most ${INGEST_CREATION_RATE.maxRequests} accepted ` +
+      error: `Episode creation limit reached: at most ${creationLimit} accepted ` +
         `ingest/upload requests per subscriber per 24 hours.`,
       bound: INGEST_CREATION_BOUND,
-      limit: INGEST_CREATION_RATE.maxRequests,
-      windowMs: INGEST_CREATION_RATE.windowMs,
+      limit: creationLimit,
+      windowMs: rate.windowMs,
     },
     {
       status: 429,

@@ -10,10 +10,12 @@
  * The first test pins the bound from the outside (N accepted, N+1 refused by name, with a
  * retry-after). The second pins the composition that made the gap real: an episode that spends all
  * three attempts and fails still consumes a creation slot while leaving the completion counter at
- * zero. Remove `refuseIngestOverCreationCap` and BOTH redden.
+ * zero. Remove `refuseIngestOverCreationCap` and BOTH redden. The last three pin the relation the
+ * reviewer blocked on: the cap is the subscriber's funded budget resolved from config — never a
+ * hardcoded literal — so a raised deployment budget or a personal budget raises the cap with it.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { memoryStores } from "../src/config.ts";
+import { DEFAULT_DAILY_EPISODE_BUDGET, memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { AppContext } from "../src/app.ts";
 import {
@@ -23,7 +25,7 @@ import {
   INGEST_CREATION_WINDOW,
 } from "../src/compose/ingest.ts";
 import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
-import { runSynthesisBatch } from "../src/worker/synthesis.ts";
+import { dailyEpisodeBudgetFor, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { utcDayKey } from "../src/types.ts";
 import type { ExtractedArticle } from "../src/ingest/url.ts";
 import type { RouteContext } from "../src/router.ts";
@@ -184,4 +186,88 @@ Deno.test("audio-feed-kp30l: a paid episode that fails all three attempts consum
   // 4. Resubmitting the SAME url is its own creation, so it cannot be used to get past the bound.
   const sameUrl = await call("https://example.com/doomed");
   assertEquals(sameUrl.status, 429, "a same-URL resubmission is still a refused creation");
+});
+
+Deno.test("audio-feed-kp30l: the default creation rate is the synthesis budget constant, not a hardcoded literal", () => {
+  // Compared through the budget's own resolution (dailyEpisodeBudgetFor), so the exported rate
+  // cannot drift from the funded day by a literal edit — this redden instead.
+  assertEquals(
+    INGEST_CREATION_RATE.maxRequests,
+    DEFAULT_DAILY_EPISODE_BUDGET,
+    "the default cap must BE DEFAULT_DAILY_EPISODE_BUDGET, not a literal",
+  );
+  assertEquals(
+    INGEST_CREATION_RATE.maxRequests,
+    dailyEpisodeBudgetFor({}, undefined).limit,
+    "the default cap must equal what the synthesis budget resolves for an unconfigured subscriber",
+  );
+});
+
+Deno.test("audio-feed-kp30l: a deployment that raises the configured budget raises the creation cap with it", async () => {
+  // THE REVIEWER'S FAILURE, DRIVEN: the budget is env-configurable, so a deployment can set
+  // defaultDailyEpisodeBudget to any number; a literal cap would refuse submissions the budget
+  // funds. Here the deployment configures 3 — the cap must be 3, not a constant.
+  const configuredBudget = 3;
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID }));
+  const ctx: AppContext = {
+    config: { ...config, defaultDailyEpisodeBudget: configuredBudget },
+    stores,
+  };
+  const { fetchArticle } = countingFetch();
+  const handler = createIngestHandler(ctx, { fetchArticle }) as IngestRoute;
+  const call = (url: string) => {
+    const req = submit(url);
+    return handler({ req, params: {}, url: new URL(req.url), ctx });
+  };
+
+  for (let index = 0; index < configuredBudget; index++) {
+    const response = await call(`https://example.com/raised-${index}`);
+    assertEquals(
+      response.status,
+      202,
+      `submission ${index + 1}/${configuredBudget} is inside the configured budget`,
+    );
+  }
+  const refused = await call("https://example.com/raised-over");
+  assertEquals(
+    refused.status,
+    429,
+    "the FIRST refusal must sit at the configured budget, not at a hardcoded literal",
+  );
+  const body = await refused.json() as { limit?: number };
+  assertEquals(
+    body.limit,
+    configuredBudget,
+    "the refusal reports the configured budget, not a hardcoded literal",
+  );
+});
+
+Deno.test("audio-feed-kp30l: a subscriber's personal budget is that subscriber's creation cap", async () => {
+  // dailyEpisodeBudgetFor prefers the personal budget over the deployment default, and the spend
+  // check charges exactly that number — the cap resolves the same way, because a cap pinned to
+  // the deployment default would refuse a day a HIGHER personal budget funds.
+  const personalBudget = 2;
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID, dailyEpisodeBudget: personalBudget }));
+  const ctx: AppContext = { config, stores };
+  const { fetchArticle } = countingFetch();
+  const handler = createIngestHandler(ctx, { fetchArticle }) as IngestRoute;
+  const call = (url: string) => {
+    const req = submit(url);
+    return handler({ req, params: {}, url: new URL(req.url), ctx });
+  };
+
+  for (let index = 0; index < personalBudget; index++) {
+    const response = await call(`https://example.com/personal-${index}`);
+    assertEquals(response.status, 202, `submission ${index + 1} is inside the personal budget`);
+  }
+  const refused = await call("https://example.com/personal-over");
+  assertEquals(
+    refused.status,
+    429,
+    "the cap tracks the subscriber's own budget, not the deployment default",
+  );
+  const body = await refused.json() as { limit?: number };
+  assertEquals(body.limit, personalBudget);
 });
