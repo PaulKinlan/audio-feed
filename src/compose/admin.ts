@@ -44,7 +44,7 @@ import { isOutdated, PROMPT_VERSION } from "../tts/prompt_version.ts";
 import { resolveOrigin } from "../origin.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
 import { badRequest, type ComposeDeps, forbidden, notFound } from "./shared.ts";
-import { readCappedJson } from "../http.ts";
+import { MAX_ACCOUNT_BODY_BYTES, readCappedJson } from "../http.ts";
 import { episodeScan } from "./ingest.ts";
 import { deleteUserSource, regenerableUser, regenerateUserEpisodes } from "./account.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
@@ -167,7 +167,9 @@ export function createAdminSetRoleHandler(
   return async ({ params, req, remoteAddr }) => {
     const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
-    const body = (await readCappedJson(req)) as { isAdmin?: unknown };
+    const body = (await readCappedJson(req, MAX_ACCOUNT_BODY_BYTES, {
+      requireJsonContentType: false,
+    })) as { isAdmin?: unknown };
     if (typeof body.isAdmin !== "boolean") {
       return Response.json({ error: "isAdmin must be true or false." }, { status: 400 });
     }
@@ -699,7 +701,9 @@ export function createAdminRegenerateFeedHandler(
     const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
-    const body = (await readCappedJson(req)) as {
+    const body = (await readCappedJson(req, MAX_ACCOUNT_BODY_BYTES, {
+      requireJsonContentType: false,
+    })) as {
       scope?: unknown;
       sourceId?: unknown;
       mode?: unknown;

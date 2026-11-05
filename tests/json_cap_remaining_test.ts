@@ -16,7 +16,8 @@ import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { MAX_ACCOUNT_BODY_BYTES } from "../src/http.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
-import { makeUser } from "./fixtures.ts";
+import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { PROMPT_VERSION } from "../src/tts/prompt_version.ts";
 
 const BASE = "https://audio.example.com";
 const ADMIN_TOKEN = "admin-secret";
@@ -346,4 +347,139 @@ Deno.test("POST /api/account/regenerate: empty/missing body defaults to outdated
     }),
   );
   assertEquals(unauthRes.status, 401, "unauthenticated caller rejected 401 before body read");
+});
+
+// ---------------------------------------------------------------------------
+// Header-less bodies: the three sites that used to call req.json() directly
+//
+// audio-feed-3t01u's cap must not change WHICH bodies these routes honour. Before the
+// cap they parsed whatever the content-type said, so a header-less (or text/plain)
+// body has to keep taking effect; only its size is new.
+// ---------------------------------------------------------------------------
+
+Deno.test("POST /api/account/regenerate: header-less body still applies scope (audio-feed-3t01u)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "src-a", userId: "user-1", title: "Src A" }));
+  const episode = (id: string, promptVersion: string) =>
+    stores.metadata.putEpisode(
+      makeEpisode({ id, userId: "user-1", sourceId: "src-a", promptVersion }),
+    );
+  // Two outdated episodes and one already on the current prompt: "all" requeues all
+  // three, "outdated" (the default a dropped body falls back to) only the first two.
+  await episode("ep-old-1", "old-prompts");
+  await episode("ep-old-2", "old-prompts");
+  await episode("ep-current", PROMPT_VERSION);
+  const cookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, "user-1")}`;
+  const { fetch } = app(stores);
+
+  const res = await fetch(
+    new Request(`${BASE}/api/account/regenerate`, {
+      method: "POST",
+      // No content-type on purpose: req.json() used to parse this anyway.
+      headers: { origin: BASE, cookie },
+      body: JSON.stringify({ scope: "all" }),
+    }),
+  );
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  assertEquals(data.queued, 3, 'header-less {"scope":"all"} requeues even the current episode');
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-current"))?.regenerating, true);
+});
+
+Deno.test("POST /api/admin/users/:id/regenerate: header-less body still applies scope (audio-feed-3t01u)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  const { fetch } = app(stores);
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/regenerate`, {
+      method: "POST",
+      headers: { "x-admin-token": ADMIN_TOKEN },
+      body: JSON.stringify({ scope: "all" }),
+    }),
+  );
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  assertEquals(data.scope, "all", "a header-less scope must not be silently dropped");
+});
+
+Deno.test("POST /api/admin/users/:id/role: header-less body still applies isAdmin (audio-feed-3t01u)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  const { fetch } = app(stores);
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/role`, {
+      method: "POST",
+      headers: { "x-admin-token": ADMIN_TOKEN },
+      body: JSON.stringify({ isAdmin: true }),
+    }),
+  );
+  assertEquals(res.status, 200, "a header-less isAdmin must not become a 400");
+  assertEquals((await stores.metadata.getUser("user-1"))?.isAdmin, true);
+});
+
+Deno.test("POST /api/account/regenerate: header-less over-cap body is still 413 (audio-feed-3t01u)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  const cookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, "user-1")}`;
+  const { fetch } = app(stores);
+  const payload = oversizedPayload({ scope: "all" });
+  assert(payload.length > MAX_ACCOUNT_BODY_BYTES, "payload must exceed cap");
+
+  // Declared length: refused before the body is read.
+  const declared = await fetch(
+    new Request(`${BASE}/api/account/regenerate`, {
+      method: "POST",
+      headers: { origin: BASE, cookie },
+      body: payload,
+    }),
+  );
+  assertEquals(declared.status, 413, "a header-less over-cap body is refused");
+  assertEquals((await declared.json()).error, "payload_too_large");
+
+  // Streamed with no content-length: refused by the read bound, not the header path.
+  const encoder = new TextEncoder();
+  const streamed = await fetch(
+    new Request(`${BASE}/api/account/regenerate`, {
+      method: "POST",
+      headers: { origin: BASE, cookie },
+      body: new ReadableStream({
+        start(controller) {
+          for (let i = 0; i < 64; i++) controller.enqueue(encoder.encode("x".repeat(1024)));
+          controller.close();
+        },
+      }),
+    }),
+  );
+  assertEquals(streamed.status, 413, "dropping the content-type must not bypass the read bound");
+});
+
+Deno.test("POST /api/account/regenerate: malformed header-less body still falls back to {} (audio-feed-3t01u)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "src-a", userId: "user-1", title: "Src A" }));
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-current",
+      userId: "user-1",
+      sourceId: "src-a",
+      promptVersion: PROMPT_VERSION,
+    }),
+  );
+  const cookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, "user-1")}`;
+  const { fetch } = app(stores);
+
+  const res = await fetch(
+    new Request(`${BASE}/api/account/regenerate`, {
+      method: "POST",
+      headers: { origin: BASE, cookie },
+      body: "{not json",
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).queued, 0, "a malformed body is {} and scope stays outdated");
+  const current = await stores.metadata.getEpisode("user-1", "ep-current");
+  assert(!current?.regenerating, "a malformed body is {} and the current episode is untouched");
 });
