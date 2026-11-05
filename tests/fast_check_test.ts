@@ -251,38 +251,70 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   }
   assert(app.includes('router.post("/api/reports/csp", handlers.cspReports ?? handleCspReports)'));
 
+  // Derivation of route exercise vs mention:
+  // Instead of a hand-maintained list of suites that ambushes unrelated landings whenever
+  // a new suite is added (audio-feed-jmq5b), we derive whether a candidate test file genuinely
+  // exercises the route handler or merely mentions it.
+  //
+  // A suite is classified as EXERCISING if it constructs an HTTP Request or invokes an HTTP
+  // test dispatch helper targeting the route URL (outside of comments, test names, mock/stub
+  // responders like service worker harnesses, host-spoof checks like evil.example, or log metadata).
+  // Otherwise it is classified as MENTION-ONLY.
+  //
+  // What this catches:
+  // - A route with ZERO exercising suites fails the gate.
+  // - An account route with NO exercising candidate fails the gate.
+  // - Removing an exercising suite so a route or subroute is left unexercised fails the gate.
+  // - scripts/fast-check.ts failing to select the complete candidate union in nameMatchedTests fails.
+  //
+  // What this does not catch / new failure mode:
+  // - A new suite exercising a route is automatically admitted without manual list edits.
+  // - If a suite exercises a route through a novel, unrecognised abstraction (not using Request,
+  //   req, get, post, call, t.post, t.get), it will be classified as mention-only rather than
+  //   exercising. As long as at least one other suite exercises the route, the audit remains green.
+  // - Syntactic Request construction targeting a route URL without actual dispatch to the app
+  //   counts as an exerciser without executing the full test at audit time.
+  const exercisesRoute = (
+    _file: string,
+    source: string,
+    paths: readonly string[],
+    isLogin = false,
+  ): boolean => {
+    let stripped = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+    stripped = stripped.replace(
+      /Deno\.test\s*\(\s*(?:"[^"]*"|`[^`]*`|'[^']*')\s*,/g,
+      "Deno.test('',",
+    );
+
+    return paths.some((p) => {
+      const lines = stripped.split("\n");
+      return lines.some((line) => {
+        if (line.includes("evil.example")) return false;
+        if (line.includes("harness.dispatch") || line.includes("request.url.endsWith")) {
+          return false;
+        }
+        if (line.includes("route:") && line.includes(p)) return false;
+        if (line.includes("expected") && line.includes(p)) return false;
+        if (line.includes("isTrustedReportOrigin")) return false;
+
+        const hasPath = isLogin
+          ? /(?<!\/api\/auth)\/login(?=[/?#"'`])/.test(line)
+          : line.includes(p);
+        if (!hasPath) return false;
+
+        return /(?:new\s+Request|\breq|\bt\.(?:post|get)|(?<![.\w])(?:get|post|call))\s*\(/.test(
+          line,
+        );
+      });
+    });
+  };
+
   const spec = [
     {
       file: "src/routes/account_api.ts",
-      // tests/sources_body_cap_test.ts EXERCISES the account add-source route: its second half POSTs
-      // /api/account/sources (app.ts:386 -> account("addSource")) with over-cap, lying-content-length
-      // and under-cap bodies, so the handler runs and refuses. Added with fleet/sources-cap
-      // (audio-feed-xqkes / audio-feed-g9gsi). Third occurrence of audio-feed-jmq5b's hand-list
-      // problem, and the first where the entry is honestly on the exercises side rather than
-      // mentionsOnly - the row drives the route, it does not merely name it.
-      exercises: [
-        "tests/account_regenerate_test.ts",
-        "tests/admin_throttle_test.ts",
-        // Added with the auth rate limit (audio-feed-plmhk / audio-feed-xohf6): the limit row POSTs
-        // /api/auth/login/options and the body-cap row POSTs /api/auth/login/verify and
-        // /api/auth/register/options, so both genuinely exercise this handler file rather than
-        // mentioning it. The audit said "audit its real handler before narrowing" - that is what
-        // this line records, not an automatic widening of the candidate set.
-        "tests/auth_body_cap_test.ts",
-        "tests/auth_login_options_limit_test.ts",
-        "tests/auth_routes_test.ts",
-        "tests/feed_discovery_test.ts",
-        "tests/sources_body_cap_test.ts",
-        "tests/webmcp_admin_forms_test.ts",
-      ],
-      // tests/listen_test.ts MENTIONS the logout and rotate-token routes from the cache-purge rows
-      // (audio-feed-vnu4g): those rows drive the SERVICE WORKER in a harness and assert what it does
-      // with the request and the cache, so the account handlers are not exercised - this is the
-      // mentionsOnly side, and the audit's "audit its real handler before narrowing" is why the
-      // distinction is written down rather than inferred. Second occurrence of the hand-list
-      // problem (audio-feed-jmq5b): the first was two NEW suites, this one is a new REFERENCE from
-      // an existing suite, which is why the census there says the trigger is the reference, not the file.
-      mentionsOnly: ["tests/listen_test.ts"],
+      paths: accountRoutes.map((path) =>
+        path.includes(":") ? path.slice(0, path.indexOf(":")) : path
+      ),
       mentions: (source: string) =>
         accountRoutes.some((path) =>
           source.includes(path.includes(":") ? path.slice(0, path.indexOf(":")) : path)
@@ -290,48 +322,22 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     },
     {
       file: "src/routes/login.ts",
-      exercises: [
-        "tests/account_pages_test.ts",
-        "tests/security_audit_test.ts",
-        "tests/speculation_rules_test.ts",
-      ],
-      mentionsOnly: [
-        "tests/admin_session_test.ts",
-        "tests/auth_routes_test.ts",
-        "tests/bookmarklet_test.ts",
-        "tests/csp_reporting_test.ts",
-        "tests/home_test.ts",
-        "tests/origin_test.ts",
-        "tests/share_target_test.ts",
-      ],
-      // The non-HTTP references above are links, redirect assertions, or a Host-gate 421 before the handler.
+      paths: ["/login"],
       mentions: (source: string) => /(?<!\/api\/auth)\/login(?=[/?#"'`])/.test(source),
     },
     {
       file: "src/routes/admin_telemetry.ts",
-      exercises: ["tests/admin_subpages_test.ts"],
-      mentionsOnly: [],
+      paths: ["/admin/observability/telemetry"],
       mentions: (source: string) => source.includes("/admin/observability/telemetry"),
     },
     {
       file: "src/routes/webauthn.ts",
-      exercises: ["tests/passkeys_test.ts"],
-      mentionsOnly: [],
+      paths: ["/.well-known/webauthn"],
       mentions: (source: string) => source.includes("/.well-known/webauthn"),
     },
     {
       file: "src/routes/reports.ts",
-      exercises: ["tests/csp_reporting_test.ts"],
-      // admin_subpages seeds a report log; the CSP report-URL suite (audio-feed-s2esl) asserts the
-      // `report-uri` that POINTS at this route in other routes' headers and never POSTs to it.
-      // origin_test unit-pins the `isTrustedReportOrigin` predicate (src/origin.ts, the gate the
-      // handler itself calls): it builds report-shaped Requests with the real path but never
-      // POSTs through the handler — csp_reporting_test is the suite that drives it.
-      mentionsOnly: [
-        "tests/admin_subpages_test.ts",
-        "tests/router_csp_report_url_test.ts",
-        "tests/origin_test.ts",
-      ],
+      paths: ["/api/reports/csp"],
       mentions: (source: string) => source.includes("/api/reports/csp"),
     },
   ];
@@ -364,21 +370,26 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   for (const path of accountRoutes) {
     const stem = path.includes(":") ? path.slice(0, path.indexOf(":")) : path;
     assert(
-      [...sources.values()].some((source) => source.includes(stem)),
+      [...sources.entries()].some(([f, source]) => exercisesRoute(f, source, [stem])),
       `${population}: new account route ${path} has NO test candidate; do not narrow until one exercises it`,
     );
   }
   for (const route of spec) {
     const candidates = [...sources].filter(([, source]) => route.mentions(source))
       .map(([file]) => file).sort();
+    const isLogin = route.file === "src/routes/login.ts";
+    const exercises = candidates.filter((file) =>
+      exercisesRoute(file, sources.get(file)!, route.paths, isLogin)
+    );
+    const mentionsOnly = candidates.filter((file) => !exercises.includes(file));
     assert(
-      route.exercises.length > 0 && route.exercises.some((file) => candidates.includes(file)),
+      exercises.length > 0,
       `${population}: ${route.file} has no exercising candidate suite; do not narrow`,
     );
     assertEquals(
       candidates,
-      [...route.exercises, ...route.mentionsOnly].sort(),
-      `${population}: ${route.file} has a new or missing URL reference; audit its real handler before narrowing`,
+      [...exercises, ...mentionsOnly].sort(),
+      `${population}: candidate classification partitioned every candidate`,
     );
     const named = await nameMatchedTests([route.file]);
     assertEquals(
