@@ -29,12 +29,41 @@ import {
   removeDirWhenQuiet,
   waitForChromeProfileUnused,
 } from "../scripts/proof-helper.ts";
-import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
+import { HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
 const TOKEN = "token-activity";
+
+/**
+ * audio-feed-fxh3i: the readiness navigation-dispatch wait ceiling is DERIVED, not a fixed
+ * attempt count or literal.
+ *
+ * In tests/listen_activity_test.ts, the row "player page readiness: a navigation whose server
+ * never answers fails BY NAME, bounded, with no hung Page.navigate" (audio-feed-hqtfo) state-gates
+ * on the browser dispatching the navigation to the server (handlerEntered === 1). The old wait loop
+ * was 50 x 100ms = 5s (raised empirically to 150 x 100ms = 15s in cache-bound after 3 fast-gate
+ * timeouts at 79-way parallelism). 5s sits below this host's measured starvation floor
+ * (MEASURED_STARVED_POLL_MS = 8_000 in scripts/proof-cdp.ts / tests/proof_cdp_test.ts:309 under 8-way
+ * saturation, audio-feed-6gst1).
+ *
+ * A diagnosis lane confirmed alone-runs took 24s/26s/27s total row time (all pass). A headroom
+ * of 2x the measured starvation floor (2 x 8_000ms = 16_000ms, clearing the 15s / 150-loop empirical
+ * widen) cleared the observed failures under 79-way parallelism while keeping the wait bounded.
+ */
+export const READINESS_HEADROOM = 2;
+
+/**
+ * The readiness navigation-dispatch ceiling for a given starved-poll floor, as a PURE function
+ * so the derivation can be asked a question it did not come with: a literal cannot answer
+ * `readinessPollMs(16_000)`, so the rule becomes falsifiable instead of declarable (audio-feed-fxh3i).
+ */
+export function readinessPollMs(floorMs: number): number {
+  return READINESS_HEADROOM * floorMs;
+}
+
+export const READINESS_POLL_MS = readinessPollMs(MEASURED_STARVED_POLL_MS);
 
 async function seeded(configOverride: Partial<typeof config> = {}) {
   // Overrides let a test serve the app on a DIFFERENT origin than the file-level default:
@@ -1440,8 +1469,12 @@ Deno.test({
 
       // The navigation must have REACHED the never-answering server (state-gated on the
       // handler firing, not slept): without this the row would pass vacuously on a connection
-      // error instead of on a held response.
-      for (let i = 0; i < 150 && handlerEntered === 0; i++) await sleep(100);
+      // error instead of on a held response. The ceiling is READINESS_POLL_MS (2 x the
+      // measured starved-poll floor, audio-feed-fxh3i), bounded by deadline rather than a fixed loop count.
+      const navDeadline = Date.now() + READINESS_POLL_MS;
+      while (Date.now() < navDeadline && handlerEntered === 0) {
+        await sleep(100);
+      }
       assertEquals(
         handlerEntered,
         1,
@@ -1502,3 +1535,112 @@ Deno.test({
     }
   },
 });
+
+Deno.test(
+  "audio-feed-fxh3i: the readiness navigation-dispatch wait ceiling stays derived from the measured starved-poll floor",
+  () => {
+    assertEquals(READINESS_HEADROOM, 2);
+    assert(
+      READINESS_POLL_MS > 5000,
+      "the readiness ceiling must exceed the old fixed 5000ms that failed under gate load",
+    );
+    // A VALUE assertion cannot answer "is this derived?" - a literal equal to the product
+    // satisfies it (audio-feed-p3hmf: 2 * 8_000 stayed green through mutants). So ask the
+    // RULE instead: a synthetic floor a literal could not have anticipated.
+    assertEquals(
+      readinessPollMs(16_000),
+      32_000,
+      "the ceiling must track the floor, not today's value",
+    );
+    assertEquals(
+      readinessPollMs(1),
+      READINESS_HEADROOM,
+      "headroom factor must scale the floor",
+    );
+    assertEquals(readinessPollMs(MEASURED_STARVED_POLL_MS), READINESS_POLL_MS);
+    assertEquals(
+      READINESS_POLL_MS,
+      2 * MEASURED_STARVED_POLL_MS,
+      "2x the measured floor, on the nose",
+    );
+
+    // The rule is pinned above, but the SITE is not: a literal equal to readinessPollMs(floor)
+    // still passes every value assertion (measured - `2 * 8_000` and `16_000` both stay green
+    // because they equal the product today). So pin the definition line itself: comments
+    // stripped first, because a comment naming the factors is exactly how the fake passed
+    // the previous guard.
+    const rawSource = Deno.readTextFileSync(
+      new URL("listen_activity_test.ts", import.meta.url),
+    );
+    const stripped = codeOnly(rawSource);
+    const definition = stripped
+      .split("\n")
+      .find((line) => line.startsWith("export const READINESS_POLL_MS ="));
+    assertEquals(
+      definition,
+      "export const READINESS_POLL_MS = readinessPollMs(MEASURED_STARVED_POLL_MS);",
+      "READINESS_POLL_MS must be the RULE applied to the measured floor, not a literal that equals it today",
+    );
+
+    // A correct DEFINITION proves nothing about its USE: swapping the readiness row's
+    // `Date.now() + READINESS_POLL_MS` for `Date.now() + 16_000` leaves the constant correct and
+    // unused and every value assertion above green, while the wait silently stops being derived.
+    // That is the substitution hole one level out from the definition, so pin the usage's shape:
+    // follow the row's state-gate loop to the variable it compares against `Date.now()`, then read
+    // that variable's binding and compare it to the derived expression with whitespace collapsed.
+    // Not the bare-literal BAN below: that ban matches digit strings (`\b(150|15_000|15000)\b`), so
+    // `16_000`, `150_000` and `1.5e4` all slip past it - the teeth for the usage site are here.
+    const readinessGates = [
+      ...stripped.matchAll(
+        /while\s*\(\s*Date\.now\(\)\s*<\s*([A-Za-z_$][\w$]*)\s*&&\s*handlerEntered\s*===\s*0\s*\)/g,
+      ),
+    ];
+    assertEquals(
+      readinessGates.length,
+      1,
+      "the readiness row must state-gate on exactly one `while (Date.now() < <deadline> && " +
+        "handlerEntered === 0)` loop - the usage pin below reads that loop's deadline binding",
+    );
+    const deadlineVariable = readinessGates[0]?.[1];
+    assert(
+      deadlineVariable,
+      "the readiness state-gate loop must compare `Date.now()` against a named deadline variable",
+    );
+    const deadlineBinding = stripped.match(
+      new RegExp(`(?:const|let)\\s+${deadlineVariable}\\s*=([^;]+);`),
+    );
+    const deadlineExpression = deadlineBinding?.[1];
+    assert(
+      deadlineExpression,
+      `the readiness loop's deadline \`${deadlineVariable}\` must be bound by a const/let ` +
+        "declaration this pin can read",
+    );
+    assertEquals(
+      deadlineExpression.replace(/\s+/g, " ").trim(),
+      "Date.now() + READINESS_POLL_MS",
+      "the readiness deadline must be DERIVED where it is USED: `Date.now() + 16_000` there " +
+        "keeps READINESS_POLL_MS correct and unused, so the wait stops tracking the measured " +
+        "floor while every value assertion above stays green (audio-feed-fxh3i)",
+    );
+
+    // The file must not contain a bare 150 or 15_000 / 15000 where the derived constant belongs.
+    const bareLiteralPattern = new RegExp("\\b(15" + "0|15_" + "000|15" + "000)\\b");
+    assertEquals(
+      bareLiteralPattern.test(stripped),
+      false,
+      "the file must not contain a bare " + ["15" + "0", "15_" + "000"].join(" or ") +
+        " where the derived readiness constant belongs",
+    );
+  },
+);
+
+/**
+ * Strip line and block comments so a check about CODE cannot be satisfied by PROSE. A comment that
+ * names the factors is not a derivation (audio-feed-p3hmf: `4 * 8_000 // HEADROOM x FLOOR` passed
+ * every text and value check the previous guard had).
+ */
+function codeOnly(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|\s)\/\/.*$/gm, "$1");
+}
