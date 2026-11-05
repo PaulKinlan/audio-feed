@@ -9,6 +9,7 @@
  *  (b) a body over the cap is refused with 413 HttpError (payload_too_large)
  *  (c) the refusal does not read/drain the entire body stream
  *  (d) cannot be bypassed by chunked encoding or mismatched content-type
+ *  (e) cannot be bypassed by a LYING small declared content-length, which only the read bound catches
  */
 import { assert, assertEquals } from "@std/assert";
 import { createApp } from "../src/app.ts";
@@ -185,6 +186,43 @@ Deno.test("POST /api/sources: chunked body over cap is refused 413 (audio-feed-x
     }),
   );
   assertEquals(res.status, 413, "streamed body exceeding cap must be refused 413");
+});
+
+Deno.test("POST /api/sources: lying small content-length is refused 413 by the read bound (audio-feed-xqkes, audio-feed-g9gsi)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser());
+  const { fetch } = app(stores);
+
+  const totalBytes = 100 * 1024; // 100 KiB of application/json behind a 16-byte claim
+  const instrumented = createInstrumentedStream(totalBytes);
+  const res = await fetch(
+    new Request(`${BASE}/api/sources`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        // The header deliberately disagrees with the body: declaring a small length is the
+        // attacker's move, because the `declared > cap` fast path then never fires. A stream
+        // body keeps this header as written (a string body is re-measured by the runtime), so
+        // the 413 below can only come from the bounded read.
+        "content-length": "16",
+        "x-feed-token": "token-user-1",
+      },
+      body: instrumented.stream,
+      // @ts-ignore duplex stream
+      duplex: "half",
+    }),
+  );
+  assertEquals(res.status, 413, "a lying small content-length must not hide an oversized body");
+  assertEquals((await res.json()).error, "payload_too_large");
+  assert(
+    instrumented.getBytesRead() < totalBytes,
+    `must not drain entire body (read ${instrumented.getBytesRead()} of ${totalBytes})`,
+  );
+  assert(
+    instrumented.getBytesRead() <= MAX_ACCOUNT_BODY_BYTES + 2048,
+    `bytes read (${instrumented.getBytesRead()}) must be bounded close to cap (${MAX_ACCOUNT_BODY_BYTES})`,
+  );
+  assert(instrumented.isCancelled(), "underlying stream must be cancelled on overflow");
 });
 
 Deno.test("POST /api/sources: non-JSON content-type with declared length over cap refused 413", async () => {
