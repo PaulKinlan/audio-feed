@@ -556,7 +556,11 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       if (!isSynthesisAuthorized(user)) {
         return reply({ error: "Your account is not approved for audio." }, 403);
       }
-      const b = await req.json().catch(() => ({})) as { scope?: unknown };
+      // This route called `req.json()` directly before the cap existed, so it parses whatever the
+      // content-type says: a header-less {"scope":"all"} still means "all" (audio-feed-3t01u).
+      const b = (await readCappedJson(req, MAX_ACCOUNT_BODY_BYTES, {
+        requireJsonContentType: false,
+      })) as { scope?: unknown };
       const scope = b.scope === "failed" ? "failed" : b.scope === "all" ? "all" : "outdated";
       return reply({ ok: true, queued: await deps.regenerateOutdated(user.id, scope) });
     },

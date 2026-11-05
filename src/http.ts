@@ -126,20 +126,37 @@ export function payloadTooLarge(
  *
  * Fast path: a declared `content-length` over `cap` is refused immediately with 413 HttpError
  * without touching the body stream.
- * Content-type: non-JSON content types return `{}` without reading the body.
+ * Content-type: by default non-JSON content types return `{}` without reading the body, which is
+ * what the routes that already gated on the header did before they were capped (audio-feed-3t01u).
+ * Routes that never consulted the header pass `requireJsonContentType: false` and get their JSON
+ * parsed whatever the header says, so adding the cap does not change which bodies they honour.
  * Read bound: streamed/chunked bodies (which omit Content-Length or may report an untruthful one)
  * are read through `limitBodyStream` via `readCappedBody`, which caps the read to at most `cap + 1`
- * bytes and cancels the stream before throwing 413 HttpError.
+ * bytes and cancels the stream before throwing 413 HttpError. The cap applies to every caller.
  */
+export interface ReadCappedJsonOptions {
+  /**
+   * Whether a request must declare `application/json` for its body to be parsed.
+   *
+   * `true` (the default) preserves the pre-cap behaviour of the routes that already
+   * answered `{}` for a header-less or `text/plain` body. `false` is for the routes that
+   * called `req.json()` directly: they parsed regardless of the header, so a header-less
+   * `{"scope":"all"}` must still take effect (audio-feed-3t01u).
+   */
+  requireJsonContentType?: boolean;
+}
+
 export async function readCappedJson(
   req: Request,
   cap: number = MAX_ACCOUNT_BODY_BYTES,
+  options: ReadCappedJsonOptions = {},
 ): Promise<Record<string, unknown>> {
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > cap) {
     throw new HttpError(payloadTooLarge());
   }
-  if (!(req.headers.get("content-type") ?? "").includes("application/json")) return {};
+  const gated = options.requireJsonContentType ?? true;
+  if (gated && !(req.headers.get("content-type") ?? "").includes("application/json")) return {};
   if (!req.body) return {};
   const capped = await readCappedBody(req.body, cap);
   if (capped.overflow) throw new HttpError(payloadTooLarge());
