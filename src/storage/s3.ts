@@ -8,6 +8,7 @@
  */
 
 import { AwsClient } from "aws4fetch";
+import { escapeXml } from "../feed/rss.ts";
 import { assertSafeBlobKey } from "./blob_key.ts";
 import {
   type BlobInfo,
@@ -257,11 +258,7 @@ export class S3BlobStore implements BlobStore {
       const completeUrl = new URL(this.#objectUrl(key));
       completeUrl.searchParams.set("uploadId", uploadId);
 
-      const completeXml = `<CompleteMultipartUpload>${
-        parts
-          .map((p) => `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${p.etag}</ETag></Part>`)
-          .join("")
-      }</CompleteMultipartUpload>`;
+      const completeXml = completeMultipartXml(parts);
 
       const completeHeaders: Record<string, string> = {
         "content-type": "application/xml",
@@ -429,6 +426,27 @@ function parseTotalFromContentRange(res: Response): number | null {
   if (!header) return null;
   const match = /\/(\d+)$/.exec(header.trim());
   return match?.[1] ? Number(match[1]) : null;
+}
+
+/**
+ * The CompleteMultipartUpload document for a finished upload (audio-feed-kply1).
+ *
+ * Every value here comes from the endpoint's own responses: the ETag of each part
+ * is a response header, so it is remote-controlled text, not a value this codebase
+ * wrote. Interpolated raw, an ETag carrying `</ETag>` ends the element and lets the
+ * endpoint add parts to a request the app signs (verified: it parses back as two
+ * parts). The repo's existing `escapeXml` keeps the document well-formed and
+ * round-trips the value; the cost is that the quotes around a real S3 ETag reach
+ * the wire as `&quot;`, which every XML parser decodes back to the same ETag.
+ */
+export function completeMultipartXml(parts: Array<{ partNumber: number; etag: string }>): string {
+  return `<CompleteMultipartUpload>${
+    parts
+      .map((p) =>
+        `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${escapeXml(p.etag)}</ETag></Part>`
+      )
+      .join("")
+  }</CompleteMultipartUpload>`;
 }
 
 async function safeText(res: Response): Promise<string> {

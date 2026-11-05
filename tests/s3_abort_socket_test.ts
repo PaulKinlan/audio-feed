@@ -19,7 +19,8 @@
  *   loopback socket buffers, not by time.
  */
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
+import { DOMParser } from "npm:linkedom@0.18.12";
 import { S3BlobStore } from "../src/storage/s3.ts";
 
 // docs/speed.md rule-2 bound: this real-time deadline is a HANG GUARD, not a
@@ -236,9 +237,23 @@ Deno.test("S3BlobStore.put performs multipart upload with 8 MB parts for payload
       bytes: 6 * 1024 * 1024,
     });
 
-    assertStringIncludes(completePayload, '<PartNumber>1</PartNumber><ETag>"etag-part-1"</ETag>');
-    assertStringIncludes(completePayload, '<PartNumber>2</PartNumber><ETag>"etag-part-2"</ETag>');
-    assertStringIncludes(completePayload, '<PartNumber>3</PartNumber><ETag>"etag-part-3"</ETag>');
+    // Parsed, not substring-matched (audio-feed-kply1): the ETag is now XML-escaped at the
+    // construction site, so a quoted ETag reaches the wire as &quot;...&quot;. The VALUE is
+    // what this test is about, so it asserts the pairing the endpoint will read back.
+    const completed = new DOMParser().parseFromString(completePayload, "text/xml") as unknown as {
+      querySelectorAll(selector: string): ArrayLike<{
+        querySelector(selector: string): { textContent: string | null } | null;
+      }>;
+    };
+    const completedParts = Array.from(completed.querySelectorAll("Part")).map((part) => ({
+      partNumber: part.querySelector("PartNumber")?.textContent,
+      etag: part.querySelector("ETag")?.textContent,
+    }));
+    assertEquals(completedParts, [
+      { partNumber: "1", etag: '"etag-part-1"' },
+      { partNumber: "2", etag: '"etag-part-2"' },
+      { partNumber: "3", etag: '"etag-part-3"' },
+    ]);
   } finally {
     await server.shutdown();
   }
