@@ -339,7 +339,7 @@ Deno.test("audio-feed-kp30l, audio-feed-l9l63, audio-feed-uhfis: upload requests
   assertEquals(episodes.length, bound, "refused upload must not commit an episode row");
 });
 
-Deno.test("audio-feed-l9l63, audio-feed-uhfis: feed subscription and polling are bounded by per-poll item caps and URL deduplication, not the creation limiter", async () => {
+Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka: subscription is capped per poll; periodic polling defers until funded allowance returns", async () => {
   const { ctx } = await setup();
   const { fetchArticle } = countingFetch();
   const ingestHandler = createIngestHandler(ctx, { fetchArticle }) as IngestRoute;
@@ -410,14 +410,23 @@ Deno.test("audio-feed-l9l63, audio-feed-uhfis: feed subscription and polling are
   );
   assertEquals(rePoll.poll.skipped, 5, "all 5 previously seen items skipped");
 
-  // 4. Batch feed polling (runFeedPollBatch) also succeeds and is bounded by DEFAULT_MAX_ITEMS (10)
-  const batchResult = await runFeedPollBatch(ctx, {
-    ...mockDeps,
-    minIntervalMs: 0,
-    maxItemsPerSource: DEFAULT_MAX_ITEMS,
-  });
-  // Both subscribed sources are polled without being refused by creation cap.
-  // The remaining 3 items (items 5, 6, 7) that exceeded the 5-item subscription ceiling are now queued by periodic polling.
+  // 4. At zero allowance the periodic batch sees the feed, but defers all three new items.
+  const pollBatch = () =>
+    runFeedPollBatch(ctx, {
+      ...mockDeps,
+      minIntervalMs: 0,
+      maxItemsPerSource: DEFAULT_MAX_ITEMS,
+    });
+  const deferredBatch = await pollBatch();
+  assertEquals(deferredBatch.polled, 2);
+  assertEquals(deferredBatch.queued, 0);
+  // After the 24h window expires, those same three URLs remain undiscovered and are queued.
+  await new SlidingWindowRateLimiter(
+    INGEST_CREATION_RATE,
+    ctx.stores.metadata,
+    INGEST_CREATION_WINDOW,
+  ).reset(USER_ID);
+  const batchResult = await pollBatch();
   assertEquals(batchResult.polled, 2);
   assertEquals(
     batchResult.queued,
@@ -427,10 +436,6 @@ Deno.test("audio-feed-l9l63, audio-feed-uhfis: feed subscription and polling are
   assertEquals(DEFAULT_MAX_ITEMS, 10, "periodic poll bound is DEFAULT_MAX_ITEMS (10)");
 
   // 5. Running the batch poller again queues 0 new items because all 8 items are now deduped in KV
-  const secondBatch = await runFeedPollBatch(ctx, {
-    ...mockDeps,
-    minIntervalMs: 0,
-    maxItemsPerSource: DEFAULT_MAX_ITEMS,
-  });
+  const secondBatch = await pollBatch();
   assertEquals(secondBatch.queued, 0, "subsequent poll queues 0 items due to URL deduplication");
 });

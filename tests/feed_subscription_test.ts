@@ -12,12 +12,14 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import {
+  MAX_FEED_ITEMS_EXAMINED,
   parseFeedItems,
   pollFeedSource,
   runFeedPollBatch,
   sourceIdForFeed,
 } from "../src/ingest/feed.ts";
-import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { ingestCreationLimiter } from "../src/compose/ingest.ts";
 import type { MetadataStore } from "../src/storage/mod.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult, GeminiGenerateContentRequest } from "../src/tts/gemini.ts";
@@ -138,6 +140,153 @@ async function subscriberSource(feedUrl = "https://stratechery.com/feed/") {
   await stores.metadata.putSource(source);
   return { stores, ctx: { config, stores }, source };
 }
+
+/** One subscriber and ten distinct, retained feed items; the SAME limiter also serves ingest/upload. */
+async function deferralFixture(budget: number) {
+  const stores = memoryStores();
+  const user = makeUser({ id: "deferral-user", dailyEpisodeBudget: budget });
+  await stores.metadata.putUser(user);
+  const source = makeSource({ id: "deferral-source", userId: user.id, feedUrl: `${BASE}/feed` });
+  await stores.metadata.putSource(source);
+  const ctx = { config, stores };
+  const xml = `<rss><channel>${
+    Array.from({ length: 10 }, (_, i) =>
+      `<item><title>Post ${i}</title><link>${BASE}/post-${i}</link></item>`).join("")
+  }</channel></rss>`;
+  const deps = { transport: feedTransport(xml), fetchArticle: article("Post", "Body") };
+  const limiter = ingestCreationLimiter(ctx, user);
+  const episodes = () => stores.metadata.listEpisodes({ userId: user.id });
+  return { stores, user, source, ctx, deps, limiter, episodes };
+}
+
+Deno.test("audio-feed-ukuka: exhausted allowance defers without seeing items; later allowance queues them", async () => {
+  const { stores, user, source, ctx, deps, limiter, episodes } = await deferralFixture(10);
+  for (let n = 0; n < 10; n++) assert((await limiter.check(user.id)).allowed);
+  const first = await pollFeedSource(ctx, source, deps);
+  assertEquals(first.queued, 0);
+  assertEquals(first.deferred, 10);
+  assertEquals(first.skipped, 0, "deferred does not mean already seen");
+  assertEquals((await episodes()).length, 0);
+  assertEquals(await stores.metadata.findArticleByUrl(user.id, `${BASE}/post-0`), null);
+  const logs = await stores.metadata.listLogs({ limit: 20 });
+  assert(logs.some((log) =>
+    log.type === "feed.poll.deferred" &&
+    log.context?.sourceId === source.id && log.context?.remaining === 0
+  ));
+  await limiter.reset(user.id); // simulate the rolling window expiring before the next poll
+  const second = await pollFeedSource(ctx, source, deps);
+  assertEquals(second.queued, 10);
+  assertEquals((await episodes()).length, 10);
+});
+
+Deno.test("audio-feed-ukuka: partial allowance queues exactly its remaining credits, then recovers remainder", async () => {
+  const { user, source, ctx, deps, limiter, episodes } = await deferralFixture(10);
+  for (let n = 0; n < 7; n++) assert((await limiter.check(user.id)).allowed);
+  const first = await pollFeedSource(ctx, source, deps);
+  assertEquals(first.queued, 3);
+  assertEquals(first.deferred, 7);
+  assertEquals((await episodes()).length, 3);
+  assertEquals((await limiter.peek(user.id)).remaining, 0);
+  await limiter.reset(user.id);
+  const second = await pollFeedSource(ctx, source, deps);
+  assertEquals(second.queued, 7);
+  assertEquals(second.skipped, 3);
+  assertEquals((await episodes()).length, 10);
+});
+
+Deno.test("audio-feed-ukuka: full allowance leaves the ten-per-poll behavior unchanged", async () => {
+  const { user, source, ctx, deps, limiter, episodes } = await deferralFixture(10);
+  const result = await pollFeedSource(ctx, source, deps);
+  assertEquals(result.items, 10);
+  assertEquals(result.queued, 10);
+  assertEquals(result.deferred, 0);
+  assertEquals((await episodes()).length, 10);
+  assertEquals((await limiter.peek(user.id)).remaining, 0);
+});
+
+Deno.test("audio-feed-ukuka: deferral never consumes a creation credit", async () => {
+  const { user, source, ctx, deps, limiter } = await deferralFixture(2);
+  const before = (await limiter.peek(user.id)).remaining;
+  const first = await pollFeedSource(ctx, source, deps);
+  assertEquals(first.queued, 2);
+  assertEquals(first.deferred, 8);
+  assertEquals((await limiter.peek(user.id)).remaining, before - first.queued);
+  const second = await pollFeedSource(ctx, source, deps);
+  assertEquals(second.queued, 0);
+  assertEquals(second.deferred, 8);
+  assertEquals((await limiter.peek(user.id)).remaining, 0);
+});
+
+function longFeed(count: number) {
+  return `<rss><channel>${
+    Array.from({ length: count }, (_, i) =>
+      `<item><title>Post ${i}</title><link>${BASE}/post-${i}</link></item>`).join("")
+  }</channel></rss>`;
+}
+
+Deno.test("audio-feed-ukuka: ten already-seen URLs do not hide five new items beyond them", async () => {
+  const { stores, user, source, ctx, episodes } = await deferralFixture(50);
+  for (let i = 0; i < 10; i++) {
+    await stores.metadata.putArticle(makeArticle({
+      id: `seen-${i}`,
+      userId: user.id,
+      sourceId: source.id,
+      url: `${BASE}/post-${i}`,
+    }));
+  }
+  const poll = await pollFeedSource(ctx, source, {
+    transport: feedTransport(longFeed(15)),
+    fetchArticle: article("Post", "Body"),
+  });
+  assertEquals(poll.queued, 5, "pre-slicing at ten before dedup would strand all five");
+  assertEquals(poll.skipped, 10);
+  assertEquals((await episodes()).length, 5);
+});
+
+Deno.test("audio-feed-ukuka: a scan window stops at its bound, logs, and continues on the next poll", async () => {
+  const { stores, user, source, ctx, episodes } = await deferralFixture(50);
+  for (let i = 0; i < MAX_FEED_ITEMS_EXAMINED; i++) {
+    await stores.metadata.putArticle(makeArticle({
+      id: `seen-${i}`,
+      userId: user.id,
+      sourceId: source.id,
+      url: `${BASE}/post-${i}`,
+    }));
+  }
+  const deps = {
+    transport: feedTransport(longFeed(MAX_FEED_ITEMS_EXAMINED + 5)),
+    fetchArticle: article("Post", "Body"),
+  };
+  const first = await pollFeedSource(ctx, source, deps);
+  assertEquals(first.queued, 0);
+  assertEquals(first.skipped, MAX_FEED_ITEMS_EXAMINED);
+  const logs = await stores.metadata.listLogs({ limit: 20 });
+  assert(logs.some((log) =>
+    log.type === "feed.poll.scan_exhausted" &&
+    log.context?.sourceId === source.id &&
+    log.context?.examined === MAX_FEED_ITEMS_EXAMINED &&
+    log.context?.selected === 0 && log.context?.remainingUnknown === 5
+  ));
+  assertEquals(
+    (await stores.metadata.getSource(user.id, source.id))?.feedScanOffset,
+    MAX_FEED_ITEMS_EXAMINED,
+  );
+  const next = await pollFeedSource(ctx, source, deps);
+  assertEquals(next.queued, 5);
+  assertEquals((await episodes()).length, 5);
+});
+
+Deno.test("audio-feed-ukuka: fifty unseen items still queue at most ten per periodic poll", async () => {
+  const { source, ctx, episodes } = await deferralFixture(50);
+  const deps = { transport: feedTransport(longFeed(50)), fetchArticle: article("Post", "Body") };
+  const first = await pollFeedSource(ctx, source, deps);
+  assertEquals(first.items, 10);
+  assertEquals(first.queued, 10);
+  assertEquals((await episodes()).length, 10);
+  const next = await pollFeedSource(ctx, source, deps);
+  assertEquals(next.queued, 10);
+  assertEquals((await episodes()).length, 20);
+});
 
 Deno.test("polling a feed queues one pending episode per new item", async () => {
   const { stores, ctx, source } = await subscriberSource();

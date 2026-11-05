@@ -232,6 +232,8 @@ export interface Source {
   codeHandling?: CodeHandling;
   createdAt: string;
   lastPolledAt?: string;
+  /** Next feed index to examine when a bounded unseen scan could not finish. */
+  feedScanOffset?: number;
   lastPollError?: string;
 }
 

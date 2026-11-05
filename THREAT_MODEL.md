@@ -95,19 +95,27 @@ routes, listed separately because the attacker's position there is different.
   (`src/storage/kv/episodes.ts:64-74`), so a paid attempt that ends `failed` is spent and never
   counted — and counting attempts instead would change what the daily budget MEANS (one broken
   article consuming three of a subscriber's fifty) while still not bounding how many episodes exist.
-  Creation is what a token chooses and is countable before anything is paid. Worst case paid-attempt
-  spend per subscriber per UTC day therefore falls from unbounded to **50 creations x `maxAttempts`
-  3 = 150 paid attempts**, and a same-URL resubmission — which IS a new episode by request
+  Creation is what a token chooses and is countable before anything is paid. The shared
+  ingest/upload/periodic-poll creation window bounds that subset to **50 creations x `maxAttempts`
+  3 = 150 paid attempts** per rolling 24 hours at the default funded budget; initial
+  subscriptions and operator actions are outside this window. A same-URL resubmission — which IS
+  a new episode by request
   (`src/storage/kv/articles.ts:251`) — is charged like any other creation.
 - **Residuals that remain:** (a) those 150 attempts still do not reach the completion counter: the
   bound limits how many episodes can be attempted, not how spend is accounted, and the per-episode
   segment/attempt ceilings still multiply per episode (see boundary 8). (b) The cap covers
-  user-initiated submits only (/api/ingest and /api/upload). Feed subscription initial polls and
-  periodic feed polling create episodes through `insertArticleWithEpisodeIfAbsent` (URL-deduped) and
-  are bounded instead by per-poll item caps (5 items on subscription initial poll, 10 items on
-  periodic poll `maxItemsPerSource`), polling cadence (15 min), and URL deduplication
-  (audio-feed-l9l63, audio-feed-uhfis) — deliberately not capped by the rolling 24h creation limiter
-  so legitimate subscriptions and feed updates are never refused. (c) One subscriber's cap does not
+  the *refusal* on user-initiated submits only (/api/ingest and /api/upload). Subscription initial polls remain
+  bounded by 5 items per source, not by a subscriber allowance. Periodic feed polls are bounded
+  by 10 items per source per poll, not by that cap alone per subscriber: 96 polls/day across S
+  sources could otherwise enqueue up to 960 x S episodes/day. Periodic polls now use the SAME
+  rolling 24h funded creation limiter as ingest/upload to defer new items beyond the subscriber's
+  remaining allowance, leaving them unmarked for subsequent polls; they never refuse subscriptions
+  or discard feed updates. Polls examine at most 100 feed items' URLs per source per tick, walking
+  past seen URLs to select up to 10 unseen items; a persisted offset resumes a scan window on the
+  next tick when 100 lookups were insufficient. Polls log deferred counts, remaining allowance,
+  and exhausted scan windows per source. Parsing the fetched XML document is still proportional
+  to its byte size; the bound limits metadata URL lookups, not feed download or XML parsing.
+  (c) One subscriber's cap does not
   bound the fleet: N approved subscribers multiply it, which is why the global daily episode budget
   exists (boundary 8). (d) A submission that fails URL validation or the fetch still consumed its
   slot, so a mistyped URL costs a legitimate subscriber one of fifty — accepted: the count has to

@@ -111,19 +111,10 @@ export async function authorizeIngest(
  * WHY 24 HOURS, NOT A UTC DAY: the limiter is a sliding window; a rolling 24 hours cannot be reset
  * by waiting for midnight, and it needs no day key.
  *
- * SCOPE — user-initiated submits only (/api/ingest and /api/upload).
- *
- * WHY FEED POLLING AND SUBSCRIPTIONS ARE NOT CAPPED HERE (audio-feed-l9l63, audio-feed-uhfis):
- * Feed subscription initial polls (`subscribeToFeed`, src/ingest/feed.ts:490) and interval feed
- * polling (`pollSource`, src/ingest/feed.ts:320) create episodes through
- * `insertArticleWithEpisodeIfAbsent` (src/ingest/feed.ts:413). They are deliberately NOT subjected
- * to `refuseIngestOverCreationCap`: subjecting subscriptions or automated polling to a subscriber's
- * rolling 24-hour creation cap would refuse legitimate subscriptions or drop feed items when an
- * inbox user has reached their daily creation limit. Instead, feed paths are bounded by:
- * (1) per-poll item caps: `deps.maxItems ?? 5` on subscription initial poll, and
- *     `deps.maxItems ?? DEFAULT_MAX_ITEMS` (10 items) on periodic poll;
- * (2) atomic URL deduplication: `insertArticleWithEpisodeIfAbsent` CAS drops seen items without queueing;
- * (3) cadence and concurrency bounds: 15-minute `minIntervalMs`, batch size 5, and worker concurrency 4.
+ * SCOPE — ingest/upload refuse over-budget submissions; feed polls defer new items instead.
+ * Feed polling retains its per-source 10-item ceiling and CAS deduplication. A feed item not
+ * admitted by the shared creation window is not persisted as seen, so a later poll retries it.
+ * Subscription initial polls keep their separate 5-item ceiling (audio-feed-uhfis).
  *
  * WHY ADMIN-DRIVEN CREATION IS NOT CAPPED (audio-feed-l9l63):
  * Admin operations (createUser with initial feed, addSourceForUser, adminPollNow, admin regenerate) are
@@ -145,12 +136,23 @@ export const INGEST_CREATION_BOUND = "episode_creations_per_token";
 /**
  * Count one accepted episode creation against `user`, or return the refusal.
  *
- * Keyed on the USER, not the client address: the spend unit is the account whose token pays, and
- * one subscriber may hold several tokens and several addresses. The check runs inside `authorize`,
- * i.e. after identity resolves and BEFORE the article fetch — so a refused submit costs one
- * rate-window write and no outbound fetch, and the count is on SUBMISSIONS, not on episodes that
- * happen to reach `ready`. That ordering is the whole point: a submission whose episode later
- * fails still consumed the slot, which is what the completion counter never charged for.
+ * The limiter is keyed on the USER, not the client address: one subscriber may hold
+ * several tokens and addresses. Both route checks and feed polls resolve the same
+ * funded budget and 24-hour storage row here.
+ */
+/** The shared funded creation window for ingest/upload and periodic feed polling. */
+export function ingestCreationLimiter(ctx: AppContext, user: User): SlidingWindowRateLimiter {
+  const { limit } = dailyEpisodeBudgetFor(user, ctx.config.defaultDailyEpisodeBudget);
+  return new SlidingWindowRateLimiter(
+    { maxRequests: limit, windowMs: INGEST_CREATION_RATE.windowMs },
+    ctx.stores.metadata,
+    INGEST_CREATION_WINDOW,
+  );
+}
+
+/**
+ * Count one submit BEFORE the article fetch, so a refused submit costs no outbound fetch.
+ * A submission whose episode later fails still consumed its creation slot.
  */
 export async function refuseIngestOverCreationCap(
   ctx: AppContext,
@@ -164,11 +166,7 @@ export async function refuseIngestOverCreationCap(
     ctx.config.defaultDailyEpisodeBudget,
   );
   const rate = { maxRequests: creationLimit, windowMs: INGEST_CREATION_RATE.windowMs };
-  const limit = await new SlidingWindowRateLimiter(
-    rate,
-    ctx.stores.metadata,
-    INGEST_CREATION_WINDOW,
-  ).check(user.id);
+  const limit = await ingestCreationLimiter(ctx, user).check(user.id);
   if (limit.allowed) return null;
   return Response.json(
     {
