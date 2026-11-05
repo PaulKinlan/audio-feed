@@ -254,6 +254,12 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   const spec = [
     {
       file: "src/routes/account_api.ts",
+      // tests/sources_body_cap_test.ts EXERCISES the account add-source route: its second half POSTs
+      // /api/account/sources (app.ts:386 -> account("addSource")) with over-cap, lying-content-length
+      // and under-cap bodies, so the handler runs and refuses. Added with fleet/sources-cap
+      // (audio-feed-xqkes / audio-feed-g9gsi). Third occurrence of audio-feed-jmq5b's hand-list
+      // problem, and the first where the entry is honestly on the exercises side rather than
+      // mentionsOnly - the row drives the route, it does not merely name it.
       exercises: [
         "tests/account_regenerate_test.ts",
         "tests/admin_throttle_test.ts",
@@ -266,6 +272,7 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
         "tests/auth_login_options_limit_test.ts",
         "tests/auth_routes_test.ts",
         "tests/feed_discovery_test.ts",
+        "tests/sources_body_cap_test.ts",
         "tests/webmcp_admin_forms_test.ts",
       ],
       // tests/listen_test.ts MENTIONS the logout and rotate-token routes from the cache-purge rows
