@@ -14,6 +14,7 @@ import { isAudioMode } from "../types.ts";
 import { resolveOrigin } from "../origin.ts";
 import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
+import { readCappedJson } from "../http.ts";
 import { approvedUserFor, forbidden, loadUserByFeedToken, notFound } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import type { ComposeDeps } from "./shared.ts";
@@ -223,10 +224,12 @@ export function createCreateSourceHandler(
     const resolved = await approvedUserFor(ctx, req);
     if ("denied" in resolved) return resolved.denied;
 
-    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown; codeHandling?: unknown } = {};
-    if ((req.headers.get("content-type") ?? "").includes("application/json")) {
-      body = await req.json().catch(() => ({}));
-    }
+    const body = (await readCappedJson(req)) as {
+      feedUrl?: unknown;
+      title?: unknown;
+      modes?: unknown;
+      codeHandling?: unknown;
+    };
     if (typeof body.feedUrl !== "string" || body.feedUrl.trim() === "") {
       return Response.json({ error: "A feed URL is required." }, {
         status: 400,
