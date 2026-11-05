@@ -955,6 +955,45 @@ Deno.test("POST /api/admin/users/:id/sources with all-invalid modes returns 400"
   assertStringIncludes(body.error, "valid audio mode is required");
 });
 
+Deno.test("admin add-source answers a store failure with a fixed detail (audio-feed-4ppes)", async () => {
+  // THE DEFECT this pins: the admin catch-all answered with
+  // `String((error as Error)?.message ?? error)`, so a store or provider failure raised inside
+  // subscribeToFeed (putSource, listSources, insertArticleWithEpisodeIfAbsent, appendLog) was
+  // echoed to the admin caller verbatim - KV key, user id and blob path included. An admin
+  // session is not a licence to read bucket paths.
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  const storeMessage =
+    'kv put failed for ["source","user-1","stratechery"] at blob://audio-store/private-bucket';
+  stores.metadata.putSource = () => Promise.reject(new Error(storeMessage));
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({ feedUrl: "https://stratechery.com/feed/" }),
+    }),
+  );
+  const body = await res.json();
+  const raw = JSON.stringify(body);
+  // BOTH fragments, because a check that only looks for the bucket path passes a key-only leak.
+  assert(
+    !raw.includes('"source","user-1","stratechery"'),
+    `store key must not reach the admin caller: ${raw}`,
+  );
+  assert(
+    !raw.includes("private-bucket"),
+    `blob path must not reach the admin caller: ${raw}`,
+  );
+  assertEquals(body.error, "Could not subscribe to that feed.");
+  assertEquals(res.status, 502);
+});
+
 Deno.test("list-sourced user in openManage populates feedToken from sources response and master feed returns 200", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
