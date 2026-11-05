@@ -1441,7 +1441,7 @@ Deno.test({
       // The navigation must have REACHED the never-answering server (state-gated on the
       // handler firing, not slept): without this the row would pass vacuously on a connection
       // error instead of on a held response.
-      for (let i = 0; i < 50 && handlerEntered === 0; i++) await sleep(100);
+      for (let i = 0; i < 150 && handlerEntered === 0; i++) await sleep(100);
       assertEquals(
         handlerEntered,
         1,

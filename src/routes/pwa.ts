@@ -28,6 +28,23 @@ import type { AppContext } from "../app.ts";
 export const OFFLINE_CACHE = "audio-feed-offline-v1";
 export const SHELL_CACHE = "audio-feed-shell-v2";
 
+/**
+ * Maximum total bytes retained in the offline audio cache (audio-feed-cby).
+ *
+ * DERIVATION:
+ * 640 MiB ~ 3.9 h of audio at 48,000 B/s, ~61% of a 1 GB quota, so shell cache +
+ * responses + IndexedDB fit with headroom, and even one worst-case 64-segment
+ * episode cannot blow the quota.
+ * NOTE: a maximum-size episode (64 segments, ~580 MB) is ~91% of the 640 MiB budget,
+ * so the bound only has real headroom once an episode size cap exists.
+ */
+export const MAX_OFFLINE_BYTES = 640 * 1024 * 1024;
+
+/**
+ * Maximum number of episodes retained in the offline audio cache as a secondary guard.
+ */
+export const MAX_OFFLINE_EPISODES = 20;
+
 export const MANIFEST = {
   name: "Audio Feed",
   short_name: "AudioFeed",
@@ -89,7 +106,137 @@ export function handleServiceWorker(_ctx: RouteContext<AppContext>): Response {
 "use strict";
 const SHELL_CACHE = ${JSON.stringify(SHELL_CACHE)};
 const OFFLINE_CACHE = ${JSON.stringify(OFFLINE_CACHE)};
+const MAX_OFFLINE_BYTES = ${MAX_OFFLINE_BYTES};
+const MAX_OFFLINE_EPISODES = ${MAX_OFFLINE_EPISODES};
 const PRECACHE = ["/manifest.json", "/icon.svg"];
+
+/**
+ * Bound the offline audio cache by bytes (primary, MAX_OFFLINE_BYTES) and entry count
+ * (secondary guard, MAX_OFFLINE_EPISODES) so it cannot grow without limit (audio-feed-cby).
+ *
+ * SIZE DERIVATION:
+ * 640 MiB ~ 3.9 h of audio at 48,000 B/s, ~61% of a 1 GB quota, so shell cache +
+ * responses + IndexedDB fit with headroom, and even one worst-case 64-segment
+ * episode cannot blow the quota.
+ * NOTE: a maximum-size episode (64 segments, ~580 MB) is ~91% of the 640 MiB budget,
+ * so the bound only has real headroom once an episode size cap exists.
+ *
+ * SIZE DETERMINATION:
+ * Size is obtained from the Content-Length header on the stored response when present
+ * and valid. When Content-Length is absent, we clone the response and buffer it to get
+ * the body's byteLength. If the size is still indeterminable or not positive, that ONE
+ * entry is dropped: an entry whose size cannot be known cannot be counted against a
+ * byte budget, so it cannot be kept (charging MAX_OFFLINE_BYTES here would let a
+ * single bad response evict the entire library, over and over).
+ *
+ * EVICTION & PROTECTION SEMANTICS:
+ * Evicts oldest-first by x-stored-at timestamp header (falling back to Date header or
+ * insertion order) until total bytes <= MAX_OFFLINE_BYTES and total entries <= MAX_OFFLINE_EPISODES.
+ * Stops when only protected entries remain.
+ *
+ * Note: The service worker does not have direct access to client DOM/audio element state
+ * to identify an actively playing episode, so protection is limited to the entries passed in
+ * protectedUrls (the just-written entry/batch). It does not pretend to protect playing audio it cannot inspect.
+ *
+ * KNOWN LIMITATION OF TIMESTAMP ORDERING:
+ * A future x-stored-at (clock skew or legacy entry) makes an entry sort newest and effectively
+ * immortal until 20 fresher writes accumulate.
+ *
+ * Only touches OFFLINE_CACHE; never touches SHELL_CACHE.
+ *
+ * @param {Cache} cache
+ * @param {string[] | Set<string> | string} [protectedUrls]
+ * @param {number} [maxBytes]
+ * @param {number} [maxEntries]
+ */
+async function boundOfflineAudio(cache, protectedUrls = [], maxBytes = MAX_OFFLINE_BYTES, maxEntries = MAX_OFFLINE_EPISODES) {
+  const requests = await cache.keys();
+  if (requests.length === 0) return;
+
+  const protectedSet = new Set();
+  if (protectedUrls) {
+    if (typeof protectedUrls === "string") {
+      protectedSet.add(protectedUrls);
+    } else if (Symbol.iterator in Object(protectedUrls)) {
+      for (const u of protectedUrls) if (u) protectedSet.add(u);
+    }
+  }
+
+  const measured = await Promise.all(
+    requests.map(async (req, index) => {
+      const res = await cache.match(req);
+      const url = typeof req === "string" ? req : req.url;
+
+      const rawStored = res?.headers?.get("x-stored-at");
+      const storedAt = rawStored ? Number(rawStored) : NaN;
+      let timestamp = Number.isFinite(storedAt) ? storedAt : NaN;
+      if (!Number.isFinite(timestamp)) {
+        const rawDate = res?.headers?.get("date");
+        timestamp = rawDate ? Date.parse(rawDate) : NaN;
+      }
+
+      let size = NaN;
+      // LIMITATION (report-only): Content-Length is used verbatim and never cross-checked
+      // against the buffered body, so an understated header understates the total and
+      // silently violates the bound.
+      const cl = res?.headers?.get("content-length");
+      if (cl) {
+        const parsed = Number(cl);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+          size = parsed;
+        }
+      }
+      if (!Number.isFinite(size) && res) {
+        try {
+          if (typeof res.clone === "function") {
+            const buf = await res.clone().arrayBuffer();
+            size = buf.byteLength;
+          } else if (typeof res.arrayBuffer === "function") {
+            const buf = await res.arrayBuffer();
+            size = buf.byteLength;
+          }
+        } catch {
+          // unable to buffer clone
+        }
+      }
+      if (!Number.isFinite(size) || size <= 0) {
+        // If its size cannot be known, it cannot be counted — drop ONLY this entry and
+        // say so. Never charge MAX_OFFLINE_BYTES here: one unmeasurable entry would then
+        // alone exceed the budget and each following bound would evict the whole library.
+        console.warn("boundOfflineAudio: dropped unmeasurable entry (size unknown):", url);
+        await cache.delete(req);
+        return null;
+      }
+
+      return {
+        req,
+        url,
+        size,
+        time: Number.isFinite(timestamp) ? timestamp : index,
+        index,
+      };
+    }),
+  );
+  const entries = measured.filter((entry) => entry !== null);
+
+  let totalBytes = entries.reduce((acc, e) => acc + e.size, 0);
+  let totalEntries = entries.length;
+
+  if (totalBytes <= maxBytes && totalEntries <= maxEntries) return;
+
+  const evictable = entries.filter((e) => !protectedSet.has(e.url));
+  // Oldest first: lowest timestamp. Ties broken by insertion order (index).
+  evictable.sort((a, b) => a.time - b.time || a.index - b.index);
+
+  for (const target of evictable) {
+    if (totalBytes <= maxBytes && totalEntries <= maxEntries) {
+      break;
+    }
+    await cache.delete(target.req);
+    totalBytes -= target.size;
+    totalEntries -= 1;
+  }
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -280,18 +427,38 @@ self.addEventListener("backgroundfetchsuccess", (event) => {
       // not finish, or failed, contributes 0 and caches nothing.
       const STORE_BATCH = 4;
       let stored = 0;
+      const storedUrls = [];
       for (let at = 0; at < records.length; at += STORE_BATCH) {
-        const results = await Promise.all(
-          records.slice(at, at + STORE_BATCH).map(async (record) => {
+        const batch = records.slice(at, at + STORE_BATCH);
+        const resolved = await Promise.all(
+          batch.map(async (record) => {
             const response = await record.responseReady;
-            if (response && response.ok) {
-              await offline.put(record.request, response);
-              return 1;
-            }
-            return 0;
+            return { record, response };
           }),
         );
-        stored += results.reduce((total, value) => total + value, 0);
+        for (const { record, response } of resolved) {
+          if (response && response.ok) {
+            const headers = new Headers(response.headers);
+            headers.set("x-stored-at", String(Date.now()));
+            const stamped = new Response(response.body, {
+              status: response.status,
+              statusText: response.statusText,
+              headers,
+            });
+            await offline.put(record.request, stamped);
+            storedUrls.push(
+              typeof record.request === "string" ? record.request : record.request.url,
+            );
+            stored += 1;
+          }
+        }
+      }
+      // Bound ONCE after the whole batch, protecting EVERY URL this batch wrote. Calling
+      // it per record ran a full keys()+match() pass per entry (O(N^2) over the cache) and
+      // let each pass protect only its own record, so an earlier batch member could be
+      // evicted by a later sibling's pass.
+      if (storedUrls.length > 0) {
+        await boundOfflineAudio(offline, storedUrls);
       }
       // The OS notification is the only surface a subscriber sees once the tab is
       // closed, so it states the outcome rather than staying on "downloading".
