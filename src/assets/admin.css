@@ -528,10 +528,17 @@ dialog.confirm-dialog .confirm-actions {
   .tooltip {
     position: fixed;
     position-anchor: --tooltip-anchor;
+    position-area: bottom span-right;
     top: anchor(bottom);
     left: anchor(left);
     margin-block-start: 8px;
+    /* audio-feed-anc2: conservative fallback declaration first. One unrecognised
+       keyword invalidates a whole CSS declaration, so an engine that knows flip-block
+       but not flip-inline would drop the full list entirely; with this preceding
+       declaration it keeps the block flip, and current engines take the later,
+       richer declaration (last valid declaration wins). */
     position-try-fallbacks: flip-block;
+    position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
   }
 }
 

@@ -502,10 +502,17 @@ function showTooltip(target, text) {
       // with the shell copy in src/assets/tooltip-client.js.
       const rect = target.getBoundingClientRect();
       const tooltipHeight = tooltipEl.offsetHeight || 28;
+      const tooltipWidth = tooltipEl.offsetWidth || 120;
       const margin = 8;
       const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
       const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
-      tooltipEl.style.left = rect.left + "px";
+      const overflowRight = (rect.left + tooltipWidth) > window.innerWidth;
+      const fitsLeft = (rect.right - tooltipWidth) >= 0;
+      if (overflowRight && fitsLeft) {
+        tooltipEl.style.left = (rect.right - tooltipWidth) + "px";
+      } else {
+        tooltipEl.style.left = rect.left + "px";
+      }
       if (overflowBottom && fitsAbove) {
         // Flip above anchor to match position-try-fallbacks: flip-block
         tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";
