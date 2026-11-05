@@ -4,5 +4,20 @@
   ],
   "tests/fixtures/bd_stub.sh": [
     "tests/bd_durability_check_test.ts"
+  ],
+  "src/compose/feeds.ts": [
+    "tests/feed_subscription_test.ts"
+  ],
+  "src/routes/cwv.ts": [
+    "tests/observability_cwv_test.ts"
+  ],
+  "src/routes/pwa.ts": [
+    "tests/listen_test.ts"
+  ],
+  "src/routes/listen.ts": [
+    "tests/listen_reads_test.ts"
+  ],
+  "src/routes/account_api.ts": [
+    "tests/auth_body_cap_test.ts"
   ]
 }
