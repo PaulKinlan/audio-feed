@@ -29,6 +29,7 @@ import { DOMParser, parseHTML } from "npm:linkedom@0.18.12";
 import { clean, type ExtractedArticle, fetchArticle, fetchFeedDocument, plainText } from "./url.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { ingestCreationLimiter } from "../compose/ingest.ts";
+import type { RateLimitResult } from "../auth/rate_limit.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import {
@@ -386,6 +387,35 @@ function extractTextFromHtml(rawHtml: string): string {
  */
 const ARTICLE_FETCH_CONCURRENCY = 4;
 
+/**
+ * Give back the creation credit `reservation` took when the article+episode pair did
+ * not commit (audio-feed-ukuka review).
+ *
+ * The credit is charged BEFORE the CAS insert, so a lost CAS (`inserted === false`) or a
+ * store throw would otherwise spend one of the subscriber's daily creations on nothing,
+ * silently shrinking their allowance. `release` removes only the exact timestamp this
+ * reservation recorded, so it cannot free budget that was not charged here.
+ *
+ * A failed release logs and continues: it leaves the credit spent — the behaviour this
+ * replaces — where throwing would mask the failure the poll is already reporting.
+ */
+async function releaseCredit(
+  limiter: ReturnType<typeof ingestCreationLimiter> | undefined,
+  userId: string,
+  reservation: RateLimitResult | undefined,
+): Promise<void> {
+  if (!limiter || reservation?.recordedAt === undefined) return;
+  try {
+    await limiter.release(userId, reservation.recordedAt);
+  } catch (error) {
+    console.error(
+      `[audio-feed] could not release an unused creation credit for user "${userId}": ${
+        String((error as Error)?.message ?? error)
+      }`,
+    );
+  }
+}
+
 /** Queue an episode per item that the store has not already seen. */
 async function queueItems(
   ctx: AppContext,
@@ -476,10 +506,16 @@ async function queueItems(
 
     // The atomic check shares the ingest/upload counter and reserves one credit
     // before the pair commits. Concurrent sources cannot each spend the last slot.
-    // An unsuccessful check never writes an article or episode.
-    if (limiter && !(await limiter.check(source.userId)).allowed) {
-      result.deferred++;
-      return;
+    // An unsuccessful check never writes an article or episode. The admission is
+    // kept so the credit can be given back if the pair does not commit.
+    let reservation: RateLimitResult | undefined;
+    if (limiter) {
+      const attempt = await limiter.check(source.userId);
+      if (!attempt.allowed) {
+        result.deferred++;
+        return;
+      }
+      reservation = attempt;
     }
     const now = new Date().toISOString();
     const articleId = newArticleId();
@@ -515,11 +551,20 @@ async function queueItems(
       description: article.excerpt,
       createdAt: now,
     };
-    const inserted = await ctx.stores.metadata.insertArticleWithEpisodeIfAbsent(
-      article,
-      episode,
-    );
+    // audio-feed-ukuka: a reservation that ends in no committed pair is refunded, or a
+    // CAS loss or store failure would spend a credit and produce no episode.
+    let inserted: boolean;
+    try {
+      inserted = await ctx.stores.metadata.insertArticleWithEpisodeIfAbsent(
+        article,
+        episode,
+      );
+    } catch (error) {
+      await releaseCredit(limiter, source.userId, reservation);
+      throw error;
+    }
     if (!inserted) {
+      await releaseCredit(limiter, source.userId, reservation);
       result.skipped++;
       return;
     }

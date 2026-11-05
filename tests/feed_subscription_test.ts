@@ -217,6 +217,61 @@ Deno.test("audio-feed-ukuka: deferral never consumes a creation credit", async (
   assertEquals((await limiter.peek(user.id)).remaining, 0);
 });
 
+/**
+ * The same fixture's store, with the article+episode CAS replaced — the one seam a feed
+ * poll cannot reach any other way (audio-feed-ukuka).
+ */
+function withInsert(
+  ctx: { config: AppConfig; stores: Stores },
+  insert: MetadataStore["insertArticleWithEpisodeIfAbsent"],
+) {
+  const metadata = new Proxy(ctx.stores.metadata, {
+    get(target, prop) {
+      if (prop === "insertArticleWithEpisodeIfAbsent") return insert;
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { ...ctx, stores: { ...ctx.stores, metadata } };
+}
+
+Deno.test("audio-feed-ukuka: an uncommitted article+episode pair refunds its creation credit", async () => {
+  const { user, source, ctx, deps, limiter } = await deferralFixture(10);
+  const before = (await limiter.peek(user.id)).remaining;
+  assertEquals(before, 10);
+
+  // Lost CAS: another poll committed the same URL first. The reserved credit must come
+  // back, or a racing poll silently eats the subscriber's allowance (before this fix the
+  // allowance dropped by one per skipped item).
+  const lost = await pollFeedSource(withInsert(ctx, () => Promise.resolve(false)), source, deps);
+  assertEquals(lost.queued, 0);
+  assertEquals(lost.skipped, 10);
+  assertEquals((await limiter.peek(user.id)).remaining, before);
+
+  // Store throw: the poll still fails loudly, and the credit is still refunded.
+  await assertRejects(
+    () =>
+      pollFeedSource(
+        withInsert(ctx, () => Promise.reject(new Error("store unavailable"))),
+        source,
+        deps,
+      ),
+    Error,
+    "store unavailable",
+  );
+  assertEquals((await limiter.peek(user.id)).remaining, before);
+
+  // Rollback cannot free budget it never reserved: a timestamp with no matching entry
+  // removes nothing, so `release` is not a way to exceed the bound.
+  assertEquals(await limiter.release(user.id, 1), false);
+  assertEquals((await limiter.peek(user.id)).remaining, before);
+  // Releasing the same reservation twice is also a no-op.
+  const one = await limiter.check(user.id);
+  assertEquals(await limiter.release(user.id, one.recordedAt!), true);
+  assertEquals(await limiter.release(user.id, one.recordedAt!), false);
+  assertEquals((await limiter.peek(user.id)).remaining, before);
+});
+
 function longFeed(count: number) {
   return `<rss><channel>${
     Array.from({ length: count }, (_, i) =>

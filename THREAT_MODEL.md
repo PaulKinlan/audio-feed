@@ -119,7 +119,14 @@ routes, listed separately because the attacker's position there is different.
   bound the fleet: N approved subscribers multiply it, which is why the global daily episode budget
   exists (boundary 8). (d) A submission that fails URL validation or the fetch still consumed its
   slot, so a mistyped URL costs a legitimate subscriber one of fifty — accepted: the count has to
-  precede the fetch for the refusal to be cheap.
+  precede the fetch for the refusal to be cheap. (e) A deferred item is only deferred, never held:
+  the poll writes nothing for it, not even its URL. If the feed drops that item — the publisher
+  rotates its window, or truncates the document — before the subscriber's allowance comes back, no
+  later poll can find it and that episode is lost silently. (f) The 10-items-per-poll drain has no
+  catch-up: a source that publishes faster than a poll can drain keeps a backlog that only grows,
+  so items near the end of the scan can stay unseen indefinitely. Deferral closes neither one:
+  closing (e) would need the deferred URLs stored somewhere that outlives the feed document, and
+  closing (f) would need a drain rate that can exceed a publisher's rate.
 
 ### Boundary 3 — Anonymous browser writes
 
