@@ -76,6 +76,39 @@ Deno.test("anchor-positioning: shell stylesheet delivers anchor-positioning rule
   assert(shellHtml.includes("flip-inline"));
 });
 
+Deno.test("anchor-positioning: conservative position-try-fallbacks declaration precedes the full list in every CSS home (audio-feed-anc2)", async () => {
+  // Why the ORDER is the assertion: `position-try-fallbacks: flip-block, flip-inline,
+  // flip-block flip-inline` is ONE declaration, and in CSS a single unrecognised keyword
+  // invalidates the whole declaration. An engine that supports flip-block but not flip-inline
+  // would drop the full list entirely and lose even the block flip — unless a conservative
+  // valid declaration comes first, which that engine keeps while current engines take the
+  // later, richer declaration (last valid declaration wins). This is a declaration-order pin,
+  // not a presence check: reordering the two declarations silently removes the fallback.
+  const conservative = "position-try-fallbacks: flip-block;";
+  const full = "position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;";
+  const homes: Record<string, string> = {
+    "listen.css": await getListenCss(),
+    "admin.css": shippedCss(
+      renderAdminPage({
+        nonce: "test-nonce",
+        publicBaseUrl: "https://example.com",
+        adminConfigured: true,
+      }),
+    ),
+    "shell.ts": renderShell({ nonce: "test-nonce", title: "Shell", viewer: null, main: "" }),
+  };
+  for (const [home, css] of Object.entries(homes)) {
+    const first = css.indexOf(conservative);
+    const second = css.indexOf(full);
+    assert(first !== -1, `${home} lost the conservative ${conservative}`);
+    assert(second !== -1, `${home} lost the full ${full}`);
+    assert(
+      first < second,
+      `${home}: ${conservative} must precede the full list — an engine rejecting flip-inline drops the whole richer declaration, and the conservative one is its only fallback`,
+    );
+  }
+});
+
 Deno.test("anchor-positioning: the tooltip is a manual popover in every markup, CSS, and JS home (audio-feed-tyu77)", async () => {
   // The premise: a body-level position:fixed div paints BELOW a modal <dialog>'s top
   // layer at ANY z-index, so the share dialog's own Copy button tooltip was invisible.
