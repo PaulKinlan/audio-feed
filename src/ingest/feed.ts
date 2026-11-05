@@ -178,7 +178,7 @@ export interface PollResult {
   errors: string[];
 }
 
-const DEFAULT_MAX_ITEMS = 10;
+export const DEFAULT_MAX_ITEMS = 10;
 
 /** Fetch a feed, queue an episode for each new item, and record the poll. */
 export async function pollFeedSource(
@@ -197,6 +197,9 @@ export async function pollFeedSource(
     return result;
   }
 
+  // Bounded by maxItems (DEFAULT_MAX_ITEMS = 10) and lastPolledAt cadence (audio-feed-l9l63).
+  // Feed polling is deliberately excluded from refuseIngestOverCreationCap to avoid dropping
+  // new published articles from subscribed feeds when an inbox user has reached their creation cap.
   let items: FeedItem[];
   try {
     items = (await loadFeedItems(source.feedUrl, deps)).slice(
@@ -486,6 +489,10 @@ export async function subscribeToFeed(
   // produces audio. `feedUrl` is set on the source constructed just above.
   const items = await loadFeedItems(source.feedUrl!, deps);
   await ctx.stores.metadata.putSource(source);
+  // Capped at 5 items for the initial subscription poll (audio-feed-l9l63, audio-feed-uhfis).
+  // Deliberately NOT subject to refuseIngestOverCreationCap: capping subscriptions by the rolling 24h
+  // creation limiter would refuse legitimate subscriptions when a user has exhausted their ingest slots.
+  // The subscription path is bounded instead by this 5-item ceiling and insertArticleWithEpisodeIfAbsent CAS deduplication.
   const result: PollResult = { items: 0, queued: 0, skipped: 0, failed: 0, errors: [] };
   await queueItems(ctx, source, items.slice(0, deps.maxItems ?? 5), deps, result);
   await ctx.stores.metadata.putSource({ ...source, lastPolledAt: new Date().toISOString() });

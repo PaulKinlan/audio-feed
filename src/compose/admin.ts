@@ -331,6 +331,8 @@ export function createCreateUserHandler(
       if (typeof body.feedUrl === "string" && body.feedUrl.trim() !== "") {
         const validatedUrl = articleUrl(body.feedUrl.trim()).href;
         const codeHandling: CodeHandling = body.codeHandling === "explain" ? "explain" : "skip";
+        // Operator-driven subscription during admin user creation (audio-feed-l9l63).
+        // Admin operations are guarded by adminGate and not throttled by subscriber-facing creation limits.
         const { source, poll } = await subscribeToFeed(
           ctx,
           {
@@ -537,6 +539,8 @@ export function createAdminCreateUserSourceHandler(
     const codeHandling: CodeHandling = body.codeHandling === "explain" ? "explain" : "skip";
 
     try {
+      // Admin source addition (audio-feed-l9l63): operator-authenticated via adminGate, deliberately
+      // exempt from subscriber-facing ingest creation limits to support operator management and bulk actions.
       const { source, poll } = await subscribeToFeed(
         ctx,
         {

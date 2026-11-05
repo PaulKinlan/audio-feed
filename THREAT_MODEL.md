@@ -102,14 +102,16 @@ routes, listed separately because the attacker's position there is different.
 - **Residuals that remain:** (a) those 150 attempts still do not reach the completion counter: the
   bound limits how many episodes can be attempted, not how spend is accounted, and the per-episode
   segment/attempt ceilings still multiply per episode (see boundary 8). (b) The cap covers
-  user-initiated submits only. Feed polling creates episodes through
-  `insertArticleWithEpisodeIfAbsent` (URL-deduped) and is bounded instead by items per poll
-  (`maxItemsPerSource`, 10) x polled feeds x cadence — a token can add feeds, so the feed path's own
-  daily ceiling is a separate, unfiled question. (c) One subscriber's cap does not bound the fleet: N
-  approved subscribers multiply it, which is why the global daily episode budget exists (boundary 8).
-  (d) A submission that fails URL validation or the fetch still consumed its slot, so a mistyped URL
-  costs a legitimate subscriber one of fifty — accepted: the count has to precede the fetch for the
-  refusal to be cheap.
+  user-initiated submits only (/api/ingest and /api/upload). Feed subscription initial polls and
+  periodic feed polling create episodes through `insertArticleWithEpisodeIfAbsent` (URL-deduped) and
+  are bounded instead by per-poll item caps (5 items on subscription initial poll, 10 items on
+  periodic poll `maxItemsPerSource`), polling cadence (15 min), and URL deduplication
+  (audio-feed-l9l63, audio-feed-uhfis) — deliberately not capped by the rolling 24h creation limiter
+  so legitimate subscriptions and feed updates are never refused. (c) One subscriber's cap does not
+  bound the fleet: N approved subscribers multiply it, which is why the global daily episode budget
+  exists (boundary 8). (d) A submission that fails URL validation or the fetch still consumed its
+  slot, so a mistyped URL costs a legitimate subscriber one of fifty — accepted: the count has to
+  precede the fetch for the refusal to be cheap.
 
 ### Boundary 3 — Anonymous browser writes
 
