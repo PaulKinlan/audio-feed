@@ -268,7 +268,14 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
         "tests/feed_discovery_test.ts",
         "tests/webmcp_admin_forms_test.ts",
       ],
-      mentionsOnly: [],
+      // tests/listen_test.ts MENTIONS the logout and rotate-token routes from the cache-purge rows
+      // (audio-feed-vnu4g): those rows drive the SERVICE WORKER in a harness and assert what it does
+      // with the request and the cache, so the account handlers are not exercised - this is the
+      // mentionsOnly side, and the audit's "audit its real handler before narrowing" is why the
+      // distinction is written down rather than inferred. Second occurrence of the hand-list
+      // problem (audio-feed-jmq5b): the first was two NEW suites, this one is a new REFERENCE from
+      // an existing suite, which is why the census there says the trigger is the reference, not the file.
+      mentionsOnly: ["tests/listen_test.ts"],
       mentions: (source: string) =>
         accountRoutes.some((path) =>
           source.includes(path.includes(":") ? path.slice(0, path.indexOf(":")) : path)
