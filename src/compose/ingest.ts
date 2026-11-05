@@ -8,11 +8,14 @@
  */
 import { createUrlIngestHandler, type ExtractedArticle } from "../ingest/url.ts";
 import { createUploadIngestHandler } from "../ingest/upload.ts";
+import { SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
 import { type AudioMode, INBOX_SOURCE_ID, type User } from "../types.ts";
 import { sameOrigin, sessionUser } from "../auth/sessions.ts";
 import type { EpisodeQuery, MetadataStore } from "../storage/mod.ts";
 import type { Episode } from "../types.ts";
 import { resolveOrigin } from "../origin.ts";
+import { DEFAULT_DAILY_EPISODE_BUDGET } from "../config.ts";
+import { dailyEpisodeBudgetFor } from "../worker/synthesis.ts";
 import { approvedUserFor, type ComposeDeps, forbidden, presentedToken } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
@@ -83,6 +86,104 @@ export async function authorizeIngest(
   // routes with its own copy of the try/catch.
   const resolved = await approvedUserFor(ctx, request);
   return "denied" in resolved ? resolved.denied : resolved.user;
+}
+
+/**
+ * Accepted episode-creation ceiling per subscriber, per rolling 24 hours (audio-feed-kp30l).
+ *
+ * WHY A CREATION CAP AND NOT A SPEND ACCOUNTING FIX: the daily synthesis counter bills at the SAME
+ * atomic commit that marks an episode `ready` (src/storage/kv/episodes.ts), so an episode that
+ * burns paid attempts and then fails terminally is paid for and never counted. Counting attempts
+ * instead would change what the daily budget MEANS — one broken article retried three times would
+ * spend three of a subscriber's fifty — and still would not bound how many episodes exist.
+ * Creation is the quantity a token actually chooses, and it is countable BEFORE the Article+Episode
+ * pair commits (`enqueueInboxArticle`), so the cap sits here.
+ *
+ * WHY THE CAP IS THE BUDGET: it is the SAME number the completion budget charges against —
+ * `dailyEpisodeBudgetFor(user, ctx.config.defaultDailyEpisodeBudget)` (src/worker/synthesis.ts):
+ * the subscriber's own budget when they have one, else the configured deployment default, else
+ * `DEFAULT_DAILY_EPISODE_BUDGET` (src/config.ts). Resolving it here rather than hardcoding the
+ * constant is what keeps the cap from refusing a legitimate subscriber when an operator raises
+ * DEFAULT_DAILY_EPISODE_BUDGET or sets a personal budget: the cap and the budget read the same
+ * number by construction, so the cap never refuses a day the budget would fund. Worst case per
+ * subscriber per day goes from unbounded to budget creations x `maxAttempts` 3 paid attempts.
+ *
+ * WHY 24 HOURS, NOT A UTC DAY: the limiter is a sliding window; a rolling 24 hours cannot be reset
+ * by waiting for midnight, and it needs no day key.
+ *
+ * SCOPE — user-initiated submits only. Feed polling does NOT come through here: `queueItems`
+ * (src/ingest/feed.ts) writes through `insertArticleWithEpisodeIfAbsent`, which dedupes on the URL
+ * and is already capped at `maxItemsPerSource` items per poll. So a real feed's item burst is
+ * unaffected by this bound, and a person adding a handful of articles a day is two orders of
+ * magnitude inside it.
+ */
+export const INGEST_CREATION_RATE = {
+  maxRequests: DEFAULT_DAILY_EPISODE_BUDGET,
+  windowMs: 24 * 60 * 60 * 1000,
+} as const;
+
+/** Exported so tests exercise the SAME window row the handlers write. */
+export const INGEST_CREATION_WINDOW = "ingest_creation";
+
+/** The bound's name, so a refusal says WHICH limit refused rather than only that one did. */
+export const INGEST_CREATION_BOUND = "episode_creations_per_token";
+
+/**
+ * Count one accepted episode creation against `user`, or return the refusal.
+ *
+ * Keyed on the USER, not the client address: the spend unit is the account whose token pays, and
+ * one subscriber may hold several tokens and several addresses. The check runs inside `authorize`,
+ * i.e. after identity resolves and BEFORE the article fetch — so a refused submit costs one
+ * rate-window write and no outbound fetch, and the count is on SUBMISSIONS, not on episodes that
+ * happen to reach `ready`. That ordering is the whole point: a submission whose episode later
+ * fails still consumed the slot, which is what the completion counter never charged for.
+ */
+export async function refuseIngestOverCreationCap(
+  ctx: AppContext,
+  user: User,
+): Promise<Response | null> {
+  // The SAME resolution the synthesis spend check applies for this subscriber, from the SAME
+  // config object — a hardcoded literal here would refuse submissions a raised or personal
+  // budget happily funds. tests/ingest_creation_cap_test.ts pins this relation.
+  const { limit: creationLimit } = dailyEpisodeBudgetFor(
+    user,
+    ctx.config.defaultDailyEpisodeBudget,
+  );
+  const rate = { maxRequests: creationLimit, windowMs: INGEST_CREATION_RATE.windowMs };
+  const limit = await new SlidingWindowRateLimiter(
+    rate,
+    ctx.stores.metadata,
+    INGEST_CREATION_WINDOW,
+  ).check(user.id);
+  if (limit.allowed) return null;
+  return Response.json(
+    {
+      error: `Episode creation limit reached: at most ${creationLimit} accepted ` +
+        `ingest/upload requests per subscriber per 24 hours.`,
+      bound: INGEST_CREATION_BOUND,
+      limit: creationLimit,
+      windowMs: rate.windowMs,
+    },
+    {
+      status: 429,
+      headers: {
+        "cache-control": "no-store",
+        "retry-after": String(Math.max(1, Math.ceil(limit.resetMs / 1000))),
+      },
+    },
+  );
+}
+
+/**
+ * `authorizeIngest` plus the creation cap, for the two routes that create episodes.
+ *
+ * Composed here rather than inside each handler so ingest and upload cannot drift: a route that
+ * skips the cap silently reopens audio-feed-kp30l for its own surface.
+ */
+async function authorizeIngestWithCap(ctx: AppContext, request: Request): Promise<User | Response> {
+  const user = await authorizeIngest(ctx, request);
+  if (user instanceof Response) return user;
+  return (await refuseIngestOverCreationCap(ctx, user)) ?? user;
 }
 
 export interface EnqueueInboxItemInput {
@@ -209,7 +310,7 @@ export function createIngestHandler(
   const handler = createUrlIngestHandler({
     fetchArticle: deps.fetchArticle,
     // Identity is the feed token, the same capability the feed routes use.
-    authorize: (request) => authorizeIngest(ctx, request),
+    authorize: (request) => authorizeIngestWithCap(ctx, request),
     enqueue: ({ article, mode, user }) =>
       enqueueInboxArticle(ctx, { article, mode, user, route: "/api/ingest" }),
     onFailure: async ({ user, reason, status, mode, error, article }) => {
@@ -249,7 +350,7 @@ export function createUploadHandler(
   _deps: ComposeDeps = {},
 ): AppHandlers["upload"] {
   const handler = createUploadIngestHandler({
-    authorize: (request) => authorizeIngest(ctx, request),
+    authorize: (request) => authorizeIngestWithCap(ctx, request),
     enqueue: ({ article, mode, user, articleId, episodeId }) =>
       enqueueInboxArticle(ctx, {
         article,

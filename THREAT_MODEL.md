@@ -82,10 +82,34 @@ routes, listed separately because the attacker's position there is different.
   (`src/compose/ingest.ts:62-89`): an explicit token goes through `approvedUserFor` (boundary 1's
   gate); a cookie-only request must ALSO pass the strict same-origin wall, because a cookie is
   ambient. Both paths require an approved user.
-- **Residual (unmitigated, recorded):** there is no per-token rate limit or spend cap on accepted
-  ingest/upload work. Each accepted request queues a paid synthesis job; the only bound is holding a
-  valid approved token. A leaked feed token therefore doubles as an unbounded spend button on
-  ingest — unlike `/listen`'s retry, which is walled (boundary 1). Candidate bead, not filed here.
+- **Mitigation (audio-feed-kp30l):** accepted episode CREATION is capped per subscriber. Both routes
+  compose `authorizeIngest` with `refuseIngestOverCreationCap` (`src/compose/ingest.ts`), which counts
+  one hit in a shared 24-hour `SlidingWindowRateLimiter` window (`INGEST_CREATION_RATE`, 50 per
+  rolling 24 hours, namespace `ingest_creation`, row keyed on the USER id — the account whose token
+  pays, not the address). The check runs inside `authorize`, i.e. after identity resolves and BEFORE
+  the article fetch and before `putArticleWithEpisode` commits, so a refused submit costs one window
+  write, no fetch, and no queue row. The refusal is `429` carrying the bound's name
+  (`episode_creations_per_token`), the limit, the window and a `retry-after`.
+- **Residual (partly mitigated, recorded):** **why the count is on creations, not on spend.** The
+  daily counters increment only in the same atomic commit that marks an episode `ready`
+  (`src/storage/kv/episodes.ts:64-74`), so a paid attempt that ends `failed` is spent and never
+  counted — and counting attempts instead would change what the daily budget MEANS (one broken
+  article consuming three of a subscriber's fifty) while still not bounding how many episodes exist.
+  Creation is what a token chooses and is countable before anything is paid. Worst case paid-attempt
+  spend per subscriber per UTC day therefore falls from unbounded to **50 creations x `maxAttempts`
+  3 = 150 paid attempts**, and a same-URL resubmission — which IS a new episode by request
+  (`src/storage/kv/articles.ts:251`) — is charged like any other creation.
+- **Residuals that remain:** (a) those 150 attempts still do not reach the completion counter: the
+  bound limits how many episodes can be attempted, not how spend is accounted, and the per-episode
+  segment/attempt ceilings still multiply per episode (see boundary 8). (b) The cap covers
+  user-initiated submits only. Feed polling creates episodes through
+  `insertArticleWithEpisodeIfAbsent` (URL-deduped) and is bounded instead by items per poll
+  (`maxItemsPerSource`, 10) x polled feeds x cadence — a token can add feeds, so the feed path's own
+  daily ceiling is a separate, unfiled question. (c) One subscriber's cap does not bound the fleet: N
+  approved subscribers multiply it, which is why the global daily episode budget exists (boundary 8).
+  (d) A submission that fails URL validation or the fetch still consumed its slot, so a mistyped URL
+  costs a legitimate subscriber one of fifty — accepted: the count has to precede the fetch for the
+  refusal to be cheap.
 
 ### Boundary 3 — Anonymous browser writes
 
@@ -171,8 +195,10 @@ routes, listed separately because the attacker's position there is different.
   metadata and transition ranges are denied (`:53`); every redirect target is re-validated and
   chains are capped at 5 (`:238`, `:310-311`, `:348`, `:537`); reads are bounded at 2 MiB and 15 s
   (`:512-513`); a public hostname that resolves to a private address is refused (`:456-457`).
-- **Residuals:** (a) the fetch walls bound WHERE the server fetches, but accepting ingest work is not
-  throttled — see boundary 2's unmitigated spend residual. (b) Unmitigated, unrecorded until now:
+- **Residuals:** (a) the fetch walls bound WHERE the server fetches, and since audio-feed-kp30l the
+  creation cap in boundary 2 is checked BEFORE the fetch, so one subscriber cannot exceed 50 accepted
+  article fetches per rolling 24 hours through `/api/ingest` or `/api/upload` (feed polling and
+  `POST /api/sources` discovery are not inside that window). (b) Unmitigated, unrecorded until now:
   ingested article text reaches the synthesis prompt with no sanitisation or injection boundary
   anywhere under `src/synthesis/`, `src/tts/`, `src/worker/` — a hostile feed can make the
   subscriber's own podcast narration say attacker-chosen things. The blast radius is narration
@@ -206,8 +232,11 @@ routes, listed separately because the attacker's position there is different.
   with explicit handling of segments billed after a deadline fires (`src/tts/gemini.ts:123-133`),
   under the limits in `src/synthesis/limits.ts`.
 - **Residual (documented, accepted):** a synthesis job's provider cost can be incurred by content
-  that later fails; accepted as the price of the feature, and the spend rate is bounded only by
-  boundary 2's (absent) ingest throttle.
+  that later fails, and such an attempt does not increment the daily counters (they bill only at
+  `ready`, `src/storage/kv/episodes.ts:64-74`); accepted as the price of the feature. Since
+  audio-feed-kp30l the number of episodes one subscriber can create per rolling 24 hours — and so the
+  number that can fail — is bounded at 50 (boundary 2), so failed-attempt spend is bounded at 50 x
+  `maxAttempts` 3 paid attempts per subscriber per day rather than unbounded.
 
 ## CSP report endpoint (`/api/reports/csp`) — origin policy
 
