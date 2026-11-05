@@ -168,6 +168,31 @@ Deno.test("account sources: add queues, and a pending user may not spend (audio-
   assertEquals(refused.status, 403);
 });
 
+Deno.test("a store failure while adding a source is answered with a fixed detail (audio-feed-addsource-leak)", async () => {
+  // THE DEFECT this pins: the addSource catch-all answered with
+  // `String((error as Error)?.message ?? error)`, so any non-IngestError thrown inside
+  // subscribeToFeed - a store/provider failure - was echoed to the caller verbatim. This
+  // store key shape is what a putSource failure can actually carry.
+  const { fetch, stores } = app();
+  const user = await seed(stores);
+  const storeMessage =
+    'kv put failed for ["source","user-1","stratechery"] at blob://audio-store/private-bucket';
+  stores.metadata.putSource = () => Promise.reject(new Error(storeMessage));
+
+  const res = await fetch(call("/api/account/sources", {
+    json: { feedUrl: "https://example.com/feed.xml", modes: ["direct"] },
+    cookie: await cookieFor(stores, user.id),
+    origin: BASE,
+  }));
+  const body = await res.json();
+  assert(
+    !JSON.stringify(body).includes("private-bucket"),
+    "store key text must not reach the caller",
+  );
+  assertEquals(body.error, "Could not subscribe to that feed.");
+  assertEquals(res.status, 502);
+});
+
 Deno.test("account sources: another user's source is 404 and untouched (audio-feed-8fc)", async () => {
   const { fetch, stores } = app();
   const me = await seed(stores);
