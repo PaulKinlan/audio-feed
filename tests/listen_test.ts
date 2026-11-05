@@ -352,8 +352,10 @@ Deno.test("the service worker caches audio first and pages network-first (audio-
   // The three Background Fetch lifecycle handlers are NOT pinned by string presence
   // here any more: they are driven below, against the script that is actually served
   // (audio-feed-qn5). A string check cannot tell a working handler from an empty one.
-  // The offline audio cache must survive a worker update.
-  assertStringIncludes(sw, 'name.startsWith("audio-feed-shell-") && name !== SHELL_CACHE');
+  // The offline audio cache must survive a worker update — the CURRENT generation
+  // (audio-feed-vnu4g); superseded generations of both families are swept, so the
+  // filter must still exclude the live names from its own cleanup.
+  assertStringIncludes(sw, "name !== SHELL_CACHE && name !== OFFLINE_CACHE");
 });
 
 // ---------------------------------------------------------------------------
@@ -602,6 +604,145 @@ Deno.test("service worker activation purges previous shell cache versions while 
   assert(
     names.includes(OFFLINE_CACHE),
     "offline audio cache must survive service worker activation",
+  );
+});
+
+// audio-feed-vnu4g: sign-out and token rotation purge the downloaded library.
+// These drive the SERVED worker through the harness — the same defect class the
+// background-fetch tests fixed (audio-feed-qn5): a string assertion cannot tell a
+// purge that runs from a purge that is registered and empty.
+const postRequest = (path: string): Request => new Request(`${BASE}${path}`, { method: "POST" });
+
+Deno.test("sign-out purges the offline audio cache but not the shell (audio-feed-vnu4g)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+  const harness = createServiceWorkerHarness(
+    swText,
+    (request) =>
+      request.url.endsWith("/api/auth/logout")
+        ? Promise.resolve(new Response(null, { status: 303, headers: { location: "/" } }))
+        : appFetch(request),
+  );
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-1.wav`, new Response("one", { status: 200 }));
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-2.wav`, new Response("two", { status: 200 }));
+  harness.seedCache(SHELL_CACHE, `${BASE}/manifest.json`, new Response("{}", { status: 200 }));
+
+  // The no-script logout is a form POST; the worker passes it through and answers
+  // with the server's redirect untouched.
+  const outcome = await harness.dispatch("fetch", { request: postRequest("/api/auth/logout") });
+  // The cache assertion against the unfixed worker is the red that names the bug —
+  // the library survives sign-out.
+  assertEquals(
+    harness.cacheNames().includes(OFFLINE_CACHE),
+    false,
+    "the downloaded library must not survive sign-out",
+  );
+  assertEquals(
+    outcome.response?.status,
+    303,
+    "the worker must return the server's response untouched",
+  );
+  assertEquals(
+    harness.cachedUrls(SHELL_CACHE),
+    [`${BASE}/manifest.json`],
+    "the install shell (manifest, icon) is not subscriber data and must survive sign-out",
+  );
+});
+
+Deno.test("a JSON sign-out (scripted fetch) also purges the offline cache (audio-feed-vnu4g)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+  const harness = createServiceWorkerHarness(
+    swText,
+    (request) =>
+      request.url.endsWith("/api/auth/logout")
+        ? Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+        : appFetch(request),
+  );
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-1.wav`, new Response("one", { status: 200 }));
+
+  await harness.dispatch("fetch", { request: postRequest("/api/auth/logout") });
+  assertEquals(
+    harness.cacheNames().includes(OFFLINE_CACHE),
+    false,
+    "the JSON logout must purge the same cache the form logout does",
+  );
+});
+
+Deno.test("feed-token rotation purges the offline cache (audio-feed-vnu4g)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+  const harness = createServiceWorkerHarness(
+    swText,
+    (request) =>
+      request.url.endsWith("/api/account/rotate-token")
+        ? Promise.resolve(new Response(JSON.stringify({ token: "new-token" }), { status: 200 }))
+        : appFetch(request),
+  );
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-1.wav`, new Response("one", { status: 200 }));
+
+  await harness.dispatch("fetch", { request: postRequest("/api/account/rotate-token") });
+  assertEquals(
+    harness.cacheNames().includes(OFFLINE_CACHE),
+    false,
+    "the downloaded library must not survive a feed-token rotation",
+  );
+});
+
+Deno.test("a failed sign-out purges nothing, and unrelated POSTs are never intercepted (audio-feed-vnu4g)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+  const harness = createServiceWorkerHarness(
+    swText,
+    (request) =>
+      request.method === "POST"
+        ? Promise.resolve(new Response("no", { status: 500 }))
+        : appFetch(request),
+  );
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-1.wav`, new Response("one", { status: 200 }));
+
+  // The server did not confirm the sign-out: the cache must stay.
+  const failed = await harness.dispatch("fetch", { request: postRequest("/api/auth/logout") });
+  assertEquals(failed.response?.status, 500);
+  assertEquals(
+    harness.cacheNames().includes(OFFLINE_CACHE),
+    true,
+    "a failed sign-out must not purge the library",
+  );
+
+  // Any other POST is outside the worker's purge scope: it must not respond at all.
+  const unrelated = await harness.dispatch("fetch", {
+    request: postRequest("/api/account/profile"),
+  });
+  assertEquals(
+    unrelated.waits,
+    0,
+    "the worker must not respondWith on a POST it does not own",
+  );
+  assertEquals(harness.cachedUrls(OFFLINE_CACHE), [`${BASE}/audio/ep-1.wav`]);
+});
+
+Deno.test("activation sweeps superseded offline-cache generations while preserving the current one (audio-feed-vnu4g)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+  const harness = createServiceWorkerHarness(swText, appFetch);
+  harness.seedCache(
+    "audio-feed-offline-v0",
+    `${BASE}/audio/stale.wav`,
+    new Response("old-generation", { status: 200 }),
+  );
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-1.wav`, new Response("one", { status: 200 }));
+
+  await harness.dispatch("activate");
+  assertEquals(
+    harness.cacheNames().includes("audio-feed-offline-v0"),
+    false,
+    "a superseded offline generation must not survive activation forever",
+  );
+  assertEquals(
+    harness.cachedUrls(OFFLINE_CACHE),
+    [`${BASE}/audio/ep-1.wav`],
+    "the current generation is the subscriber's live library and must survive",
   );
 });
 

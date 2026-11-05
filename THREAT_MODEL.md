@@ -37,3 +37,24 @@ exhaustive analysis.
 - **Scope note:** an earlier revision leaked the blob-store BUCKET NAME through the same route;
   that leak is fixed and `Stores.describe` deliberately publishes the backend kind only
   (audio-feed-tra9d).
+
+## Offline audio cache — survives an update, not a sign-out (audio-feed-vnu4g)
+
+- **Decision:** the offline audio cache (`audio-feed-offline-v1`, written by the player and served
+  cache-first by the service worker for `/audio/`) deliberately survives a service-worker update —
+  "the subscriber's own downloaded library must survive an update". That is NOT "must survive
+  sign-out". The worker now deletes the whole cache when the server confirms `POST /api/auth/logout`
+  (either the no-script form, which 303s, or the JSON call) or `POST /api/account/rotate-token`
+  passing through its fetch handler; a failed call changes nothing. On `activate` the worker also
+  sweeps superseded `audio-feed-shell-*` AND `audio-feed-offline-*` generations, so a future cache
+  version bump cannot leave the old generation installed forever.
+- **Why purge by name instead of sweeping keys:** the audio URLs in this cache are public capability
+  URLs (`/audio/<key>`; the key IS the capability) and carry no feed token, so there are no
+  token-bearing keys to match — a key sweep would be a no-op with extra reads. The navigation cache
+  never stores token-bearing paths in the first place (`/listen/`, `/feed/` are excluded,
+  audio-feed-s3f0).
+- **Residual (documented, accepted):** admin suspension stops a subscriber's feed server-side but
+  cannot reach a device to purge it — the device is never contacted — so a suspended account's
+  already-downloaded episodes stay on disk until sign-out. Separately, the cache has no size bound:
+  a device that downloads every episode grows without limit until sign-out (nightly audit
+  2026-11-05); an app-driven write-time eviction is the follow-up mechanism if that bites.
