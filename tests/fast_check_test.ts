@@ -266,14 +266,66 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   // - An account route with NO exercising candidate fails the gate.
   // - Removing an exercising suite so a route or subroute is left unexercised fails the gate.
   // - scripts/fast-check.ts failing to select the complete candidate union in nameMatchedTests fails.
+  // - A suite classified as exercising that builds Requests but never calls fetch( fails: a
+  //   constructed Request that is never dispatched cannot exercise a handler.
+  // - A classification FLIP for an already-pinned suite fails until a human audits it
+  //   (ABH1_PINNED_CLASSIFICATION), which is the job the deleted hand lists used to do.
   //
-  // What this does not catch / new failure mode:
-  // - A new suite exercising a route is automatically admitted without manual list edits.
-  // - If a suite exercises a route through a novel, unrecognised abstraction (not using Request,
-  //   req, get, post, call, t.post, t.get), it will be classified as mention-only rather than
-  //   exercising. As long as at least one other suite exercises the route, the audit remains green.
-  // - Syntactic Request construction targeting a route URL without actual dispatch to the app
-  //   counts as an exerciser without executing the full test at audit time.
+  // What this does not catch / accepted limits (P2, audio-feed-jmq5b):
+  // - This is a STATIC heuristic over source text. It never executes a suite, so "exercising"
+  //   means "has the shape of a dispatch", not "was observed to dispatch".
+  // - The exclusions in DO_NOT_EXERCISE are string literals pinned to today's identifiers: the
+  //   host-spoof rows (evil.example), the service-worker harness shape (harness.dispatch,
+  //   request.url.endsWith), log metadata (route: + path), table fixtures (expected + path) and
+  //   predicate unit pins (isTrustedReportOrigin). A new harness name, spoof host or fixture
+  //   key rots them. Rot shows up as a mention promoted to an exerciser, which the pinned
+  //   classification turns into a red to audit, not a silent narrowing.
+  // - A suite that dispatches through an abstraction this file cannot see - a helper that
+  //   calls fetch internally without being defined in the same module, e.g. the send() shape
+  //   at tests/observability_cwv_test.ts:262 - classifies as MENTION-ONLY. The audit accepts
+  //   that direction of error deliberately: it under-counts exercisers and produces a false
+  //   RED on the pin (a human is asked to look), never a false green that lets a gate narrow
+  //   past a route whose only exerciser went unseen.
+  const DO_NOT_EXERCISE = [
+    "evil.example",
+    "harness.dispatch",
+    "request.url.endsWith",
+    "isTrustedReportOrigin",
+  ] as const;
+  const DISPATCH_FORM =
+    /(?:new\s+Request|\breq|\bt\.(?:post|get)|(?<![.\w])(?:get|post|call))\s*\(/;
+
+  // A dispatch must be ANCHORED in this file, not merely named. `call("/login")` reads the
+  // same whether call() fetches the app or formats a string, so a helper call only counts when
+  // this file defines that helper and its body reaches fetch(. Without that anchor, a match on
+  // a bare helper name silently promoted a mention to an exerciser (audio-feed-jmq5b review).
+  //
+  // The reviewer's simpler rule - every exercising line must contain `fetch(` or
+  // `new Request(` - was evaluated and rejected against this tree: tests/account_pages_test.ts:62
+  // dispatches as `get(fetch, "/login")` (the app's fetch is handed to a helper) and
+  // tests/account_regenerate_test.ts:73 as `t.post(...)` into a local post() helper that calls
+  // fetch(new Request(...)). Both genuinely exercise the handler; neither carries the primitive
+  // on its own line, so that rule would demote two real exercisers.
+  const helperDispatches = (source: string, callee: string): boolean => {
+    const name = callee.replace(/^.*\./, "");
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) return false;
+    const at = source.search(
+      new RegExp(
+        `(?:function\\s+${name}\\s*\\(|(?:const|let|var)\\s+${name}\\s*=\\s*(?:async\\s*)?(?:function\\b|\\())`,
+      ),
+    );
+    if (at < 0) return false;
+    // A fixed window, not a parse: the helper's dispatch must be visible near its definition.
+    return source.slice(at, at + 1_500).includes("fetch(");
+  };
+  const dispatched = (line: string, source: string): boolean => {
+    if (/new\s+Request\s*\(/.test(line)) return true;
+    if (/(?<![.\w])fetch(?![.\w])/.test(line)) return true;
+    for (const [, callee] of line.matchAll(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(/g)) {
+      if (callee && helperDispatches(source, callee)) return true;
+    }
+    return false;
+  };
   const exercisesRoute = (
     _file: string,
     source: string,
@@ -289,25 +341,78 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     return paths.some((p) => {
       const lines = stripped.split("\n");
       return lines.some((line) => {
-        if (line.includes("evil.example")) return false;
-        if (line.includes("harness.dispatch") || line.includes("request.url.endsWith")) {
-          return false;
-        }
+        for (const literal of DO_NOT_EXERCISE) if (line.includes(literal)) return false;
         if (line.includes("route:") && line.includes(p)) return false;
         if (line.includes("expected") && line.includes(p)) return false;
-        if (line.includes("isTrustedReportOrigin")) return false;
 
         const hasPath = isLogin
           ? /(?<!\/api\/auth)\/login(?=[/?#"'`])/.test(line)
           : line.includes(p);
         if (!hasPath) return false;
+        if (!DISPATCH_FORM.test(line)) return false;
 
-        return /(?:new\s+Request|\breq|\bt\.(?:post|get)|(?<![.\w])(?:get|post|call))\s*\(/.test(
-          line,
-        );
+        return dispatched(line, stripped);
       });
     });
   };
+
+  // The classifier's own falsification rows: each one is a shape that must be classified the
+  // stated way. They go red if the classifier collapses to "anything naming the path" (the
+  // promotion direction) or to "anything with a helper-shaped call" (the anchoring direction).
+  const CLASSIFIER_ROWS: { why: string; source: string; exercising: boolean }[] = [
+    {
+      why: "dispatches through the app fetch with a constructed Request",
+      // No "https://" in the row: the classifier strips //-comments, so a protocol prefix
+      // would truncate the line before the path and make this row prove nothing.
+      source: 'await fetch(new Request("/login"));',
+      exercising: true,
+    },
+    {
+      why: "hands the app's fetch to a local helper",
+      source: "const get = (fetch, p) => fetch(new Request(p));\n" +
+        'const res = await get(fetch, "/login");',
+      exercising: true,
+    },
+    {
+      why: "calls a local helper whose body dispatches",
+      source: "const post = (p) => fetch(new Request(p));\n" +
+        'const res = await t.post("/login", {});',
+      exercising: true,
+    },
+    {
+      why: "names a helper this file never defines",
+      source: 'const res = await call("/login");',
+      exercising: false,
+    },
+    {
+      why: "calls a local helper that never fetches",
+      source: "function call(p) { return JSON.stringify(p); }\n" +
+        'const res = await call("/login");',
+      exercising: false,
+    },
+    {
+      why: "only names the route in a test title",
+      source: 'Deno.test("login page renders", () => {});',
+      exercising: false,
+    },
+    {
+      why: "only names the route in a comment",
+      source: "// GET /login returns the page",
+      exercising: false,
+    },
+    {
+      why: "only names the route in a log field",
+      source: 'record({ route: "/login", id: 1 });',
+      exercising: false,
+    },
+  ];
+  for (const row of CLASSIFIER_ROWS) {
+    assertEquals(
+      exercisesRoute("tests/synthetic.ts", row.source, ["/login"], true),
+      row.exercising,
+      `classifier row must be ${row.exercising ? "exercising" : "mention-only"}: ${row.why}`,
+    );
+  }
 
   const spec = [
     {
@@ -374,6 +479,68 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       `${population}: new account route ${path} has NO test candidate; do not narrow until one exercises it`,
     );
   }
+  // The tripwire the deleted hand lists used to be (audio-feed-jmq5b): when a suite's
+  // classification CHANGES, a human is asked to audit the route's real handler before the gate
+  // narrows. It is a SNAPSHOT of a static heuristic, not a proof of execution - a suite pinned
+  // as exercising can still stop executing on its own. New suites are deliberately ABSENT, so
+  // adding a legitimate suite is admitted without a red and does not ambush an unrelated
+  // landing; only a flip for an already-pinned suite trips it.
+  const ABH1_PINNED_CLASSIFICATION: Record<
+    string,
+    { exercises: string[]; mentionsOnly: string[] }
+  > = {
+    "src/routes/account_api.ts": {
+      exercises: [
+        "tests/account_regenerate_test.ts",
+        "tests/admin_throttle_test.ts",
+        "tests/auth_body_cap_test.ts",
+        "tests/auth_login_options_limit_test.ts",
+        "tests/auth_routes_test.ts",
+        "tests/feed_discovery_test.ts",
+        "tests/sources_body_cap_test.ts",
+        "tests/webmcp_admin_forms_test.ts",
+      ],
+      mentionsOnly: ["tests/listen_test.ts"],
+    },
+    "src/routes/login.ts": {
+      exercises: [
+        "tests/account_pages_test.ts",
+        "tests/security_audit_test.ts",
+        "tests/speculation_rules_test.ts",
+      ],
+      mentionsOnly: [
+        "tests/admin_session_test.ts",
+        "tests/auth_routes_test.ts",
+        "tests/bookmarklet_test.ts",
+        "tests/csp_reporting_test.ts",
+        "tests/home_test.ts",
+        "tests/origin_test.ts",
+        "tests/share_target_test.ts",
+      ],
+    },
+    "src/routes/admin_telemetry.ts": {
+      exercises: ["tests/admin_subpages_test.ts"],
+      mentionsOnly: [],
+    },
+    "src/routes/webauthn.ts": {
+      exercises: ["tests/passkeys_test.ts"],
+      mentionsOnly: [],
+    },
+    "src/routes/reports.ts": {
+      exercises: ["tests/csp_reporting_test.ts"],
+      mentionsOnly: [
+        "tests/admin_subpages_test.ts",
+        "tests/origin_test.ts",
+        "tests/router_csp_report_url_test.ts",
+      ],
+    },
+  };
+  assertEquals(
+    Object.keys(ABH1_PINNED_CLASSIFICATION).sort(),
+    spec.map((route) => route.file).sort(),
+    `${population}: every audited route needs a pinned classification`,
+  );
+  const derived = new Map<string, { exercises: string[]; mentionsOnly: string[] }>();
   for (const route of spec) {
     const candidates = [...sources].filter(([, source]) => route.mentions(source))
       .map(([file]) => file).sort();
@@ -382,15 +549,20 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       exercisesRoute(file, sources.get(file)!, route.paths, isLogin)
     );
     const mentionsOnly = candidates.filter((file) => !exercises.includes(file));
+    derived.set(route.file, { exercises, mentionsOnly });
     assert(
       exercises.length > 0,
       `${population}: ${route.file} has no exercising candidate suite; do not narrow`,
     );
-    assertEquals(
-      candidates,
-      [...exercises, ...mentionsOnly].sort(),
-      `${population}: candidate classification partitioned every candidate`,
-    );
+    // An exerciser must be able to dispatch. A suite that only CONSTRUCTS a Request for the
+    // route URL (the origin_test / report-shaped fixture shape) has no dispatch and must not
+    // be counted as exercising; this is the general form of the isTrustedReportOrigin exclusion.
+    for (const file of exercises) {
+      assert(
+        sources.get(file)!.includes("fetch("),
+        `${population}: ${file} is classified as exercising ${route.file} but never calls fetch( — a constructed Request that is never dispatched exercises nothing`,
+      );
+    }
     const named = await nameMatchedTests([route.file]);
     assertEquals(
       (named.get(route.file) ?? []).sort(),
@@ -398,6 +570,22 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       `${population}: ${route.file} must select the entire URL candidate UNION, including mention-only suites that could grow real handler tests`,
     );
   }
+  const drift = Object.entries(ABH1_PINNED_CLASSIFICATION).flatMap(([file, pinned]) => {
+    const now = derived.get(file)!;
+    return [
+      ...pinned.exercises.filter((suite) => !now.exercises.includes(suite))
+        .map((suite) => `${file}: ${suite} was EXERCISING, is now mention-only or gone`),
+      ...pinned.mentionsOnly.filter((suite) => !now.mentionsOnly.includes(suite))
+        .map((suite) => `${file}: ${suite} was MENTION-ONLY, is now exercising or gone`),
+    ];
+  });
+  assertEquals(
+    drift,
+    [],
+    `${population}: classification changed for an already-pinned suite — audit the route's real handler, then update ABH1_PINNED_CLASSIFICATION deliberately. This pin is a snapshot of a static heuristic, not a proof of execution.\n${
+      drift.join("\n")
+    }`,
+  );
 });
 
 Deno.test("wb7h: conservative URL candidate union includes existing mention-only modules", async () => {
