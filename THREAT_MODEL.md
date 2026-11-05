@@ -268,3 +268,55 @@ routes, listed separately because the attacker's position there is different.
   already-downloaded episodes stay on disk and keep playing there until it next connects. Separately, the cache has no size bound:
   a device that downloads every episode grows without limit until sign-out (nightly audit
   2026-11-05); an app-driven write-time eviction is the follow-up mechanism if that bites.
+
+## Feed-token ingest boundary — accepted paid synthesis spend (audio-feed-gvx0k)
+
+- **Decision** (audio-feed-gvx0k, from the boundary pass on audio-feed-uclpx; decided 2026-11-05): a feed
+  token IS bounded on paid synthesis spend — per token, before the money moves — so the earlier recording
+  of this boundary ("the only ceiling is whatever global budget exists") understated a real mitigation.
+  Two episode ceilings cover every synthesis path. Both are resolved INSIDE `runSynthesisBatch`
+  (`src/worker/synthesis.ts`), so no entry point can forget them, re-read at the spend gate that runs
+  immediately before `claimEpisode`, and fail closed (a count that cannot be read defers, never spends):
+  - per subscriber — `dailyEpisodeBudget`, default `DEFAULT_DAILY_EPISODE_BUDGET` = **50** paid episodes
+    per UTC day (`src/config.ts`, `dailyEpisodeBudgetFor`; an admin can set it per subscriber, `0` allows
+    nothing);
+  - fleet-wide — `GLOBAL_DAILY_EPISODE_BUDGET`, default **500** paid episodes per UTC day
+    (`globalDailyEpisodeBudgetFor`, audio-feed-m182).
+  The arithmetic: one episode's provider-contract ceiling is `MAX_TTS_SEGMENTS` 64 x 8,192 input /
+  16,384 output tokens = **$9.70** at the promotional $0.50/$9.00-per-1M rates — the repo's own figure,
+  `scripts/real-voice-upload-acceptance.ts` ($19.40 at the standard rates from 2027-01-01). So one token
+  is bounded at 50 x $9.70 = **$485 per UTC day** ($970 standard), which is 10% of the deployment's
+  500-episode = $4,850/day ceiling; a typical 2,000-4,000-word article (~13-27 min of audio at the
+  documented 25 audio tokens/s) costs ~$0.18-$0.36, i.e. ~$9-$18/day per token. PER HOUR that figure is
+  the whole allowance rather than a share of it, because the window resets at 00:00Z and the worker
+  drains at `batchSize` 5 per tick with a measured ~10.2 s per episode — all 50 spend within the first
+  ~20-25 minutes of a UTC day (synthesis cron runs `*/2 * * * *`, `src/cron.ts:207`, at `batchSize` 5
+  per tick, `src/worker/synthesis.ts:280`: 50 episodes needs 10 ticks = ~20 minutes minimum, plus ~50 s
+  of batch work per tick). The per-episode ceiling cannot be grown by a bigger article either: narration
+  input is capped at `MAX_NARRATION_BYTES` 192,000 bytes at accept for `/api/upload`
+  (`src/ingest/upload.ts`) and at the worker's `maxInputBytes` preflight for every path, before any paid
+  call.
+- **Residual (documented, accepted):** the ceilings count COMPLETED episodes — billing commits atomically
+  with `status: "ready"` (`src/storage/kv/episodes.ts`), so an attempt that spends TTS turns and then
+  fails terminally is paid without incrementing the count. Each such episode is bounded (`maxAttempts` 3,
+  `DEFAULT_MAX_CLAIMS` 3, the same 64-call / 192 KB caps) and the ingest request cannot force it
+  deterministically: the request-time refusals — oversized narration, unreadable article, unapproved user
+  — all happen before any paid call. So one request is a margin on the ceiling, not a way round it.
+- **Residual (OPEN GAP, unbounded — audio-feed-kp30l, P2):** there is NO cap on episode creation at
+  accept for one token. `authorizeIngest` (`src/compose/ingest.ts:65`) is a token → approved-user check
+  only; `/api/ingest` and `/api/upload` both enqueue through `enqueueInboxArticle`
+  (`src/compose/ingest.ts:98`), which writes `putArticleWithEpisode` (`src/compose/ingest.ts:139`) — a
+  blind write where "the inbox re-write of a URL is a new episode by request"
+  (`src/storage/kv/articles.ts:251`), so resubmitting the same URL creates a new episode every time; the
+  feed-poll path dedupes by URL (`insertArticleWithEpisodeIfAbsent`, `src/storage/kv/articles.ts:222`)
+  but a feed's item count is the token's choice; the only rate limiters in the app are the anonymous
+  challenge write and failed admin auth (`src/routes/account_api.ts:245`, `:354`), neither covering
+  ingest accept; and the daily budget is read only inside `runSynthesisBatch`, never at accept. So N
+  enqueued episodes × `maxAttempts` 3 paid-then-failed attempts each — none counted by the daily
+  counter — is UNBOUNDED failed-attempt spend per token per UTC day. The only damper is fleet-wide
+  worker throughput (720 ticks/day × 5 claims = 3,600 episode-attempts/day ceiling), which a flooding
+  token can capture in full (FIFO queue, no per-token fairness) — a denial-of-spend against other
+  subscribers on top of its own unbounded share. The earlier "storage cost only" framing of unbounded
+  enqueue was wrong: attempts are paid and the counter never sees them. Fix shape is on the bead: an
+  accept-time per-token creation cap or accept rate limit, counted before the Article+Episode pair
+  commits. This is the same gap main's boundary 2 records as "Residual (unmitigated, recorded)".
