@@ -103,9 +103,15 @@ self.addEventListener("activate", (event) => {
       .then((names) =>
         Promise.all(
           names
-            // Only clean caches this worker owns; the offline audio cache is the
-            // subscriber's own downloaded library and must survive an update.
-            .filter((name) => name.startsWith("audio-feed-shell-") && name !== SHELL_CACHE)
+            // Only clean caches this worker owns. The CURRENT offline audio cache
+            // survives an update — it is the subscriber's own downloaded library —
+            // but superseded generations of either family are swept on activate, so
+            // a future version bump cannot leave an old generation installed
+            // forever (audio-feed-vnu4g).
+            .filter((name) =>
+              (name.startsWith("audio-feed-shell-") || name.startsWith("audio-feed-offline-")) &&
+              name !== SHELL_CACHE && name !== OFFLINE_CACHE
+            )
             .map((name) => caches.delete(name)),
         ),
       )
@@ -115,8 +121,35 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET") return;
   const url = new URL(request.url);
+  // Sign-out and token rotation purge the downloaded library (audio-feed-vnu4g).
+  // "The offline cache must survive an update" is not "must survive sign-out": on a
+  // shared device, a former subscriber's episodes must not linger after the server
+  // has ended the session or rotated the feed token. The request passes through
+  // untouched, and the cache is deleted only after a CONFIRMED outcome — a 2xx for
+  // the JSON calls, or the no-script form logout's 303, which fetch() follows and
+  // reports as a redirected response. A failed call must change nothing.
+  if (
+    request.method === "POST" && url.origin === self.location.origin &&
+    (url.pathname === "/api/auth/logout" || url.pathname === "/api/account/rotate-token")
+  ) {
+    event.respondWith(
+      (async () => {
+        const response = await fetch(request);
+        if (response.ok || response.redirected || response.status === 303) {
+          // Swallowing a failed delete is correct here, not careless: the session is
+          // already ended server-side by the time this runs, so failing the
+          // navigation would misreport the outcome — the user would see a network
+          // error for a sign-out that WORKED. Worst case is a stale library left
+          // behind until the device next connects.
+          await caches.delete(OFFLINE_CACHE).catch(() => {});
+        }
+        return response;
+      })(),
+    );
+    return;
+  }
+  if (request.method !== "GET") return;
   if (url.origin !== self.location.origin) return;
 
   // Downloaded audio: serve from cache first, so an offline episode plays from the
