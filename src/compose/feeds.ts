@@ -13,6 +13,7 @@ import { toFeedEpisode } from "../feed/adapter.ts";
 import { isAudioMode } from "../types.ts";
 import { resolveOrigin } from "../origin.ts";
 import { isSafeBlobKey } from "../storage/blob_key.ts";
+import { screenErrorForLogging } from "../observability/error_screen.ts";
 import { approvedUserFor, forbidden, loadUserByFeedToken, notFound } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import type { ComposeDeps } from "./shared.ts";
@@ -287,9 +288,26 @@ export function createCreateSourceHandler(
         { status: 201, headers: { "cache-control": "no-store" } },
       );
     } catch (error) {
+      // audio-feed-yj8cq: this response is read by the subscriber, so its message must be one
+      // this codebase wrote. An IngestError detail is authored for the user ("That URL is not
+      // an RSS or Atom feed.") and is shown as-is, exactly as src/routes/account_api.ts does.
+      // Anything else is a store, provider or transport failure whose text can carry a store
+      // key, a bucket path or a provider message, so it is screened into the log seam (the
+      // same screen src/server.ts applies to an unhandled error) and answered with a fixed
+      // detail instead of the throw.
+      if (error instanceof IngestError) {
+        return Response.json(
+          { error: error.message },
+          { status: 422, headers: { "cache-control": "no-store" } },
+        );
+      }
+      const screened = screenErrorForLogging(error);
+      console.warn(
+        `[audio-feed] subscribe failed for user ${resolved.user.id}: ${screened.message}`,
+      );
       return Response.json(
-        { error: String((error as Error)?.message ?? error) },
-        { status: 422, headers: { "cache-control": "no-store" } },
+        { error: "Could not subscribe to that feed." },
+        { status: 502, headers: { "cache-control": "no-store" } },
       );
     }
   };

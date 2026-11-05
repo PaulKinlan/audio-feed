@@ -903,6 +903,31 @@ Deno.test("admin create subscriber with optional feedUrl subscribes and queues i
   assertEquals(episodes.length, 2);
 });
 
+Deno.test("a store failure while subscribing is answered with a fixed detail (audio-feed-yj8cq)", async () => {
+  // THE DEFECT this pins: the subscribe catch-all answered with
+  // `String((error as Error)?.message ?? error)`, so any non-IngestError thrown inside
+  // subscribeToFeed - a store/provider failure - was echoed to the caller verbatim. This
+  // store key shape is what a putSource failure can actually carry.
+  const { fetch, stores } = app({ feedTransport: feedTransport(RSS) });
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+  const storeMessage =
+    'kv put failed for ["source","user-1","stratechery"] at blob://audio-store/private-bucket';
+  stores.metadata.putSource = () => Promise.reject(new Error(storeMessage));
+
+  const res = await fetch(
+    post("/api/sources", { feedUrl: "https://stratechery.com/feed/" }, "token-user-1"),
+  );
+  const body = await res.json();
+  assert(
+    !JSON.stringify(body).includes("private-bucket"),
+    "store key text must not reach the caller",
+  );
+  assertEquals(body.error, "Could not subscribe to that feed.");
+  assertEquals(res.status, 502);
+});
+
 Deno.test("POST /api/sources with all-invalid modes returns 400", async () => {
   const { fetch, stores } = app({
     feedTransport: feedTransport(RSS),
