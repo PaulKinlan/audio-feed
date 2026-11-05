@@ -289,8 +289,10 @@ routes, listed separately because the attacker's position there is different.
   500-episode = $4,850/day ceiling; a typical 2,000-4,000-word article (~13-27 min of audio at the
   documented 25 audio tokens/s) costs ~$0.18-$0.36, i.e. ~$9-$18/day per token. PER HOUR that figure is
   the whole allowance rather than a share of it, because the window resets at 00:00Z and the worker
-  drains at `batchSize` 5 per tick with a measured ~10.2 s per episode — all 50 fit inside ~9 minutes of
-  a UTC day's first tick. The per-episode ceiling cannot be grown by a bigger article either: narration
+  drains at `batchSize` 5 per tick with a measured ~10.2 s per episode — all 50 spend within the first
+  ~20-25 minutes of a UTC day (synthesis cron runs `*/2 * * * *`, `src/cron.ts:207`, at `batchSize` 5
+  per tick, `src/worker/synthesis.ts:280`: 50 episodes needs 10 ticks = ~20 minutes minimum, plus ~50 s
+  of batch work per tick). The per-episode ceiling cannot be grown by a bigger article either: narration
   input is capped at `MAX_NARRATION_BYTES` 192,000 bytes at accept for `/api/upload`
   (`src/ingest/upload.ts`) and at the worker's `maxInputBytes` preflight for every path, before any paid
   call.
@@ -299,7 +301,22 @@ routes, listed separately because the attacker's position there is different.
   fails terminally is paid without incrementing the count. Each such episode is bounded (`maxAttempts` 3,
   `DEFAULT_MAX_CLAIMS` 3, the same 64-call / 192 KB caps) and the ingest request cannot force it
   deterministically: the request-time refusals — oversized narration, unreadable article, unapproved user
-  — all happen before any paid call. So it is a margin on the ceiling, not a way round it. Separately,
-  `/api/ingest` and `/api/upload` carry no per-window ACCEPT rate limit: a token can enqueue more pending
-  episodes than its daily allowance, which costs storage and queue scanning but no synthesis money — the
-  work simply defers at the gate. An accept-time rate limit would bound the queue, not the spend.
+  — all happen before any paid call. So one request is a margin on the ceiling, not a way round it.
+- **Residual (OPEN GAP, unbounded — audio-feed-kp30l, P2):** there is NO cap on episode creation at
+  accept for one token. `authorizeIngest` (`src/compose/ingest.ts:65`) is a token → approved-user check
+  only; `/api/ingest` and `/api/upload` both enqueue through `enqueueInboxArticle`
+  (`src/compose/ingest.ts:98`), which writes `putArticleWithEpisode` (`src/compose/ingest.ts:139`) — a
+  blind write where "the inbox re-write of a URL is a new episode by request"
+  (`src/storage/kv/articles.ts:251`), so resubmitting the same URL creates a new episode every time; the
+  feed-poll path dedupes by URL (`insertArticleWithEpisodeIfAbsent`, `src/storage/kv/articles.ts:222`)
+  but a feed's item count is the token's choice; the only rate limiters in the app are the anonymous
+  challenge write and failed admin auth (`src/routes/account_api.ts:245`, `:354`), neither covering
+  ingest accept; and the daily budget is read only inside `runSynthesisBatch`, never at accept. So N
+  enqueued episodes × `maxAttempts` 3 paid-then-failed attempts each — none counted by the daily
+  counter — is UNBOUNDED failed-attempt spend per token per UTC day. The only damper is fleet-wide
+  worker throughput (720 ticks/day × 5 claims = 3,600 episode-attempts/day ceiling), which a flooding
+  token can capture in full (FIFO queue, no per-token fairness) — a denial-of-spend against other
+  subscribers on top of its own unbounded share. The earlier "storage cost only" framing of unbounded
+  enqueue was wrong: attempts are paid and the counter never sees them. Fix shape is on the bead: an
+  accept-time per-token creation cap or accept rate limit, counted before the Article+Episode pair
+  commits. This is the same gap main's boundary 2 records as "Residual (unmitigated, recorded)".
