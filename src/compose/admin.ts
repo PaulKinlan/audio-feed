@@ -18,7 +18,9 @@ import { recordRun } from "../stats.ts";
 import {
   approveUser,
   createUser,
+  DuplicateUserEmailError,
   IllegalTransitionError,
+  isValidEmail,
   listUsers,
   requireAdminToken,
   rotateFeedToken,
@@ -286,6 +288,15 @@ export function createCreateUserHandler(
         headers: { "cache-control": "no-store" },
       });
     }
+    // audio-feed-4ppes: the catch-all below no longer echoes the throw, so the one input error
+    // it used to carry has to be answered here. `isValidEmail` normalises the same way
+    // createUser does, so this guard and that one cannot disagree.
+    if (!isValidEmail(body.email)) {
+      return Response.json({ error: "That does not look like an email address." }, {
+        status: 400,
+        headers: { "cache-control": "no-store" },
+      });
+    }
 
     try {
       const dailyBudgetNum = typeof body.dailyEpisodeBudget === "number"
@@ -352,11 +363,32 @@ export function createCreateUserHandler(
         { status: 201, headers: { "cache-control": "no-store" } },
       );
     } catch (error) {
-      const message = String((error as Error)?.message ?? error);
-      // A duplicate email is the common case and deserves 409, not 500.
-      const conflict = /already registered|taken/i.test(message);
-      return Response.json({ error: message }, {
-        status: conflict ? 409 : 400,
+      // audio-feed-4ppes: the console reads this body, so its message must be one this codebase
+      // wrote. The 409 arm used to be decided by regex-matching /already registered|taken/i on
+      // the raw exception text; it classifies now, because the raw text is no longer what the
+      // caller sees. A duplicate still answers as a duplicate - the test pins that.
+      if (error instanceof DuplicateUserEmailError) {
+        return Response.json({ error: "That email is already registered." }, {
+          status: 409,
+          headers: { "cache-control": "no-store" },
+        });
+      }
+      // An IngestError comes from the optional initial feed (articleUrl or subscribeToFeed) and
+      // its detail is authored for the admin ("That URL is not an RSS or Atom feed."), so it is
+      // shown as-is - the same arm the admin add-source handler above answers with.
+      if (error instanceof IngestError) {
+        return Response.json({ error: error.message }, {
+          status: 422,
+          headers: { "cache-control": "no-store" },
+        });
+      }
+      // Anything else is a store, provider or transport failure whose text can carry a store
+      // key, a bucket path or a provider message, so it is screened into the log seam and
+      // answered with a fixed detail instead of the throw.
+      const screened = screenErrorForLogging(error);
+      console.warn(`[audio-feed] admin user create failed: ${screened.message}`);
+      return Response.json({ error: "Could not create that user." }, {
+        status: 502,
         headers: { "cache-control": "no-store" },
       });
     }
