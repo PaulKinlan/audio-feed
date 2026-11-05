@@ -20,10 +20,12 @@ import type { AppConfig, Stores } from "../src/config.ts";
 import type { AppContext } from "../src/app.ts";
 import {
   createIngestHandler,
+  createUploadHandler,
   INGEST_CREATION_BOUND,
   INGEST_CREATION_RATE,
   INGEST_CREATION_WINDOW,
 } from "../src/compose/ingest.ts";
+import { DEFAULT_MAX_ITEMS, runFeedPollBatch, subscribeToFeed } from "../src/ingest/feed.ts";
 import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
 import { dailyEpisodeBudgetFor, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { utcDayKey } from "../src/types.ts";
@@ -44,6 +46,22 @@ function submit(url: string, token = `token-${USER_ID}`): Request {
     method: "POST",
     headers: { "content-type": "application/json", "x-feed-token": token },
     body: JSON.stringify({ url, mode: "direct" }),
+  });
+}
+
+/** One upload submission, addressed to the token that pays for it. */
+function submitUpload(
+  filename = "notes.txt",
+  content = "A clean document body with multiple words for upload testing.",
+  token = `token-${USER_ID}`,
+): Request {
+  const formData = new FormData();
+  formData.append("file", new File([content], filename, { type: "text/plain" }));
+  formData.append("mode", "direct");
+  return new Request(`${BASE}/api/upload`, {
+    method: "POST",
+    headers: { "x-feed-token": token },
+    body: formData,
   });
 }
 
@@ -270,4 +288,149 @@ Deno.test("audio-feed-kp30l: a subscriber's personal budget is that subscriber's
   );
   const body = await refused.json() as { limit?: number };
   assertEquals(body.limit, personalBudget);
+});
+
+Deno.test("audio-feed-kp30l, audio-feed-l9l63, audio-feed-uhfis: upload requests share the creation bound and N+1 is refused with 429", async () => {
+  const { ctx, stores } = await setup();
+  const { fetchArticle } = countingFetch();
+  const ingestHandler = createIngestHandler(ctx, { fetchArticle }) as IngestRoute;
+  const uploadHandler = createUploadHandler(ctx) as IngestRoute;
+  const bound = INGEST_CREATION_RATE.maxRequests;
+
+  const callIngest = (url: string) => {
+    const req = submit(url);
+    return ingestHandler({ req, params: {}, url: new URL(req.url), ctx });
+  };
+  const callUpload = (filename: string) => {
+    const req = submitUpload(filename);
+    return uploadHandler({ req, params: {}, url: new URL(req.url), ctx });
+  };
+
+  // 1. Consume bound - 1 slots via ingest
+  for (let index = 0; index < bound - 1; index++) {
+    const response = await callIngest(`https://example.com/item-${index}`);
+    assertEquals(response.status, 202, `ingest ${index + 1}/${bound} accepted`);
+  }
+
+  // 2. Slot bound is consumed via upload
+  const uploadOk = await callUpload("final-slot.txt");
+  assertEquals(uploadOk.status, 202, "final slot consumed via upload is accepted");
+
+  // 3. Slot bound + 1 via upload must be refused with 429 naming the bound
+  const uploadRefused = await callUpload("over-cap.txt");
+  assertEquals(uploadRefused.status, 429, "upload past the creation bound is refused");
+
+  const body = await uploadRefused.json() as {
+    bound?: string;
+    limit?: number;
+    windowMs?: number;
+    error?: string;
+  };
+  assertEquals(body.bound, INGEST_CREATION_BOUND, "upload refusal names the bound");
+  assertEquals(body.limit, bound);
+  assertEquals(body.windowMs, INGEST_CREATION_RATE.windowMs);
+  assertStringIncludes(body.error ?? "", String(bound));
+
+  const retryAfter = Number(uploadRefused.headers.get("retry-after"));
+  assert(Number.isFinite(retryAfter) && retryAfter > 0, "upload refusal must have retry-after");
+
+  // Refusal must not write an extra article or episode
+  const episodes = await stores.metadata.listEpisodes({ userId: USER_ID });
+  assertEquals(episodes.length, bound, "refused upload must not commit an episode row");
+});
+
+Deno.test("audio-feed-l9l63, audio-feed-uhfis: feed subscription and polling are bounded by per-poll item caps and URL deduplication, not the creation limiter", async () => {
+  const { ctx } = await setup();
+  const { fetchArticle } = countingFetch();
+  const ingestHandler = createIngestHandler(ctx, { fetchArticle }) as IngestRoute;
+  const bound = INGEST_CREATION_RATE.maxRequests;
+
+  const callIngest = (url: string) => {
+    const req = submit(url);
+    return ingestHandler({ req, params: {}, url: new URL(req.url), ctx });
+  };
+
+  // 1. Exhaust the subscriber's entire rolling 24h creation budget
+  for (let index = 0; index < bound; index++) {
+    const res = await callIngest(`https://example.com/fill-budget-${index}`);
+    assertEquals(res.status, 202);
+  }
+  const refused = await callIngest("https://example.com/should-be-refused");
+  assertEquals(refused.status, 429, "ingest is now completely exhausted");
+
+  // 2. Feed subscription: feed contains 8 items.
+  // Proves: (a) NOT refused by the creation limiter even though budget is 0;
+  //         (b) bounded by deps.maxItems (default 5 for subscribeToFeed), queueing exactly 5.
+  const feedXml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Bounded Feed</title>
+  ${
+    Array.from({ length: 8 }, (_, i) =>
+      `<item><title>Item ${i}</title><link>https://example.com/feed-item-${i}</link></item>`).join(
+        "\n",
+      )
+  }
+</channel></rss>`;
+
+  const mockDeps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(feedXml, { headers: { "content-type": "application/rss+xml" } }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({
+        url,
+        title: "Article Title",
+        author: null,
+        publishedAt: null,
+        lead: "Lead",
+        body: "Body content with several sentences for valid article.",
+      }),
+  };
+
+  const { poll } = await subscribeToFeed(
+    ctx,
+    { userId: USER_ID, feedUrl: "https://example.com/bounded-feed.xml" },
+    { ...mockDeps, maxItems: 5 },
+  );
+
+  assertEquals(poll.queued, 5, "initial poll is bounded by maxItems (5 items queued out of 8)");
+  assertEquals(poll.items, 5, "processed items bounded by maxItems");
+
+  // 3. Proves URL deduplication: re-polling the same feed inserts 0 new episodes
+  const rePoll = await subscribeToFeed(
+    ctx,
+    { userId: USER_ID, feedUrl: "https://example.com/bounded-feed.xml" },
+    { ...mockDeps, maxItems: 5 },
+  );
+  assertEquals(
+    rePoll.poll.queued,
+    0,
+    "re-poll queues 0 new items because of insertArticleWithEpisodeIfAbsent deduplication",
+  );
+  assertEquals(rePoll.poll.skipped, 5, "all 5 previously seen items skipped");
+
+  // 4. Batch feed polling (runFeedPollBatch) also succeeds and is bounded by DEFAULT_MAX_ITEMS (10)
+  const batchResult = await runFeedPollBatch(ctx, {
+    ...mockDeps,
+    minIntervalMs: 0,
+    maxItemsPerSource: DEFAULT_MAX_ITEMS,
+  });
+  // Both subscribed sources are polled without being refused by creation cap.
+  // The remaining 3 items (items 5, 6, 7) that exceeded the 5-item subscription ceiling are now queued by periodic polling.
+  assertEquals(batchResult.polled, 2);
+  assertEquals(
+    batchResult.queued,
+    3,
+    "periodic polling queues the remaining 3 items up to DEFAULT_MAX_ITEMS",
+  );
+  assertEquals(DEFAULT_MAX_ITEMS, 10, "periodic poll bound is DEFAULT_MAX_ITEMS (10)");
+
+  // 5. Running the batch poller again queues 0 new items because all 8 items are now deduped in KV
+  const secondBatch = await runFeedPollBatch(ctx, {
+    ...mockDeps,
+    minIntervalMs: 0,
+    maxItemsPerSource: DEFAULT_MAX_ITEMS,
+  });
+  assertEquals(secondBatch.queued, 0, "subsequent poll queues 0 items due to URL deduplication");
 });

@@ -111,11 +111,25 @@ export async function authorizeIngest(
  * WHY 24 HOURS, NOT A UTC DAY: the limiter is a sliding window; a rolling 24 hours cannot be reset
  * by waiting for midnight, and it needs no day key.
  *
- * SCOPE — user-initiated submits only. Feed polling does NOT come through here: `queueItems`
- * (src/ingest/feed.ts) writes through `insertArticleWithEpisodeIfAbsent`, which dedupes on the URL
- * and is already capped at `maxItemsPerSource` items per poll. So a real feed's item burst is
- * unaffected by this bound, and a person adding a handful of articles a day is two orders of
- * magnitude inside it.
+ * SCOPE — user-initiated submits only (/api/ingest and /api/upload).
+ *
+ * WHY FEED POLLING AND SUBSCRIPTIONS ARE NOT CAPPED HERE (audio-feed-l9l63, audio-feed-uhfis):
+ * Feed subscription initial polls (`subscribeToFeed`, src/ingest/feed.ts:490) and interval feed
+ * polling (`pollSource`, src/ingest/feed.ts:320) create episodes through
+ * `insertArticleWithEpisodeIfAbsent` (src/ingest/feed.ts:413). They are deliberately NOT subjected
+ * to `refuseIngestOverCreationCap`: subjecting subscriptions or automated polling to a subscriber's
+ * rolling 24-hour creation cap would refuse legitimate subscriptions or drop feed items when an
+ * inbox user has reached their daily creation limit. Instead, feed paths are bounded by:
+ * (1) per-poll item caps: `deps.maxItems ?? 5` on subscription initial poll, and
+ *     `deps.maxItems ?? DEFAULT_MAX_ITEMS` (10 items) on periodic poll;
+ * (2) atomic URL deduplication: `insertArticleWithEpisodeIfAbsent` CAS drops seen items without queueing;
+ * (3) cadence and concurrency bounds: 15-minute `minIntervalMs`, batch size 5, and worker concurrency 4.
+ *
+ * WHY ADMIN-DRIVEN CREATION IS NOT CAPPED (audio-feed-l9l63):
+ * Admin operations (createUser with initial feed, addSourceForUser, adminPollNow, admin regenerate) are
+ * operator-driven and guarded by `adminGate`. Capping operator actions with subscriber creation limits
+ * would break legitimate bulk operations such as subscriber onboarding batches, prompt migrations,
+ * and disaster-recovery feed regenerations.
  */
 export const INGEST_CREATION_RATE = {
   maxRequests: DEFAULT_DAILY_EPISODE_BUDGET,
