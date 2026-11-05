@@ -722,6 +722,35 @@ Deno.test("a failed sign-out purges nothing, and unrelated POSTs are never inter
   assertEquals(harness.cachedUrls(OFFLINE_CACHE), [`${BASE}/audio/ep-1.wav`]);
 });
 
+Deno.test("a successful sign-in leaves a signed-in subscriber's library untouched (audio-feed-vnu4g)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+  const harness = createServiceWorkerHarness(
+    swText,
+    (request) =>
+      request.url.endsWith("/api/auth/login")
+        ? Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+        : appFetch(request),
+  );
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-1.wav`, new Response("one", { status: 200 }));
+  harness.seedCache(OFFLINE_CACHE, `${BASE}/audio/ep-2.wav`, new Response("two", { status: 200 }));
+
+  // Sign-in is the opposite of sign-out: a CONFIRMED success (2xx) must leave the
+  // library exactly as it was, and the worker must not interpose on a POST it
+  // does not own.
+  const outcome = await harness.dispatch("fetch", { request: postRequest("/api/auth/login") });
+  assertEquals(
+    outcome.waits,
+    0,
+    "the worker must not respondWith on a POST it does not own",
+  );
+  assertEquals(
+    harness.cachedUrls(OFFLINE_CACHE),
+    [`${BASE}/audio/ep-1.wav`, `${BASE}/audio/ep-2.wav`],
+    "a signed-in subscriber's downloaded library must survive a successful sign-in",
+  );
+});
+
 Deno.test("activation sweeps superseded offline-cache generations while preserving the current one (audio-feed-vnu4g)", async () => {
   const { fetch: appFetch } = await seeded();
   const swText = await (await appFetch(get("/sw.js"))).text();

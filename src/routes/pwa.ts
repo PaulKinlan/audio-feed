@@ -137,7 +137,12 @@ self.addEventListener("fetch", (event) => {
       (async () => {
         const response = await fetch(request);
         if (response.ok || response.redirected || response.status === 303) {
-          await caches.delete(OFFLINE_CACHE);
+          // Swallowing a failed delete is correct here, not careless: the session is
+          // already ended server-side by the time this runs, so failing the
+          // navigation would misreport the outcome — the user would see a network
+          // error for a sign-out that WORKED. Worst case is a stale library left
+          // behind until the device next connects.
+          await caches.delete(OFFLINE_CACHE).catch(() => {});
         }
         return response;
       })(),
