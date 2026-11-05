@@ -1582,6 +1582,47 @@ Deno.test(
       "READINESS_POLL_MS must be the RULE applied to the measured floor, not a literal that equals it today",
     );
 
+    // A correct DEFINITION proves nothing about its USE: swapping the readiness row's
+    // `Date.now() + READINESS_POLL_MS` for `Date.now() + 16_000` leaves the constant correct and
+    // unused and every value assertion above green, while the wait silently stops being derived.
+    // That is the substitution hole one level out from the definition, so pin the usage's shape:
+    // follow the row's state-gate loop to the variable it compares against `Date.now()`, then read
+    // that variable's binding and compare it to the derived expression with whitespace collapsed.
+    // Not the bare-literal BAN below: that ban matches digit strings (`\b(150|15_000|15000)\b`), so
+    // `16_000`, `150_000` and `1.5e4` all slip past it - the teeth for the usage site are here.
+    const readinessGates = [
+      ...stripped.matchAll(
+        /while\s*\(\s*Date\.now\(\)\s*<\s*([A-Za-z_$][\w$]*)\s*&&\s*handlerEntered\s*===\s*0\s*\)/g,
+      ),
+    ];
+    assertEquals(
+      readinessGates.length,
+      1,
+      "the readiness row must state-gate on exactly one `while (Date.now() < <deadline> && " +
+        "handlerEntered === 0)` loop - the usage pin below reads that loop's deadline binding",
+    );
+    const deadlineVariable = readinessGates[0]?.[1];
+    assert(
+      deadlineVariable,
+      "the readiness state-gate loop must compare `Date.now()` against a named deadline variable",
+    );
+    const deadlineBinding = stripped.match(
+      new RegExp(`(?:const|let)\\s+${deadlineVariable}\\s*=([^;]+);`),
+    );
+    const deadlineExpression = deadlineBinding?.[1];
+    assert(
+      deadlineExpression,
+      `the readiness loop's deadline \`${deadlineVariable}\` must be bound by a const/let ` +
+        "declaration this pin can read",
+    );
+    assertEquals(
+      deadlineExpression.replace(/\s+/g, " ").trim(),
+      "Date.now() + READINESS_POLL_MS",
+      "the readiness deadline must be DERIVED where it is USED: `Date.now() + 16_000` there " +
+        "keeps READINESS_POLL_MS correct and unused, so the wait stops tracking the measured " +
+        "floor while every value assertion above stays green (audio-feed-fxh3i)",
+    );
+
     // The file must not contain a bare 150 or 15_000 / 15000 where the derived constant belongs.
     const bareLiteralPattern = new RegExp("\\b(15" + "0|15_" + "000|15" + "000)\\b");
     assertEquals(
