@@ -38,9 +38,11 @@ Deno.test("anchor-positioning: player stylesheet delivers anchor-positioning rul
   assert(css.includes("@supports (anchor-name: --tooltip-anchor)"));
   assert(css.includes("anchor-name: --tooltip-anchor"));
   assert(css.includes("position-anchor: --tooltip-anchor"));
+  assert(css.includes("position-area: bottom span-right"));
   assert(css.includes("top: anchor(bottom)"));
   assert(css.includes("left: anchor(left)"));
   assert(css.includes("position-try-fallbacks: flip-block"));
+  assert(css.includes("flip-inline"));
 });
 
 Deno.test("anchor-positioning: admin stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", () => {
@@ -55,8 +57,10 @@ Deno.test("anchor-positioning: admin stylesheet delivers anchor-positioning rule
   assert(adminCss.includes("pointer-events: auto"));
   assert(adminCss.includes("@supports (anchor-name: --tooltip-anchor)"));
   assert(adminCss.includes("position-anchor: --tooltip-anchor"));
+  assert(adminCss.includes("position-area: bottom span-right"));
   assert(adminCss.includes("top: anchor(bottom)"));
   assert(adminCss.includes("position-try-fallbacks: flip-block"));
+  assert(adminCss.includes("flip-inline"));
 });
 
 Deno.test("anchor-positioning: shell stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", () => {
@@ -66,8 +70,10 @@ Deno.test("anchor-positioning: shell stylesheet delivers anchor-positioning rule
   assert(shellHtml.includes("pointer-events: auto"));
   assert(shellHtml.includes("@supports (anchor-name: --tooltip-anchor)"));
   assert(shellHtml.includes("position-anchor: --tooltip-anchor"));
+  assert(shellHtml.includes("position-area: bottom span-right"));
   assert(shellHtml.includes("top: anchor(bottom)"));
   assert(shellHtml.includes("position-try-fallbacks: flip-block"));
+  assert(shellHtml.includes("flip-inline"));
 });
 
 Deno.test("anchor-positioning: the tooltip is a manual popover in every markup, CSS, and JS home (audio-feed-tyu77)", async () => {
@@ -417,14 +423,16 @@ Deno.test({
   <style>
     :root { --space-1: .25rem; --space-2: .5rem; --surface-3: #e3e0ee; --text: #111; --border: #999; --radius-sm: 6px; --ease: ease; }
     body { margin: 0; height: 900px; font: 14px system-ui; }
-    #mid  { position: absolute; top: 200px;  left: 220px; width: 120px; height: 36px; }
-    #edge { position: absolute; top: 860px; left: 220px; width: 120px; height: 36px; }
+    #mid   { position: absolute; top: 200px;  left: 220px; width: 120px; height: 36px; }
+    #edge  { position: absolute; top: 860px; left: 220px; width: 120px; height: 36px; }
+    #right { position: absolute; top: 200px; left: 880px; width: 100px; height: 36px; }
     ${listenCss}
   </style>
 </head>
 <body>
   <button id="mid" data-tooltip="Download episode">mid</button>
   <button id="edge" data-tooltip="Near bottom edge">edge</button>
+  <button id="right" data-tooltip="Revoke old URL and generate new feed token">right</button>
   <div id="results"></div>
   ${TOOLTIP_HTML}
 
@@ -433,6 +441,7 @@ Deno.test({
 
     const midBtn = document.getElementById("mid");
     const edgeBtn = document.getElementById("edge");
+    const rightBtn = document.getElementById("right");
     const tip = document.getElementById("appTooltip");
     const out = document.getElementById("results");
 
@@ -450,7 +459,15 @@ Deno.test({
     const cssEdgeY = Math.round(edgeTipRect.top);
     const cssEdgeFlipped = cssEdgeY < edgeRect.top;
 
-    // 3. Fallback calculation for parity check
+    // 3. Measure CSS Anchor Positioning path on right-edge button (flip-inline)
+    rightBtn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    const rightRect = rightBtn.getBoundingClientRect();
+    const rightTipRect = tip.getBoundingClientRect();
+    const cssRightX = Math.round(rightTipRect.left);
+    const cssRightR = Math.round(rightTipRect.right);
+    const cssRightOverflows = cssRightR > window.innerWidth;
+
+    // 4. Fallback calculation for parity check
     const tipH = tip.offsetHeight || 28;
     const margin = 8;
 
@@ -473,7 +490,10 @@ Deno.test({
       cssEdgeY,
       cssEdgeFlipped,
       fallbackEdgeY,
-      targetEdgeTop: Math.round(edgeRect.top)
+      targetEdgeTop: Math.round(edgeRect.top),
+      cssRightX,
+      cssRightR,
+      cssRightOverflows
     });
   </script>
 </body>
@@ -535,6 +555,13 @@ Deno.test({
         res.fallbackEdgeY < res.targetEdgeTop,
         "fallback must flip above target",
       );
+
+      // Right-viewport coordinates: flip-inline prevents right-edge overflow
+      assertEquals(
+        res.cssRightOverflows,
+        false,
+        "CSS position-try-fallbacks: flip-inline must prevent tooltip from overflowing right viewport edge",
+      );
     } finally {
       await Deno.remove(tempHtmlFile).catch(() => {});
       await Deno.remove(profileDir, { recursive: true }).catch(() => {});
@@ -556,14 +583,16 @@ Deno.test({
   <style>
     :root { --space-1: .25rem; --space-2: .5rem; --surface-3: #e3e0ee; --text: #111; --border: #999; --radius-sm: 6px; --ease: ease; }
     body { margin: 0; height: 900px; font: 14px system-ui; }
-    #mid  { position: absolute; top: 200px;  left: 220px; width: 120px; height: 36px; }
-    #edge { position: absolute; top: 860px; left: 220px; width: 120px; height: 36px; }
+    #mid   { position: absolute; top: 200px;  left: 220px; width: 120px; height: 36px; }
+    #edge  { position: absolute; top: 860px; left: 220px; width: 120px; height: 36px; }
+    #right { position: absolute; top: 200px; left: 880px; width: 100px; height: 36px; }
     ${listenCss}
   </style>
 </head>
 <body>
   <button id="mid" data-tooltip="Download episode">mid</button>
   <button id="edge" data-tooltip="Near bottom edge">edge</button>
+  <button id="right" data-tooltip="Revoke old URL and generate new feed token">right</button>
   <div id="results"></div>
   ${TOOLTIP_HTML}
 
@@ -577,6 +606,7 @@ Deno.test({
     const tip = document.getElementById("appTooltip");
     const midBtn = document.getElementById("mid");
     const edgeBtn = document.getElementById("edge");
+    const rightBtn = document.getElementById("right");
     const out = document.getElementById("results");
 
     // audio-feed-kuu0: watch the tooltip's own height read. If the fallback writes
@@ -604,6 +634,12 @@ Deno.test({
     const edgeFlips = (edgeRect.bottom + 8 + tipHeight) > window.innerHeight &&
       (edgeRect.top - 8 - tipHeight) >= 0;
 
+    rightBtn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    const rightRect = rightBtn.getBoundingClientRect();
+    const rightStyleLeft = tip.style.left;
+    const rightTipRenderedRight = tip.getBoundingClientRect().right;
+    const rightOverflows = rightTipRenderedRight > window.innerWidth;
+
     out.textContent = JSON.stringify({
       leftAtFirstHeightRead,
       midStyleLeft,
@@ -614,7 +650,10 @@ Deno.test({
       edgeStyleTop,
       edgeRectTop: edgeRect.top,
       edgeRenderedBottom,
-      edgeFlips
+      edgeFlips,
+      rightStyleLeft,
+      rightTipRenderedRight,
+      rightOverflows
     });
   </script>
 </body>
@@ -663,6 +702,7 @@ Deno.test({
         res.edgeRenderedBottom <= res.edgeRectTop,
         "the flipped tooltip must render above its target",
       );
+      assertEquals(res.rightOverflows, false, "the JS fallback must not overflow the right edge");
     } finally {
       await Deno.remove(tempHtmlFile).catch(() => {});
       await Deno.remove(profileDir, { recursive: true }).catch(() => {});

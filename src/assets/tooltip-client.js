@@ -69,10 +69,17 @@ if (typeof document !== "undefined" && typeof document.addEventListener === "fun
         // forced a synchronous reflow on every tooltip shown on a non-anchor engine.
         const rect = target.getBoundingClientRect();
         const tooltipHeight = tooltipEl.offsetHeight || 28;
+        const tooltipWidth = tooltipEl.offsetWidth || 120;
         const margin = 8;
         const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
         const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
-        tooltipEl.style.left = rect.left + "px";
+        const overflowRight = (rect.left + tooltipWidth) > window.innerWidth;
+        const fitsLeft = (rect.right - tooltipWidth) >= 0;
+        if (overflowRight && fitsLeft) {
+          tooltipEl.style.left = (rect.right - tooltipWidth) + "px";
+        } else {
+          tooltipEl.style.left = rect.left + "px";
+        }
         if (overflowBottom && fitsAbove) {
           tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";
         } else {

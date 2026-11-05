@@ -283,10 +283,11 @@ export const SHELL_CSS = `
     .tooltip {
       position: fixed;
       position-anchor: --tooltip-anchor;
+      position-area: bottom span-right;
       top: anchor(bottom);
       left: anchor(left);
       margin-block-start: 8px;
-      position-try-fallbacks: flip-block;
+      position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
     }
   }
   /* audio-feed-rxa2: the iOS focus floor, by TYPE rather than by enumeration.
