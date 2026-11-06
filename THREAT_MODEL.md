@@ -376,21 +376,42 @@ routes, listed separately because the attacker's position there is different.
   `DEFAULT_MAX_CLAIMS` 3, the same 64-call / 192 KB caps) and the ingest request cannot force it
   deterministically: the request-time refusals — oversized narration, unreadable article, unapproved user
   — all happen before any paid call. So one request is a margin on the ceiling, not a way round it.
-- **Residual (OPEN GAP, unbounded — audio-feed-kp30l, P2):** there is NO cap on episode creation at
-  accept for one token. `authorizeIngest` (`src/compose/ingest.ts:65`) is a token → approved-user check
-  only; `/api/ingest` and `/api/upload` both enqueue through `enqueueInboxArticle`
-  (`src/compose/ingest.ts:98`), which writes `putArticleWithEpisode` (`src/compose/ingest.ts:139`) — a
-  blind write where "the inbox re-write of a URL is a new episode by request"
-  (`src/storage/kv/articles.ts:251`), so resubmitting the same URL creates a new episode every time; the
-  feed-poll path dedupes by URL (`insertArticleWithEpisodeIfAbsent`, `src/storage/kv/articles.ts:222`)
-  but a feed's item count is the token's choice; the only rate limiters in the app are the anonymous
-  challenge write and failed admin auth (`src/routes/account_api.ts:245`, `:354`), neither covering
-  ingest accept; and the daily budget is read only inside `runSynthesisBatch`, never at accept. So N
-  enqueued episodes × `maxAttempts` 3 paid-then-failed attempts each — none counted by the daily
-  counter — is UNBOUNDED failed-attempt spend per token per UTC day. The only damper is fleet-wide
-  worker throughput (720 ticks/day × 5 claims = 3,600 episode-attempts/day ceiling), which a flooding
-  token can capture in full (FIFO queue, no per-token fairness) — a denial-of-spend against other
-  subscribers on top of its own unbounded share. The earlier "storage cost only" framing of unbounded
-  enqueue was wrong: attempts are paid and the counter never sees them. Fix shape is on the bead: an
-  accept-time per-token creation cap or accept rate limit, counted before the Article+Episode pair
-  commits. This is the same gap main's boundary 2 records as "Residual (unmitigated, recorded)".
+- **Residual (CLOSED by the creation cap — audio-feed-kp30l; recorded 2026-11-06):** accepted
+  episode CREATION is capped per subscriber, so the failed-attempt spend this passage used to call
+  UNBOUNDED is bounded. `authorizeIngestWithCap` (`src/compose/ingest.ts:195-199`) composes the
+  identity gate (`authorizeIngest`, `src/compose/ingest.ts:68`) with `refuseIngestOverCreationCap`
+  (`:157-193`) on both `/api/ingest` and `/api/upload` (`:325`, `:365`), and since
+  audio-feed-ukuka the periodic feed poll consumes the SAME row (`src/ingest/feed.ts:313-314`).
+  The window is one `SlidingWindowRateLimiter` row: `INGEST_CREATION_RATE.windowMs` = 24 hours
+  (`src/compose/ingest.ts:125-129`), namespace `ingest_creation` (`:131`), keyed on the USER id —
+  the account whose token pays, not the address — and the bound is that subscriber's own funded
+  budget, `dailyEpisodeBudgetFor` (`src/worker/synthesis.ts:339-352`): an admin-set personal
+  budget, else `DEFAULT_DAILY_EPISODE_BUDGET` **50** (`src/config.ts:42`). Cap and spend budget
+  read one number, so the cap cannot refuse a day the budget would fund. The check sits inside
+  `authorize`, i.e. after identity resolves and BEFORE the article fetch and before
+  `putArticleWithEpisode` commits (`src/compose/ingest.ts:195-199`, `src/ingest/url.ts:1130`), and
+  a REFUSAL costs no credit: the refusal branch returns the active window unchanged rather than
+  appending a hit (`src/auth/rate_limit.ts:137-145`), so it buys no fetch and commits no episode,
+  and it answers `429` naming the bound (`episode_creations_per_token`), the limit, the window and
+  a `retry-after` (`src/compose/ingest.ts:172-192`). `tests/ingest_creation_cap_test.ts` pins the
+  shape from the outside: N accepted, the N+1th refused by name, and the refusal never reaching
+  the fetch (`:97-131`).
+- **Residuals that remain (recorded):** (a) it is a ceiling, not an absence — the worst case at
+  the default budget is 50 accepted creations x `maxAttempts` 3 claims x the per-episode **$9.70**
+  provider ceiling quoted above = **$1,455 per rolling 24 hours** per subscriber, against the $485
+  that 50 COMPLETED episodes cost, because the window bounds CREATIONS while the daily counters
+  bill only at `ready` (`src/storage/kv/episodes.ts:64-74`) and a re-claim that resumes no
+  persisted segment re-bills (`src/worker/synthesis.ts:126-132`). (b) A creation whose fetch fails
+  still consumed its slot, so a mistyped or unreachable URL costs a legitimate subscriber one of
+  fifty — accepted: the count has to precede the fetch for the refusal to be cheap (boundary 2,
+  residual (d)). (c) The initial subscription poll is deliberately OUTSIDE the cap: it is bounded
+  at 5 items per source instead (`src/ingest/feed.ts:639-651`), because capping a first
+  subscription by a rolling window would refuse legitimate subscriptions to a subscriber who has
+  exhausted their ingest slots. (d) A periodic poll with no allowance left DEFERS rather than
+  refuses: nothing is written for the item, not even its URL, and the scan offset is kept so the
+  same window is retried (`src/ingest/feed.ts:426-440`, `:337`) — so an item whose publisher drops
+  it (window rotation, a truncated document) before the allowance comes back is LOST silently, and
+  no later poll can recover it. (e) One subscriber's cap does not bound the fleet: N approved
+  subscribers multiply it, which is why `GLOBAL_DAILY_EPISODE_BUDGET` (**500** paid episodes per
+  UTC day, boundary 8) exists, and the fleet-wide throughput those 150 attempts are drawn from is
+  720 ticks/day x 5 claims = 3,600 episode-attempts/day, shared across every subscriber.
