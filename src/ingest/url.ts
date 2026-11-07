@@ -518,7 +518,6 @@ export async function discoverFeeds(
   options: { transport?: Transport; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<{ url: string; title: string; feeds: DiscoveredFeed[] }> {
   let url = articleUrl(input);
-  const initialHostname = url.hostname.toLowerCase();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? TIMEOUT_MS);
   const signal = options.signal
@@ -537,11 +536,8 @@ export async function discoverFeeds(
         if (!location || hop === 5) {
           throw new IngestError(422, "Page has an invalid or excessive redirect chain.");
         }
-        const nextUrl = articleUrl(new URL(location, url).href);
-        if (nextUrl.hostname.toLowerCase() !== initialHostname) {
-          throw new IngestError(422, "Cross-host redirect is not allowed for feed discovery.");
-        }
-        url = nextUrl;
+        // Re-resolved through public lookup and checked per-hop, exactly as fetchArticle does.
+        url = articleUrl(new URL(location, url).href);
         continue;
       }
       if (!response.ok) {

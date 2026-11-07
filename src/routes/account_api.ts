@@ -477,7 +477,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
      *
      * POST with same-origin CSRF protection (`signedIn`). It fetches a page the
      * SIGNED-IN person asked for, through the same guards as article fetching
-     * (`articleUrl` + `publicLookup` + bounded read + same-host redirect limit),
+     * (`articleUrl` + `publicLookup` + bounded read + per-hop redirect re-validation),
      * rate-limited per subscriber, and answers with feed URLs only.
      */
     discoverFeed: async ({ req }) => {

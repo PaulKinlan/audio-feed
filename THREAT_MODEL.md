@@ -214,7 +214,7 @@ routes, listed separately because the attacker's position there is different.
   fetchable — loopback, LAN, metadata and transition ranges are denied (`:53`); every redirect target is
   re-validated and chains are capped at 5 (`:238`, `:310-311`, `:348`, `:537`); reads are bounded at 2 MiB
   and 15 s (`:512-513`); a public hostname that resolves to a private address is refused (`:456-457`);
-  feed discovery refuses cross-host redirects (`src/ingest/url.ts`); `POST /api/account/discover-feed` is
+  feed discovery re-validates each redirect hop through `articleUrl` and `publicLookup`; `POST /api/account/discover-feed` is
   gated by the strict same-origin CSRF wall (`signedIn`, refusing GET via 405 Method Not Allowed) and
   rate-limited per subscriber (`DISCOVER_FEED_RATE` 30 requests / 5 min, `src/routes/account_api.ts`).
 - **Residuals:** (a) the fetch walls bound WHERE the server fetches, and since audio-feed-kp30l the
@@ -225,7 +225,7 @@ routes, listed separately because the attacker's position there is different.
   outside it; `POST /api/sources` discovery (which fetches a feed document, not an article) and
   `POST /api/account/discover-feed` (which discovers feeds from a subscriber-provided page) remain
   outside the daily creation window, bounded instead by subscriber auth, strict same-origin CSRF,
-  per-subscriber sliding-window rate limiting, 2 MiB / 15 s caps, same-host redirect enforcement,
+  per-subscriber sliding-window rate limiting, 2 MiB / 15 s caps, per-hop public redirect re-validation,
   and public-unicast address validation. (b) Prompt injection and content
   integrity (partly mitigated, recorded — audio-feed-o9wew): publisher-supplied text reaches the
   reasoning LLM under delimiter fencing rather than raw. In `src/worker/script.ts`
