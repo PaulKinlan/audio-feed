@@ -96,21 +96,23 @@ routes, listed separately because the attacker's position there is different.
   counted — and counting attempts instead would change what the daily budget MEANS (one broken
   article consuming three of a subscriber's fifty) while still not bounding how many episodes exist.
   Creation is what a token chooses and is countable before anything is paid. The shared
-  ingest/upload/periodic-poll creation window bounds that subset to **50 creations x `maxAttempts`
-  3 = 150 paid attempts** per rolling 24 hours at the default funded budget; initial
-  subscriptions and operator actions are outside this window. A same-URL resubmission — which IS
+  ingest/upload/periodic-poll/initial-subscription-poll creation window bounds that subset to **50 creations x `maxAttempts`
+  3 = 150 paid attempts** per rolling 24 hours at the default funded budget; operator
+  actions are outside this window. A same-URL resubmission — which IS
   a new episode by request
   (`src/storage/kv/articles.ts:251`) — is charged like any other creation.
 - **Residuals that remain:** (a) those 150 attempts still do not reach the completion counter: the
   bound limits how many episodes can be attempted, not how spend is accounted, and the per-episode
   segment/attempt ceilings still multiply per episode (see boundary 8). (b) The cap covers
-  the *refusal* on user-initiated submits only (/api/ingest and /api/upload). Subscription initial polls remain
-  bounded by 5 items per source, not by a subscriber allowance. Periodic feed polls are bounded
-  by 10 items per source per poll, not by that cap alone per subscriber: 96 polls/day across S
-  sources could otherwise enqueue up to 960 x S episodes/day. Periodic polls now use the SAME
-  rolling 24h funded creation limiter as ingest/upload to defer new items beyond the subscriber's
-  remaining allowance, leaving them unmarked for subsequent polls; they never refuse subscriptions
-  or discard feed updates. Polls examine at most 100 feed items' URLs per source per tick, walking
+  the *refusal* on user-initiated submits (/api/ingest and /api/upload), and since audio-feed-jgois
+  subscription creation is bounded by a source ceiling code-tied to `dailyEpisodeBudgetFor`
+  (`sourceCeilingFor`, bound `sources_per_subscriber`), refusing the (N+1)th source at no credit cost.
+  Initial subscription polls and periodic feed polls both consume the SAME rolling 24h funded creation
+  limiter as ingest/upload to defer new items beyond the subscriber's remaining allowance, leaving them
+  unmarked for subsequent polls; they never refuse subscriptions or discard feed updates. Initial subscription
+  polls queue at most 5 items per source and hold offset 0 when deferred; periodic feed polls are bounded
+  by 10 items per source per poll: 96 polls/day across S sources could otherwise enqueue up to 960 x S episodes/day.
+  Polls examine at most 100 feed items' URLs per source per tick, walking
   past seen URLs to select up to 10 unseen items; a persisted offset resumes a scan window on the
   next tick when 100 lookups were insufficient. Polls log deferred counts, remaining allowance,
   and exhausted scan windows per source. Parsing the fetched XML document is still proportional
@@ -215,10 +217,10 @@ routes, listed separately because the attacker's position there is different.
 - **Residuals:** (a) the fetch walls bound WHERE the server fetches, and since audio-feed-kp30l the
   creation cap in boundary 2 is checked BEFORE the fetch, so one subscriber cannot exceed 50 accepted
   article fetches per rolling 24 hours through `/api/ingest` or `/api/upload`, and since
-  audio-feed-ukuka the periodic feed poll has consumed the same row too, so its accepted article
-  fetches count against that same 50 rather than sitting outside it; initial subscription polls
-  (5 items per source, bounded separately) and `POST /api/sources` discovery (which fetches a feed
-  document, not an article) remain outside the window. (b) Prompt injection and content
+  audio-feed-ukuka and audio-feed-jgois periodic feed polls and initial subscription polls consume
+  the same row too, so their accepted article fetches count against that same 50 rather than sitting
+  outside it; `POST /api/sources` discovery (which fetches a feed document, not an article) remains
+  outside the window. (b) Prompt injection and content
   integrity (partly mitigated, recorded — audio-feed-o9wew): publisher-supplied text reaches the
   reasoning LLM under delimiter fencing rather than raw. In `src/worker/script.ts`
   (`buildScriptPrompt`, `:180-213`), every publisher-controlled field (`title`, `author`, `summary`,
@@ -381,7 +383,9 @@ routes, listed separately because the attacker's position there is different.
   UNBOUNDED is bounded. `authorizeIngestWithCap` (`src/compose/ingest.ts:195-199`) composes the
   identity gate (`authorizeIngest`, `src/compose/ingest.ts:68`) with `refuseIngestOverCreationCap`
   (`:157-193`) on both `/api/ingest` and `/api/upload` (`:325`, `:365`), and since
-  audio-feed-ukuka the periodic feed poll consumes the SAME row (`src/ingest/feed.ts:313-314`).
+  audio-feed-ukuka and audio-feed-jgois periodic feed polls and initial subscription polls consume
+  the SAME row (`src/ingest/feed.ts:313-314`, `:658-662`), while subscription creation is bounded
+  by `sourceCeilingFor` (`src/compose/ingest.ts`).
   The window is one `SlidingWindowRateLimiter` row: `INGEST_CREATION_RATE.windowMs` = 24 hours
   (`src/compose/ingest.ts:125-129`), namespace `ingest_creation` (`:131`), keyed on the USER id —
   the account whose token pays, not the address — and the bound is that subscriber's own funded
@@ -404,10 +408,13 @@ routes, listed separately because the attacker's position there is different.
   persisted segment re-bills (`src/worker/synthesis.ts:126-132`). (b) A creation whose fetch fails
   still consumed its slot, so a mistyped or unreachable URL costs a legitimate subscriber one of
   fifty — accepted: the count has to precede the fetch for the refusal to be cheap (boundary 2,
-  residual (d)). (c) The initial subscription poll is deliberately OUTSIDE the cap: it is bounded
-  at 5 items per source instead (`src/ingest/feed.ts:639-651`), because capping a first
-  subscription by a rolling window would refuse legitimate subscriptions to a subscriber who has
-  exhausted their ingest slots. (d) A periodic poll with no allowance left DEFERS rather than
+  residual (d)). (c) Initial subscription polls consume the SAME cap row as periodic polls and
+  ingest/upload: when allowance is exhausted, initial polls DEFER items (queueing 0, holding offset 0)
+  rather than bypassing the cap or refusing the subscription itself (`src/ingest/feed.ts:658-675`).
+  Subscription creation is capped at `sourceCeilingFor` (`src/compose/ingest.ts`), derived from
+  `dailyEpisodeBudgetFor` (50 by default), so subscribers cannot accumulate unbounded active sources;
+  creating the (N+1)th source is refused with 429 (`SubscriptionLimitError`) and consumes no credit.
+  (d) A periodic poll with no allowance left DEFERS rather than
   refuses: nothing is written for the item, not even its URL, and the scan offset is kept so the
   same window is retried (`src/ingest/feed.ts:426-440`, `:337`) — so an item whose publisher drops
   it (window rotation, a truncated document) before the allowance comes back is LOST silently, and

@@ -26,9 +26,16 @@
  *   make the poller retry the same feed forever.
  */
 import { DOMParser, parseHTML } from "npm:linkedom@0.18.12";
-import { clean, type ExtractedArticle, fetchArticle, fetchFeedDocument, plainText } from "./url.ts";
+import {
+  clean,
+  type ExtractedArticle,
+  fetchArticle,
+  fetchFeedDocument,
+  IngestError,
+  plainText,
+} from "./url.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
-import { ingestCreationLimiter } from "../compose/ingest.ts";
+import { ingestCreationLimiter, sourceCeilingFor } from "../compose/ingest.ts";
 import type { RateLimitResult } from "../auth/rate_limit.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
@@ -162,6 +169,13 @@ function toIsoDate(value: string | null | undefined): string | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
+export class SubscriptionLimitError extends IngestError {
+  constructor(message: string, options?: { limit?: number; actual?: number }) {
+    super(429, message, options);
+    this.name = "SubscriptionLimitError";
+  }
+}
+
 export interface PollDependencies {
   /** Test seam: injected transport for the feed document itself. */
   transport?: (url: URL, signal: AbortSignal) => Promise<Response>;
@@ -170,6 +184,10 @@ export interface PollDependencies {
   signal?: AbortSignal;
   /** Unseen items selected per poll, newest first; URL lookups have a separate scan bound. */
   maxItems?: number;
+  /** Bypass per-subscriber source count ceiling (used by operator/admin routes). */
+  ignoreSourceLimit?: boolean;
+  /** Bypass per-subscriber creation rate limiter (used by operator/admin routes). */
+  ignoreCreationLimit?: boolean;
 }
 
 export interface PollResult {
@@ -609,6 +627,18 @@ export async function subscribeToFeed(
   deps: PollDependencies = {},
 ): Promise<{ source: Source; poll: PollResult }> {
   const existing = await ctx.stores.metadata.listSources(input.userId);
+  const user = await ctx.stores.metadata.getUser(input.userId);
+  const { limit: maxSources } = sourceCeilingFor(
+    user,
+    ctx.config.defaultDailyEpisodeBudget,
+  );
+  const alreadySubscribed = existing.some((s) => s.feedUrl === input.feedUrl);
+  if (!deps.ignoreSourceLimit && !alreadySubscribed && existing.length >= maxSources) {
+    throw new SubscriptionLimitError(
+      `Source limit reached: at most ${maxSources} sources allowed for this account.`,
+      { limit: maxSources, actual: existing.length },
+    );
+  }
   const modes = input.modes?.length ? input.modes : (["direct"] as AudioMode[]);
   const source: Source = {
     id: sourceIdForFeed(input.feedUrl, new Set(existing.map((s) => s.id))),
@@ -636,10 +666,9 @@ export async function subscribeToFeed(
   // produces audio. `feedUrl` is set on the source constructed just above.
   const items = await loadFeedItems(source.feedUrl!, deps);
   await ctx.stores.metadata.putSource(source);
-  // Capped at 5 items for the initial subscription poll (audio-feed-l9l63, audio-feed-uhfis).
-  // Deliberately NOT subject to refuseIngestOverCreationCap: capping subscriptions by the rolling 24h
-  // creation limiter would refuse legitimate subscriptions when a user has exhausted their ingest slots.
-  // The subscription path is bounded instead by this 5-item ceiling and insertArticleWithEpisodeIfAbsent CAS deduplication.
+  // audio-feed-jgois: initial subscription polls consume the shared rolling 24h creation limiter.
+  // When the allowance is spent, new items are deferred (held at offset 0, neither fetched nor marked seen),
+  // exactly as periodic polls do under audio-feed-ukuka, while the subscription itself succeeds.
   const result: PollResult = {
     items: 0,
     queued: 0,
@@ -648,8 +677,30 @@ export async function subscribeToFeed(
     failed: 0,
     errors: [],
   };
-  await queueItems(ctx, source, items.slice(0, deps.maxItems ?? 5), deps, result);
-  await ctx.stores.metadata.putSource({ ...source, lastPolledAt: new Date().toISOString() });
+  const limiter = deps.ignoreCreationLimit
+    ? undefined
+    : ingestCreationLimiter(ctx, user ?? { id: input.userId });
+  await queueItems(ctx, source, items.slice(0, deps.maxItems ?? 5), deps, result, limiter);
+  if (result.deferred > 0 && limiter) {
+    const { remaining } = await limiter.peek(source.userId);
+    await ctx.stores.metadata.appendLog({
+      time: new Date().toISOString(),
+      severity: "warn",
+      type: "feed.poll.deferred",
+      message:
+        `Initial feed poll deferred ${result.deferred} item(s) for source ${source.id}; remaining allowance ${remaining}`,
+      process: "app",
+      job: "feed-subscribe",
+      userId: source.userId,
+      correlationId: crypto.randomUUID(),
+      context: { sourceId: source.id, deferred: result.deferred, remaining },
+    });
+  }
+  await ctx.stores.metadata.putSource({
+    ...source,
+    feedScanOffset: 0,
+    lastPolledAt: new Date().toISOString(),
+  });
   return { source, poll: result };
 }
 

@@ -14,7 +14,7 @@
  * reviewer blocked on: the cap is the subscriber's funded budget resolved from config — never a
  * hardcoded literal — so a raised deployment budget or a personal budget raises the cap with it.
  */
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { DEFAULT_DAILY_EPISODE_BUDGET, memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { AppContext } from "../src/app.ts";
@@ -24,8 +24,16 @@ import {
   INGEST_CREATION_BOUND,
   INGEST_CREATION_RATE,
   INGEST_CREATION_WINDOW,
+  ingestCreationLimiter,
+  SOURCE_CEILING_BOUND,
+  sourceCeilingFor,
 } from "../src/compose/ingest.ts";
-import { DEFAULT_MAX_ITEMS, runFeedPollBatch, subscribeToFeed } from "../src/ingest/feed.ts";
+import {
+  DEFAULT_MAX_ITEMS,
+  runFeedPollBatch,
+  subscribeToFeed,
+  SubscriptionLimitError,
+} from "../src/ingest/feed.ts";
 import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
 import { dailyEpisodeBudgetFor, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { utcDayKey } from "../src/types.ts";
@@ -339,7 +347,7 @@ Deno.test("audio-feed-kp30l, audio-feed-l9l63, audio-feed-uhfis: upload requests
   assertEquals(episodes.length, bound, "refused upload must not commit an episode row");
 });
 
-Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka: subscription is capped per poll; periodic polling defers until funded allowance returns", async () => {
+Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka, audio-feed-jgois: subscription is capped per poll; initial poll defers at zero allowance; periodic polling defers until funded allowance returns", async () => {
   const { ctx } = await setup();
   const { fetchArticle } = countingFetch();
   const ingestHandler = createIngestHandler(ctx, { fetchArticle }) as IngestRoute;
@@ -359,8 +367,8 @@ Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka: subscription is
   assertEquals(refused.status, 429, "ingest is now completely exhausted");
 
   // 2. Feed subscription: feed contains 8 items.
-  // Proves: (a) NOT refused by the creation limiter even though budget is 0;
-  //         (b) bounded by deps.maxItems (default 5 for subscribeToFeed), queueing exactly 5.
+  // Proves: (a) subscription succeeds even though creation allowance is 0;
+  //         (b) initial poll defers all 5 items (queueing 0) because creation budget is exhausted.
   const feedXml = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
   <title>Bounded Feed</title>
@@ -388,16 +396,17 @@ Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka: subscription is
       }),
   };
 
-  const { poll } = await subscribeToFeed(
+  const { source, poll } = await subscribeToFeed(
     ctx,
     { userId: USER_ID, feedUrl: "https://example.com/bounded-feed.xml" },
     { ...mockDeps, maxItems: 5 },
   );
 
-  assertEquals(poll.queued, 5, "initial poll is bounded by maxItems (5 items queued out of 8)");
-  assertEquals(poll.items, 5, "processed items bounded by maxItems");
+  assertEquals(poll.queued, 0, "initial poll with zero allowance queues 0 items");
+  assertEquals(poll.deferred, 5, "initial poll defers 5 items at zero allowance");
+  assert(await ctx.stores.metadata.getSource(USER_ID, source.id), "subscription was created");
 
-  // 3. Proves URL deduplication: re-polling the same feed inserts 0 new episodes
+  // 3. Proves URL deduplication / re-poll when still deferred: re-polling the same feed queues 0 items
   const rePoll = await subscribeToFeed(
     ctx,
     { userId: USER_ID, feedUrl: "https://example.com/bounded-feed.xml" },
@@ -406,11 +415,11 @@ Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka: subscription is
   assertEquals(
     rePoll.poll.queued,
     0,
-    "re-poll queues 0 new items because of insertArticleWithEpisodeIfAbsent deduplication",
+    "re-poll queues 0 new items because allowance is still zero",
   );
-  assertEquals(rePoll.poll.skipped, 5, "all 5 previously seen items skipped");
+  assertEquals(rePoll.poll.deferred, 5, "re-poll defers items again");
 
-  // 4. At zero allowance the periodic batch sees the feed, but defers all three new items.
+  // 4. At zero allowance the periodic batch sees the feed, but defers all items.
   const pollBatch = () =>
     runFeedPollBatch(ctx, {
       ...mockDeps,
@@ -420,7 +429,7 @@ Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka: subscription is
   const deferredBatch = await pollBatch();
   assertEquals(deferredBatch.polled, 2);
   assertEquals(deferredBatch.queued, 0);
-  // After the 24h window expires, those same three URLs remain undiscovered and are queued.
+  // After the 24h window expires, those items remain undiscovered and are queued.
   await new SlidingWindowRateLimiter(
     INGEST_CREATION_RATE,
     ctx.stores.metadata,
@@ -430,12 +439,187 @@ Deno.test("audio-feed-l9l63, audio-feed-uhfis, audio-feed-ukuka: subscription is
   assertEquals(batchResult.polled, 2);
   assertEquals(
     batchResult.queued,
-    3,
-    "periodic polling queues the remaining 3 items up to DEFAULT_MAX_ITEMS",
+    8,
+    "periodic polling queues all 8 items once allowance is restored",
   );
   assertEquals(DEFAULT_MAX_ITEMS, 10, "periodic poll bound is DEFAULT_MAX_ITEMS (10)");
 
   // 5. Running the batch poller again queues 0 new items because all 8 items are now deduped in KV
   const secondBatch = await pollBatch();
   assertEquals(secondBatch.queued, 0, "subsequent poll queues 0 items due to URL deduplication");
+});
+
+Deno.test("audio-feed-jgois: row (a) initial poll with zero allowance queues 0 and defers, and the subscription still exists", async () => {
+  const { ctx, stores } = await setup();
+  const limiter = ingestCreationLimiter(ctx, { id: USER_ID });
+  const bound = INGEST_CREATION_RATE.maxRequests;
+  for (let i = 0; i < bound; i++) {
+    const res = await limiter.check(USER_ID);
+    assertEquals(res.allowed, true);
+  }
+  assertEquals((await limiter.peek(USER_ID)).allowed, false);
+
+  const feedXml = `<rss version="2.0"><channel><title>Zero Allowance Feed</title>${
+    Array.from({ length: 6 }, (_, i) =>
+      `<item><title>Item ${i}</title><link>https://example.com/zero-item-${i}</link></item>`).join(
+        "",
+      )
+  }</channel></rss>`;
+  const mockDeps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(feedXml, { headers: { "content-type": "application/rss+xml" } }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({
+        url,
+        title: "Title",
+        author: null,
+        publishedAt: null,
+        lead: "Lead",
+        body: "Body content.",
+      }),
+  };
+
+  const { source, poll } = await subscribeToFeed(
+    ctx,
+    { userId: USER_ID, feedUrl: "https://example.com/zero-allowance-feed.xml" },
+    mockDeps,
+  );
+
+  assertEquals(poll.queued, 0, "initial poll with zero allowance queues 0 items");
+  assertEquals(poll.deferred, 5, "initial poll defers up to maxItems (5) items");
+  const persisted = await stores.metadata.getSource(USER_ID, source.id);
+  assert(persisted, "the subscription still exists");
+  assertEquals(
+    (await stores.metadata.listEpisodes({ userId: USER_ID })).length,
+    0,
+    "no episodes were created",
+  );
+});
+
+Deno.test("audio-feed-jgois: row (b) initial poll with allowance queues up to 5 and each queued item consumed one credit", async () => {
+  const { ctx, stores } = await setup();
+  const limiter = ingestCreationLimiter(ctx, { id: USER_ID });
+  const allowanceBefore = (await limiter.peek(USER_ID)).remaining;
+  assertEquals(allowanceBefore, INGEST_CREATION_RATE.maxRequests);
+
+  const feedXml = `<rss version="2.0"><channel><title>Allowance Feed</title>${
+    Array.from({ length: 8 }, (_, i) =>
+      `<item><title>Item ${i}</title><link>https://example.com/row-b-item-${i}</link></item>`).join(
+        "",
+      )
+  }</channel></rss>`;
+  const mockDeps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(feedXml, { headers: { "content-type": "application/rss+xml" } }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({
+        url,
+        title: "Title",
+        author: null,
+        publishedAt: null,
+        lead: "Lead",
+        body: "Body content.",
+      }),
+  };
+
+  const { source, poll } = await subscribeToFeed(
+    ctx,
+    { userId: USER_ID, feedUrl: "https://example.com/allowance-feed.xml" },
+    mockDeps,
+  );
+
+  assertEquals(poll.queued, 5, "initial poll queues up to maxItems (5 items)");
+  assertEquals(poll.deferred, 0, "no items deferred when allowance is sufficient");
+  const allowanceAfter = (await limiter.peek(USER_ID)).remaining;
+  assertEquals(allowanceAfter, allowanceBefore - 5, "each queued item consumed exactly one credit");
+  assertEquals((await stores.metadata.listEpisodes({ userId: USER_ID })).length, 5);
+  assert(source.id);
+});
+
+Deno.test("audio-feed-jgois: row (c) source ceiling refuses the (N+1)th with a typed message and the refusal costs no credit", async () => {
+  const configuredCeiling = 3;
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID, dailyEpisodeBudget: configuredCeiling }));
+  const ctx: AppContext = { config, stores };
+  const user = await stores.metadata.getUser(USER_ID);
+  const derivedCeiling = sourceCeilingFor(user, ctx.config.defaultDailyEpisodeBudget).limit;
+  assertEquals(derivedCeiling, configuredCeiling, "ceiling matches user dailyEpisodeBudget");
+
+  const limiter = ingestCreationLimiter(ctx, user);
+  const creditsBefore = (await limiter.peek(USER_ID)).remaining;
+  assertEquals(creditsBefore, configuredCeiling);
+
+  const mockDeps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(`<rss><channel><title>F</title></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({ url, title: "T", author: null, publishedAt: null, lead: "L", body: "B." }),
+  };
+
+  // Add N sources (up to ceiling)
+  for (let i = 0; i < derivedCeiling; i++) {
+    const { source } = await subscribeToFeed(
+      ctx,
+      { userId: USER_ID, feedUrl: `https://example.com/feed-${i}.xml` },
+      mockDeps,
+    );
+    assert(source.id);
+  }
+  assertEquals((await stores.metadata.listSources(USER_ID)).length, derivedCeiling);
+
+  // Check credits remaining before (N+1)th attempt
+  const creditsBeforeRefusal = (await limiter.peek(USER_ID)).remaining;
+
+  // The (N+1)th subscription must be refused with a typed error (SubscriptionLimitError)
+  const err = await assertRejects(
+    () =>
+      subscribeToFeed(
+        ctx,
+        { userId: USER_ID, feedUrl: `https://example.com/feed-${derivedCeiling}.xml` },
+        mockDeps,
+      ),
+    SubscriptionLimitError,
+  );
+  assertEquals(err.status, 429);
+  assertEquals(err.limit, derivedCeiling);
+  assertStringIncludes(err.message, `at most ${derivedCeiling} sources`);
+
+  // Refusal costs no credit
+  const creditsAfterRefusal = (await limiter.peek(USER_ID)).remaining;
+  assertEquals(creditsAfterRefusal, creditsBeforeRefusal, "the refusal costs no credit");
+  assertEquals(
+    (await stores.metadata.listSources(USER_ID)).length,
+    derivedCeiling,
+    "no source was stored",
+  );
+});
+
+Deno.test("audio-feed-jgois: source ceiling is code-tied to dailyEpisodeBudgetFor, not a bare constant", () => {
+  assertEquals(SOURCE_CEILING_BOUND, "sources_per_subscriber");
+
+  // 1. Unconfigured subscriber gets deployment default, matching dailyEpisodeBudgetFor
+  const unconfigured = sourceCeilingFor(null, undefined);
+  assertEquals(unconfigured.limit, DEFAULT_DAILY_EPISODE_BUDGET);
+  assertEquals(unconfigured.limit, dailyEpisodeBudgetFor(null, undefined).limit);
+  assertEquals(unconfigured.source, "default");
+
+  // 2. Custom deployment default scales the ceiling
+  const customDeployment = sourceCeilingFor(null, 15);
+  assertEquals(customDeployment.limit, 15);
+  assertEquals(customDeployment.limit, dailyEpisodeBudgetFor(null, 15).limit);
+  assertEquals(customDeployment.source, "default");
+
+  // 3. Subscriber personal budget overrides deployment default, matching dailyEpisodeBudgetFor
+  const personal = sourceCeilingFor({ dailyEpisodeBudget: 7 }, 15);
+  assertEquals(personal.limit, 7);
+  assertEquals(personal.limit, dailyEpisodeBudgetFor({ dailyEpisodeBudget: 7 }, 15).limit);
+  assertEquals(personal.source, "user");
 });

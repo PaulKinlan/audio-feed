@@ -1132,6 +1132,40 @@ Deno.test("a store failure while subscribing is answered with a fixed detail (au
   assertEquals(res.status, 502);
 });
 
+Deno.test("POST /api/sources refuses (N+1)th source with 429 when budget-tied ceiling is reached (audio-feed-jgois)", async () => {
+  const ceiling = 2;
+  const { fetch, stores } = app({
+    feedTransport: feedTransport(RSS),
+    fetchArticle: article("A", "Body."),
+  });
+  await stores.metadata.putUser(
+    makeUser({
+      id: "user-limit",
+      status: "approved",
+      feedToken: "token-limit",
+      dailyEpisodeBudget: ceiling,
+    }),
+  );
+
+  const res1 = await fetch(
+    post("/api/sources", { feedUrl: "https://example.com/s1/feed.xml" }, "token-limit"),
+  );
+  assertEquals(res1.status, 201);
+
+  const res2 = await fetch(
+    post("/api/sources", { feedUrl: "https://example.com/s2/feed.xml" }, "token-limit"),
+  );
+  assertEquals(res2.status, 201);
+
+  // 3rd source is beyond ceiling 2
+  const res3 = await fetch(
+    post("/api/sources", { feedUrl: "https://example.com/s3/feed.xml" }, "token-limit"),
+  );
+  assertEquals(res3.status, 429);
+  const body = await res3.json();
+  assertStringIncludes(body.error, `at most ${ceiling} sources`);
+});
+
 Deno.test("POST /api/sources with all-invalid modes returns 400", async () => {
   const { fetch, stores } = app({
     feedTransport: feedTransport(RSS),
