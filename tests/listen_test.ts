@@ -18,6 +18,7 @@ import {
   MAX_OFFLINE_BYTES,
   MAX_OFFLINE_EPISODES,
   OFFLINE_CACHE,
+  SENSITIVE_PREFIXES,
   SHELL_CACHE,
 } from "../src/routes/pwa.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
@@ -577,6 +578,126 @@ Deno.test("the service worker does not cache capability-bearing or admin navigat
   assert(
     updatedShell.includes(`${BASE}/`),
     `Public home page should be cached in shell cache: ${updatedShell.join(", ")}`,
+  );
+});
+
+Deno.test("every sensitive path prefix is refused caching by the service worker writer path and offline fallback serves no secrets (audio-feed-9ooyy)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+
+  // Test 1: Service worker admission refuse gate.
+  // Dispatch navigations for every prefix in SENSITIVE_PREFIXES through a harness
+  // that simulates a 200 OK HTML response WITHOUT no-store (e.g. public cache-control).
+  // This isolates and asserts that the SENSITIVE_PREFIXES admission check in SW
+  // unconditionally refuses caching even if the server were to omit no-store.
+  // NOTE: On main, /listen (without trailing slash) with 200 OK and no no-store
+  // reddens because "/listen".startsWith("/listen/") was false!
+  const testPaths = [
+    ...SENSITIVE_PREFIXES.map((prefix) => `${BASE}${prefix}`),
+    `${BASE}/admin/subscribers`,
+    `${BASE}/admin/observability`,
+    `${BASE}/account/profile`,
+    `${BASE}/listen/${TOKEN}`,
+    `${BASE}/feed/${TOKEN}`,
+  ];
+
+  for (const testUrl of testPaths) {
+    const harness = createServiceWorkerHarness(
+      swText,
+      () =>
+        Promise.resolve(
+          new Response("<!doctype html><html><body>sensitive content</body></html>", {
+            status: 200,
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              "cache-control": "public, max-age=3600",
+            },
+          }),
+        ),
+    );
+
+    const res = await harness.dispatch("fetch", {
+      request: navigateRequest(testUrl, { accept: "text/html" }),
+    });
+    assertEquals(res.response?.status, 200);
+
+    const cachedShell = harness.cachedUrls(SHELL_CACHE);
+    assertEquals(
+      cachedShell,
+      [],
+      `Sensitive path ${testUrl} must never be stored in shell cache through writer path: ${
+        cachedShell.join(", ")
+      }`,
+    );
+  }
+
+  // Test 2: Offline fallback navigation serves the static generic fallback, never sensitive content
+  const offlineHarness = createServiceWorkerHarness(
+    swText,
+    () => Promise.reject(new TypeError("Failed to fetch (offline)")),
+  );
+
+  for (const testUrl of testPaths) {
+    const res = await offlineHarness.dispatch("fetch", {
+      request: navigateRequest(testUrl, { accept: "text/html" }),
+    });
+    assertEquals(res.response?.status, 200);
+    const body = await res.response?.text();
+    assertStringIncludes(body ?? "", "<h1>Offline</h1>");
+    assertStringIncludes(body ?? "", "Open this app once while online");
+    assert(
+      !body?.includes("sensitive content"),
+      `Offline body must not contain sensitive content for ${testUrl}`,
+    );
+  }
+  assertEquals(
+    offlineHarness.cachedUrls(SHELL_CACHE),
+    [],
+    "Offline requests must not populate shell cache with sensitive routes",
+  );
+
+  // Test 3: Sign-out preserves non-sensitive shell (manifest, icon, public home) while purging OFFLINE_CACHE
+  const signoutHarness = createServiceWorkerHarness(
+    swText,
+    (request) =>
+      request.url.endsWith("/api/auth/logout")
+        ? Promise.resolve(new Response(null, { status: 303, headers: { location: "/" } }))
+        : appFetch(request),
+  );
+  signoutHarness.seedCache(
+    OFFLINE_CACHE,
+    `${BASE}/audio/ep-1.wav`,
+    new Response("audio", { status: 200 }),
+  );
+  signoutHarness.seedCache(
+    SHELL_CACHE,
+    `${BASE}/manifest.json`,
+    new Response("{}", { status: 200 }),
+  );
+  signoutHarness.seedCache(
+    SHELL_CACHE,
+    `${BASE}/icon.svg`,
+    new Response("<svg/>", { status: 200 }),
+  );
+  signoutHarness.seedCache(
+    SHELL_CACHE,
+    `${BASE}/`,
+    new Response("<!doctype html>home", { status: 200 }),
+  );
+
+  const signoutRes = await signoutHarness.dispatch("fetch", {
+    request: postRequest("/api/auth/logout"),
+  });
+  assertEquals(signoutRes.response?.status, 303);
+  assertEquals(
+    signoutHarness.cacheNames().includes(OFFLINE_CACHE),
+    false,
+    "Offline audio cache must be purged on sign-out",
+  );
+  assertEquals(
+    signoutHarness.cachedUrls(SHELL_CACHE),
+    [`${BASE}/manifest.json`, `${BASE}/icon.svg`, `${BASE}/`],
+    "Non-sensitive shell cache entries must survive sign-out to preserve offline installability",
   );
 });
 
