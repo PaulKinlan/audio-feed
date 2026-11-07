@@ -301,7 +301,7 @@ export function createCreateSourceHandler(
       if (error instanceof IngestError) {
         return Response.json(
           { error: error.message },
-          { status: 422, headers: { "cache-control": "no-store" } },
+          { status: error.status ?? 422, headers: { "cache-control": "no-store" } },
         );
       }
       const screened = screenErrorForLogging(error);

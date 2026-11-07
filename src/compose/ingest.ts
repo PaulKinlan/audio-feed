@@ -133,6 +133,24 @@ export const INGEST_CREATION_WINDOW = "ingest_creation";
 /** The bound's name, so a refusal says WHICH limit refused rather than only that one did. */
 export const INGEST_CREATION_BOUND = "episode_creations_per_token";
 
+/** The bound's name for maximum sources held by a subscriber. */
+export const SOURCE_CEILING_BOUND = "sources_per_subscriber";
+
+/**
+ * Derives the maximum number of sources a subscriber may hold.
+ *
+ * Code-tied to dailyEpisodeBudgetFor so a subscriber cannot hold more sources
+ * than their funded daily episode budget can sustain in one 24-hour window.
+ * An unconfigured subscriber gets DEFAULT_DAILY_EPISODE_BUDGET; an operator-raised
+ * deployment default or subscriber-specific budget scales the ceiling proportionally.
+ */
+export function sourceCeilingFor(
+  user: { dailyEpisodeBudget?: number } | null | undefined,
+  deploymentDefault?: number,
+): { limit: number; source: "user" | "default" } {
+  return dailyEpisodeBudgetFor(user, deploymentDefault);
+}
+
 /**
  * Count one accepted episode creation against `user`, or return the refusal.
  *
@@ -141,7 +159,10 @@ export const INGEST_CREATION_BOUND = "episode_creations_per_token";
  * funded budget and 24-hour storage row here.
  */
 /** The shared funded creation window for ingest/upload and periodic feed polling. */
-export function ingestCreationLimiter(ctx: AppContext, user: User): SlidingWindowRateLimiter {
+export function ingestCreationLimiter(
+  ctx: AppContext,
+  user: { dailyEpisodeBudget?: number; id?: string } | null | undefined,
+): SlidingWindowRateLimiter {
   const { limit } = dailyEpisodeBudgetFor(user, ctx.config.defaultDailyEpisodeBudget);
   return new SlidingWindowRateLimiter(
     { maxRequests: limit, windowMs: INGEST_CREATION_RATE.windowMs },

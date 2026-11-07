@@ -466,7 +466,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         // it is screened into the log seam (the same screen src/server.ts applies to an
         // unhandled error) and answered with a fixed detail instead of the throw.
         if (error instanceof IngestError) {
-          return reply({ error: error.message }, 422);
+          return reply({ error: error.message }, error.status ?? 422);
         }
         const screened = screenErrorForLogging(error);
         console.warn(

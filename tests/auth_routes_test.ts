@@ -168,6 +168,28 @@ Deno.test("account sources: add queues, and a pending user may not spend (audio-
   assertEquals(refused.status, 403);
 });
 
+Deno.test("account sources: ceiling refuses (N+1)th source with 429 (audio-feed-jgois)", async () => {
+  const { fetch, stores } = app();
+  const ceiling = 2;
+  const user = await seed(stores, { id: "user-ceiling", dailyEpisodeBudget: ceiling });
+  const cookie = await cookieFor(stores, user.id);
+
+  const add = (url: string) =>
+    fetch(call("/api/account/sources", {
+      json: { feedUrl: url, modes: ["direct"] },
+      cookie,
+      origin: BASE,
+    }));
+
+  assertEquals((await add("https://example.com/s1/feed.xml")).status, 201);
+  assertEquals((await add("https://example.com/s2/feed.xml")).status, 201);
+
+  const refused = await add("https://example.com/s3/feed.xml");
+  assertEquals(refused.status, 429);
+  const body = await refused.json();
+  assertStringIncludes(body.error, `at most ${ceiling} sources`);
+});
+
 Deno.test("a store failure while adding a source is answered with a fixed detail (audio-feed-addsource-leak)", async () => {
   // THE DEFECT this pins: the addSource catch-all answered with
   // `String((error as Error)?.message ?? error)`, so any non-IngestError thrown inside

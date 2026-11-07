@@ -340,7 +340,13 @@ export function createCreateUserHandler(
             feedUrl: validatedUrl,
             codeHandling,
           },
-          { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
+          {
+            transport: deps.feedTransport,
+            fetchArticle: deps.fetchArticle,
+            maxItems: 5,
+            ignoreSourceLimit: true,
+            ignoreCreationLimit: true,
+          },
         );
         initialSource = {
           id: source.id,
@@ -550,7 +556,13 @@ export function createAdminCreateUserSourceHandler(
           modes,
           codeHandling,
         },
-        { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
+        {
+          transport: deps.feedTransport,
+          fetchArticle: deps.fetchArticle,
+          maxItems: 5,
+          ignoreSourceLimit: true,
+          ignoreCreationLimit: true,
+        },
       );
       return Response.json(
         {
