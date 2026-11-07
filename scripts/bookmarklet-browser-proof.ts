@@ -359,7 +359,11 @@ await runProof("audio-feed-ep1", async (checker) => {
         // Drive the same endpoint the page called; when it answers, the page's own
         // discovery round trip is long finished.
         const quietFeeds = await js(
-          `fetch("/api/account/discover-feed?url=" + encodeURIComponent("${quietTarget}")).then((r) => r.json()).then((d) => d.feeds.length)`,
+          `fetch("/api/account/discover-feed", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: "${quietTarget}" }),
+          }).then((r) => r.json()).then((d) => d.feeds.length)`,
         );
         check(
           "a page with no declared feed answers with zero feeds",

@@ -536,6 +536,7 @@ export async function discoverFeeds(
         if (!location || hop === 5) {
           throw new IngestError(422, "Page has an invalid or excessive redirect chain.");
         }
+        // Re-resolved through public lookup and checked per-hop, exactly as fetchArticle does.
         url = articleUrl(new URL(location, url).href);
         continue;
       }

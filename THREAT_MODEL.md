@@ -206,21 +206,27 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 6 — Ingest fetch: the server fetching attacker-supplied URLs (SSRF)
 
 - **Where:** the server-side half of `POST /api/ingest` and `POST /api/upload`, feed discovery on
-  `POST /api/sources`, and scheduled feed polling; implemented in `src/ingest/url.ts` and
-  `src/ingest/feed.ts`.
+  `POST /api/sources` and `POST /api/account/discover-feed` (audio-feed-oq4pz), and scheduled feed polling;
+  implemented in `src/ingest/url.ts` and `src/ingest/feed.ts`.
 - **Attacker controls:** the URL — and everything behind it — that the SERVER fetches, including
   redirect chains; a hostile feed also controls the content later narrated to the subscriber.
-- **Mitigations (`src/ingest/url.ts`):** only global-unicast hosts are fetchable — loopback, LAN,
-  metadata and transition ranges are denied (`:53`); every redirect target is re-validated and
-  chains are capped at 5 (`:238`, `:310-311`, `:348`, `:537`); reads are bounded at 2 MiB and 15 s
-  (`:512-513`); a public hostname that resolves to a private address is refused (`:456-457`).
+- **Mitigations (`src/ingest/url.ts`, `src/routes/account_api.ts`):** only global-unicast hosts are
+  fetchable — loopback, LAN, metadata and transition ranges are denied (`:53`); every redirect target is
+  re-validated and chains are capped at 5 (`:238`, `:310-311`, `:348`, `:537`); reads are bounded at 2 MiB
+  and 15 s (`:512-513`); a public hostname that resolves to a private address is refused (`:456-457`);
+  feed discovery re-validates each redirect hop through `articleUrl` and `publicLookup`; `POST /api/account/discover-feed` is
+  gated by the strict same-origin CSRF wall (`signedIn`, refusing GET via 405 Method Not Allowed) and
+  rate-limited per subscriber (`DISCOVER_FEED_RATE` 30 requests / 5 min, `src/routes/account_api.ts`).
 - **Residuals:** (a) the fetch walls bound WHERE the server fetches, and since audio-feed-kp30l the
   creation cap in boundary 2 is checked BEFORE the fetch, so one subscriber cannot exceed 50 accepted
   article fetches per rolling 24 hours through `/api/ingest` or `/api/upload`, and since
   audio-feed-ukuka and audio-feed-jgois periodic feed polls and initial subscription polls consume
   the same row too, so their accepted article fetches count against that same 50 rather than sitting
-  outside it; `POST /api/sources` discovery (which fetches a feed document, not an article) remains
-  outside the window. (b) Prompt injection and content
+  outside it; `POST /api/sources` discovery (which fetches a feed document, not an article) and
+  `POST /api/account/discover-feed` (which discovers feeds from a subscriber-provided page) remain
+  outside the daily creation window, bounded instead by subscriber auth, strict same-origin CSRF,
+  per-subscriber sliding-window rate limiting, 2 MiB / 15 s caps, per-hop public redirect re-validation,
+  and public-unicast address validation. (b) Prompt injection and content
   integrity (partly mitigated, recorded — audio-feed-o9wew): publisher-supplied text reaches the
   reasoning LLM under delimiter fencing rather than raw. In `src/worker/script.ts`
   (`buildScriptPrompt`, `:180-213`), every publisher-controlled field (`title`, `author`, `summary`,

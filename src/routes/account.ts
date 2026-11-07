@@ -522,11 +522,11 @@ ${CONFIRM_DIALOG_CLIENT}
       }
     });
   }
-  // Feed autodiscovery (audio-feed-6hw): when the bookmarklet found no feed, ask
+  // Feed autodiscovery (audio-feed-6hw, audio-feed-oq4pz): when the bookmarklet found no feed, ask
   // the server to read the page's own declaration. Discovery is an OFFER, so a
   // refusal is silent: the single-page action already works without a feed.
   if (PREFILL && PREFILL.url && !feedUrl) {
-    send("GET", "/api/account/discover-feed?url=" + encodeURIComponent(PREFILL.url))
+    send("POST", "/api/account/discover-feed", { url: PREFILL.url })
       .then((found) => {
         const feed = found && found.feeds && found.feeds[0];
         if (!feed) return;
