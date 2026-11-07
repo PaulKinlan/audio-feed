@@ -171,11 +171,38 @@ routes, listed separately because the attacker's position there is different.
     (`src/routes/account_api.ts:104-106`); admin reads use the looser `sameSiteRead` so legitimate
     same-origin GETs without an Origin header succeed while cross-site requests are refused
     (`src/compose/admin.ts:100-108`).
+  - **The read wall admits a request carrying NEITHER `Sec-Fetch-Site` NOR `Origin`**
+    (`src/auth/sessions.ts:139-152`) — audio-feed-vfyte, decision below. The routes it gates today
+    are all pure reads, listed and pinned in `tests/read_wall_population_test.ts`: `GET
+    /api/episodes` (`src/compose/shared.ts:113` via `callerUserFor`), and `GET /api/admin/users`,
+    `GET /api/admin/users/:id/sources`, `GET /api/admin/users/:id/episodes`, `GET /api/admin/stats`,
+    `GET /api/admin/outbox` (`src/compose/admin.ts:92` via `adminGate`, safe methods only — writes on
+    that gate use `sameOrigin`).
+  - **Absent-both is admitted on purpose, and this wall is for reads only.** A cross-origin
+    attacker cannot READ a read route's response: the same-origin policy blocks the body, and the
+    session cookie is `SameSite=Lax`, so a cross-site subresource carries no credential at all. So
+    fail-closing absent-both defends an attack that is not available, while 403ing real subscribers
+    — legacy WebKit (< 16.4, iOS 15) and in-app WKWebViews send no Fetch Metadata and no `Origin` on
+    a GET. That compatibility cost was bought for no security gain, so the fail-closed change
+    (branch `fleet/csrf-absent`) was REJECTED as over-broad.
+  - **The one read route with server-side work left the wall instead.** `POST
+    /api/account/discover-feed` (`src/app.ts:387`) fetched a third-party page on the signed-in
+    subscriber's behalf; it is now POST behind `sameOrigin` (`src/routes/account_api.ts:104-107`,
+    handler at `:483`) with a per-subscriber rate limit and per-hop SSRF re-validation (23782a1e,
+    audio-feed-oq4pz). **Rule for future authors: a cookie-authenticated route that does server-side
+    work — an outbound fetch, a write, paid synthesis — uses `sameOrigin` on a state-changing
+    method, never `sameSiteRead`.** Nothing in the type system or the router enforces that rule;
+    the only check today is the pinned population in `tests/read_wall_population_test.ts`, which
+    reddens when a new `sameSiteRead`-gated route appears unclassified.
   - The `/listen` bare path redirects an approved session to its capability URL with
     `cache-control: no-store` and `referrer-policy: no-referrer`, so the token is never written to
     localStorage (`src/app.ts:202-228`).
 - **Residual (documented, accepted):** a stolen session cookie is a bearer credential until logout
   or `rotate-token`; nothing in code detects a replayed cookie from a second device.
+- **Residual (documented, accepted):** the read wall's absent-both admission is a standing
+  assumption that every gated route is a pure read. It is hand-maintained — a new side-effecting
+  read route would silently inherit the admission and could be steered by a hostile page on legacy
+  WebKit. Nothing refuses that at runtime; the pinned population test is the only tripwire.
 
 ### Boundary 5 — Admin surface (console, admin API, break-glass, observability API)
 

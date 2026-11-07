@@ -133,8 +133,21 @@ export function sameOrigin(req: Request, expectedOrigin: string): boolean {
  * GET, so requiring one refuses every real read. The cross-site evidence that IS
  * present is `Sec-Fetch-Site`, which a page cannot write: `cross-site` and
  * `same-site` are refused, `same-origin` is the browser's own word for it, and a
- * request carrying NEITHER header is a non-browser client (curl, a test) that no
- * page can steer. An `Origin` that is present must still be this origin.
+ * request carrying NEITHER header is ADMITTED. An `Origin` that is present must
+ * still be this origin.
+ *
+ * Absent-both is admitted on purpose, and this wall is for reads only
+ * (audio-feed-vfyte). The absent-both clients are not only curl and tests:
+ * legacy WebKit (< 16.4, iOS 15) and in-app WKWebViews send no Fetch Metadata
+ * and no `Origin` on a GET, so failing closed here 403s real subscribers. It buys
+ * nothing in exchange — a cross-origin attacker cannot READ the response, because
+ * the same-origin policy blocks the body, so steering a read from a hostile page
+ * returns them nothing. That trade holds only while every route on this wall is a
+ * pure read. The one route that did server-side work (feed discovery fetched a
+ * third-party page) was moved OFF this wall to POST + `sameOrigin` (23782a1e)
+ * instead of fail-closing the reads; a future route with a side effect must do the
+ * same and never use this gate. Nothing in the router enforces that rule — the
+ * population is pinned in tests/read_wall_population_test.ts.
  */
 export function sameSiteRead(req: Request, expectedOrigin: string): boolean {
   const site = req.headers.get("sec-fetch-site");
