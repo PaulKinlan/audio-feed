@@ -319,10 +319,19 @@ routes, listed separately because the attacker's position there is different.
 - **Decision:** the offline audio cache (`audio-feed-offline-v1`, written by the player and served
   cache-first by the service worker for `/audio/`) deliberately survives a service-worker update —
   "the subscriber's own downloaded library must survive an update". That is NOT "must survive
-  sign-out". The worker now deletes the whole cache when the server confirms a DEVICE-initiated
-  `POST /api/auth/logout` (either the no-script form, which 303s, or the JSON call) or a
-  device-initiated `POST /api/account/rotate-token` passing through its fetch handler; a failed
-  call changes nothing. Only device-initiated calls can purge: admin/remote token rotation and
+  sign-out". The worker now deletes the whole offline audio cache (`audio-feed-offline-v1`) when
+  the server confirms a DEVICE-initiated `POST /api/auth/logout` (either the no-script form, which
+  303s, or the JSON call) or a device-initiated `POST /api/account/rotate-token` passing through
+  its fetch handler; a failed call changes nothing.
+  The shell cache (`audio-feed-shell-v2`) deliberately survives sign-out (audio-feed-9ooyy):
+  it contains only install-critical shell assets (`/manifest.json`, `/icon.svg`) and unauthenticated
+  public navigation shells. Sensitive authenticated views and capability-bearing routes (`/admin`,
+  `/account`, `/listen`, `/login`, `/share`, `/feed`, `/add`) are strictly excluded at admission
+  time via `Cache-Control: no-store / private` headers and the `SENSITIVE_PREFIXES` admission refuse list,
+  so no authenticated or subscriber-specific responses are ever stored in `SHELL_CACHE`. Purging
+  `SHELL_CACHE` on logout would break offline installability for subsequent users on a shared device
+  without security benefit.
+  Only device-initiated calls can purge: admin/remote token rotation and
   session expiry never contact the device, which keeps playing its downloaded library until it
   next connects. On `activate` the worker also sweeps superseded `audio-feed-shell-*` AND
   `audio-feed-offline-*` generations, so a future cache version bump cannot leave the old
@@ -342,8 +351,9 @@ routes, listed separately because the attacker's position there is different.
 - **Why purge by name instead of sweeping keys:** the audio URLs in this cache are public capability
   URLs (`/audio/<key>`; the key IS the capability) and carry no feed token, so there are no
   token-bearing keys to match — a key sweep would be a no-op with extra reads. The navigation cache
-  never stores token-bearing paths in the first place (`/listen/`, `/feed/` are excluded,
-  audio-feed-s3f0).
+  never stores token-bearing or authenticated paths in the first place (`SENSITIVE_PREFIXES`
+  excludes `/admin`, `/account`, `/listen`, `/login`, `/share`, `/feed`, `/add`,
+  audio-feed-s3f0, audio-feed-9ooyy).
 - **Residual (documented, accepted):** admin suspension stops a subscriber's feed server-side but
   cannot reach a device to purge it — the device is never contacted — so a suspended account's
   already-downloaded episodes stay on disk until sign-out. Admin token rotation

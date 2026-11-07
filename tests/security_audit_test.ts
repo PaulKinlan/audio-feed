@@ -1352,6 +1352,23 @@ Deno.test("cache control: authenticated and capability HTML routes set no-store 
   assertEquals(loginRes.status, 200);
   assertStringIncludes(loginRes.headers.get("cache-control") ?? "", "no-store");
   await loginRes.body?.cancel();
+
+  // 5. /add (bookmarklet redirecting to /account; audio-feed-9ooyy)
+  const addRes = await fetch(new Request(`${BASE}/add`));
+  assertEquals(addRes.status, 303);
+  assertStringIncludes(addRes.headers.get("cache-control") ?? "", "no-store");
+  await addRes.body?.cancel();
+
+  // 6. /share (W3C Web Share target endpoint; audio-feed-9ooyy)
+  const shareRes = await fetch(new Request(`${BASE}/share`));
+  assertEquals(shareRes.status, 303);
+  assertStringIncludes(shareRes.headers.get("cache-control") ?? "", "no-store");
+  await shareRes.body?.cancel();
+
+  // 7. /listen (bare start_url; audio-feed-9ooyy)
+  const bareListenRes = await fetch(new Request(`${BASE}/listen`));
+  assertStringIncludes(bareListenRes.headers.get("cache-control") ?? "", "no-store");
+  await bareListenRes.body?.cancel();
 });
 
 /**

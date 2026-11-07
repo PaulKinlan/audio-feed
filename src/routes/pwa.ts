@@ -29,6 +29,31 @@ export const OFFLINE_CACHE = "audio-feed-offline-v1";
 export const SHELL_CACHE = "audio-feed-shell-v2";
 
 /**
+ * Path prefixes excluded from service worker SHELL_CACHE caching (audio-feed-s3f0, audio-feed-9ooyy).
+ *
+ * Capability-bearing URLs (e.g. /listen/:token), authenticated administration
+ * views (e.g. /admin, /account), auth endpoints (/login), bookmarks (/add),
+ * and subscriber feeds (/feed/) contain secrets or subscriber-specific data that
+ * must never be persisted in Cache Storage.
+ *
+ * This prefix list acts as an admission refuse guard inside the service worker's
+ * fetch listener (alongside Cache-Control: no-store / private headers). Because
+ * sensitive responses are strictly excluded at admission time, SHELL_CACHE contains
+ * only install-critical shell assets (manifest, icon) and public fallback documents;
+ * SHELL_CACHE therefore safely survives user sign-out without leaking authenticated data,
+ * preserving offline installability without needing a full shell purge.
+ */
+export const SENSITIVE_PREFIXES = [
+  "/admin",
+  "/account",
+  "/listen",
+  "/login",
+  "/share",
+  "/feed",
+  "/add",
+] as const;
+
+/**
  * Maximum total bytes retained in the offline audio cache (audio-feed-cby).
  *
  * DERIVATION:
@@ -109,6 +134,7 @@ const OFFLINE_CACHE = ${JSON.stringify(OFFLINE_CACHE)};
 const MAX_OFFLINE_BYTES = ${MAX_OFFLINE_BYTES};
 const MAX_OFFLINE_EPISODES = ${MAX_OFFLINE_EPISODES};
 const PRECACHE = ["/manifest.json", "/icon.svg"];
+const SENSITIVE_PREFIXES = ${JSON.stringify(SENSITIVE_PREFIXES)};
 
 /**
  * Bound the offline audio cache by bytes (primary, MAX_OFFLINE_BYTES) and entry count
@@ -276,6 +302,14 @@ self.addEventListener("fetch", (event) => {
   // untouched, and the cache is deleted only after a CONFIRMED outcome — a 2xx for
   // the JSON calls, or the no-script form logout's 303, which fetch() follows and
   // reports as a redirected response. A failed call must change nothing.
+  //
+  // SHELL_CACHE deliberately survives sign-out (audio-feed-9ooyy). Because the
+  // admission gate below (isSensitive via SENSITIVE_PREFIXES and Cache-Control: no-store/private)
+  // strictly refuses to cache any authenticated, capability-bearing, or user-specific
+  // routes (/admin, /account, /listen, /login, /share, /feed, /add), SHELL_CACHE only holds
+  // install-critical shell assets (manifest, icon) and unauthenticated public navigation shells.
+  // Purging SHELL_CACHE on logout would unnecessarily destroy the offline app shell for
+  // subsequent users on a shared device without providing any security gain.
   if (
     request.method === "POST" && url.origin === self.location.origin &&
     (url.pathname === "/api/auth/logout" || url.pathname === "/api/account/rotate-token")
@@ -346,7 +380,7 @@ self.addEventListener("fetch", (event) => {
   // (e.g. /admin, /account) carry secrets and subscriber data that must not
   // linger in Cache Storage across logout or token rotation (audio-feed-s3f0).
   // The service worker respects Cache-Control: no-store / private, alongside
-  // an explicit path exclusion for capability and authenticated routes.
+  // an explicit path exclusion for capability and authenticated routes (audio-feed-9ooyy).
   if (request.mode === "navigate") {
     event.respondWith(
       (async () => {
@@ -355,13 +389,9 @@ self.addEventListener("fetch", (event) => {
           if (fresh.ok) {
             const cc = (fresh.headers.get("cache-control") || "").toLowerCase();
             const isNoStore = cc.includes("no-store") || cc.includes("private");
-            const isSensitive =
-              url.pathname.startsWith("/admin") ||
-              url.pathname.startsWith("/account") ||
-              url.pathname.startsWith("/listen/") ||
-              url.pathname.startsWith("/login") ||
-              url.pathname.startsWith("/share") ||
-              url.pathname.startsWith("/feed/");
+            const isSensitive = SENSITIVE_PREFIXES.some((prefix) =>
+              url.pathname.startsWith(prefix)
+            );
             if (!isNoStore && !isSensitive) {
               const shell = await caches.open(SHELL_CACHE);
               await shell.put(request, fresh.clone());
