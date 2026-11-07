@@ -74,8 +74,8 @@ This audit evaluates how modern web standards and guidelines (per `web.dev`, W3C
   - Bounded stream reading (`readBounded`) terminates oversized streams with `413 Payload Too Large` (2 MiB cap for HTML, 10 MiB cap for PDF documents via `audio-feed-w9n`).
   - Limits redirect chains to 5 hops max, re-validating DNS and destination on every hop.
 - **CSRF & Cross-Site Walls**:
-  - Verifies Origin against base URL on all mutating endpoints (`POST`, `DELETE`).
-  - Uses `Sec-Fetch-Site` metadata (`cross-site` and `same-site` rejection) on sensitive read endpoints (`/api/account/discover-feed`) to prevent cross-site data theft.
+  - Verifies Origin against base URL on all mutating and outbound-fetch endpoints (`POST`, `DELETE`, including `/api/account/discover-feed`).
+  - Uses `Sec-Fetch-Site` metadata (`cross-site` and `same-site` rejection) on sensitive read endpoints to prevent cross-site data theft.
 - **Gemini TTS Transcript Separation (`audio-feed-bjt`)**:
   - Adheres to official Gemini speech generation documentation: separates verbatim spoken transcripts (`parts.text`) from tone/style directions (`speech_metadata.style`), preventing system prompts from being rendered aloud into audio.
 

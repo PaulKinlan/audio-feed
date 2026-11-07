@@ -9,7 +9,7 @@
  *   3. `GET /api/account/discover-feed` — the wall (401/403) and the response
  *      contract: a page can only ever read back http(s) feed URLs.
  */
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -274,44 +274,70 @@ async function app(
   return { fetch, session };
 }
 
-Deno.test("GET /api/account/discover-feed: needs a session (audio-feed-6hw)", async () => {
+Deno.test("discoverFeeds: a cross-host redirect is refused (audio-feed-oq4pz)", async () => {
+  const stubTransport = () => {
+    return Promise.resolve(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://evil.example/other" },
+      }),
+    );
+  };
+
+  await assertRejects(
+    () => discoverFeeds("https://example.com/start", { transport: stubTransport }),
+    IngestError,
+    "Cross-host redirect is not allowed for feed discovery.",
+  );
+});
+
+Deno.test("POST /api/account/discover-feed: needs a session (audio-feed-6hw, audio-feed-oq4pz)", async () => {
   const { fetch } = await app();
 
   const res = await fetch(
-    new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`),
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: PAGE }),
+    }),
   );
   assertEquals(res.status, 401);
 });
 
-Deno.test("GET /api/account/discover-feed: a cross-site read is refused (audio-feed-6hw)", async () => {
-  const { fetch, session } = await app();
-  const headers = { cookie: `__Host-af_session=${session}` };
+Deno.test("GET /api/account/discover-feed: GET is refused with 405 and causes no side effect (audio-feed-oq4pz)", async () => {
+  let called = false;
+  const { fetch, session } = await app(() => {
+    called = true;
+    return Promise.resolve({ url: PAGE, title: "", feeds: [] });
+  });
 
-  // An attacker page's fetch carries both of these; a page cannot remove them.
-  const crossSite = await fetch(
+  const res = await fetch(
     new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`, {
-      headers: { ...headers, "sec-fetch-site": "cross-site", "origin": "https://evil.example" },
+      headers: { cookie: `__Host-af_session=${session}` },
+    }),
+  );
+  assertEquals(res.status, 405);
+  assertEquals(called, false, "GET must not trigger outbound fetch");
+});
+
+Deno.test("POST /api/account/discover-feed: a cross-origin request is refused (audio-feed-6hw, audio-feed-oq4pz)", async () => {
+  const { fetch, session } = await app();
+  const headers = {
+    cookie: `__Host-af_session=${session}`,
+    "content-type": "application/json",
+  };
+
+  const crossSite = await fetch(
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers: { ...headers, "origin": "https://evil.example" },
+      body: JSON.stringify({ url: PAGE }),
     }),
   );
   assertEquals(crossSite.status, 403);
-
-  // A cross-site <img> style request carries no Origin, but the fetch metadata stays.
-  const noOrigin = await fetch(
-    new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`, {
-      headers: { ...headers, "sec-fetch-site": "cross-site" },
-    }),
-  );
-  assertEquals(noOrigin.status, 403);
-
-  const foreignOrigin = await fetch(
-    new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`, {
-      headers: { ...headers, "origin": "https://evil.example" },
-    }),
-  );
-  assertEquals(foreignOrigin.status, 403);
 });
 
-Deno.test("GET /api/account/discover-feed: same-origin and header-less clients get the feeds (audio-feed-6hw)", async () => {
+Deno.test("POST /api/account/discover-feed: same-origin client gets the feeds (audio-feed-6hw, audio-feed-oq4pz)", async () => {
   const { fetch, session } = await app(() =>
     Promise.resolve({
       url: PAGE,
@@ -319,12 +345,17 @@ Deno.test("GET /api/account/discover-feed: same-origin and header-less clients g
       feeds: [{ url: "https://example.com/feed.xml", title: "RSS", type: "application/rss+xml" }],
     })
   );
-  const headers = { cookie: `__Host-af_session=${session}` };
+  const headers = {
+    cookie: `__Host-af_session=${session}`,
+    origin: BASE,
+    "content-type": "application/json",
+  };
 
-  // What the browser sends on the account page's own fetch (no Origin on a GET).
   const sameOrigin = await fetch(
-    new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`, {
-      headers: { ...headers, "sec-fetch-site": "same-origin" },
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url: PAGE }),
     }),
   );
   assertEquals(sameOrigin.status, 200);
@@ -334,54 +365,97 @@ Deno.test("GET /api/account/discover-feed: same-origin and header-less clients g
     feeds: [{ url: "https://example.com/feed.xml", title: "RSS", type: "application/rss+xml" }],
   });
   assertEquals(sameOrigin.headers.get("cache-control"), "no-store");
-
-  // curl/tests: no fetch metadata and no Origin, so no cross-site page exists.
-  const bare = await fetch(
-    new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`, { headers }),
-  );
-  assertEquals(bare.status, 200);
 });
 
-Deno.test("GET /api/account/discover-feed: validates the URL before it reads anything (audio-feed-6hw)", async () => {
+Deno.test("POST /api/account/discover-feed: validates the URL before it reads anything (audio-feed-6hw, audio-feed-oq4pz)", async () => {
   let called = false;
   const { fetch, session } = await app(() => {
     called = true;
     return Promise.resolve({ url: PAGE, title: "", feeds: [] });
   });
-  const headers = { cookie: `__Host-af_session=${session}` };
+  const headers = {
+    cookie: `__Host-af_session=${session}`,
+    origin: BASE,
+    "content-type": "application/json",
+  };
 
-  const missing = await fetch(new Request(`${BASE}/api/account/discover-feed`, { headers }));
+  const missing = await fetch(
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+    }),
+  );
   assertEquals(missing.status, 400);
 
   const hostile = await fetch(
-    new Request(
-      `${BASE}/api/account/discover-feed?url=${encodeURIComponent("javascript:alert(1)")}`,
-      {
-        headers,
-      },
-    ),
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url: "javascript:alert(1)" }),
+    }),
   );
   assertEquals(hostile.status, 400);
 
   const privateTarget = await fetch(
-    new Request(
-      `${BASE}/api/account/discover-feed?url=${encodeURIComponent("http://127.0.0.1/f")}`,
-      {
-        headers,
-      },
-    ),
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url: "http://127.0.0.1/f" }),
+    }),
   );
   assertEquals(privateTarget.status, 400);
   assertEquals(called, false, "the read is refused before the seam is reached");
 });
 
-Deno.test("GET /api/account/discover-feed: a fetch refusal becomes its own status (audio-feed-6hw)", async () => {
+Deno.test("POST /api/account/discover-feed: rate limits repeated discovery requests (audio-feed-oq4pz)", async () => {
+  const { fetch, session } = await app(() =>
+    Promise.resolve({ url: PAGE, title: "Test", feeds: [] })
+  );
+  const headers = {
+    cookie: `__Host-af_session=${session}`,
+    origin: BASE,
+    "content-type": "application/json",
+  };
+
+  // 30 allowed requests per window
+  for (let i = 0; i < 30; i++) {
+    const res = await fetch(
+      new Request(`${BASE}/api/account/discover-feed`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ url: PAGE }),
+      }),
+    );
+    assertEquals(res.status, 200);
+  }
+
+  // 31st request exceeds rate limit
+  const limited = await fetch(
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url: PAGE }),
+    }),
+  );
+  assertEquals(limited.status, 429);
+  assertEquals(Boolean(limited.headers.get("retry-after")), true);
+  assertStringIncludes(await limited.text(), "Too many feed discovery requests");
+});
+
+Deno.test("POST /api/account/discover-feed: a fetch refusal becomes its own status (audio-feed-6hw, audio-feed-oq4pz)", async () => {
   const { fetch, session } = await app(() =>
     Promise.reject(new IngestError(422, "Page is unavailable."))
   );
   const res = await fetch(
-    new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`, {
-      headers: { cookie: `__Host-af_session=${session}` },
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers: {
+        cookie: `__Host-af_session=${session}`,
+        origin: BASE,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ url: PAGE }),
     }),
   );
 
@@ -389,7 +463,7 @@ Deno.test("GET /api/account/discover-feed: a fetch refusal becomes its own statu
   assertEquals(await res.json(), { error: "Page is unavailable." });
 });
 
-Deno.test("GET /api/account/discover-feed: only http(s) feeds are ever returned (audio-feed-6hw)", async () => {
+Deno.test("POST /api/account/discover-feed: only http(s) feeds are ever returned (audio-feed-6hw, audio-feed-oq4pz)", async () => {
   const { fetch, session } = await app(() =>
     Promise.resolve({
       url: PAGE,
@@ -403,8 +477,14 @@ Deno.test("GET /api/account/discover-feed: only http(s) feeds are ever returned 
   );
 
   const res = await fetch(
-    new Request(`${BASE}/api/account/discover-feed?url=${encodeURIComponent(PAGE)}`, {
-      headers: { cookie: `__Host-af_session=${session}` },
+    new Request(`${BASE}/api/account/discover-feed`, {
+      method: "POST",
+      headers: {
+        cookie: `__Host-af_session=${session}`,
+        origin: BASE,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ url: PAGE }),
     }),
   );
   const body = await res.json() as { feeds: DiscoveredFeed[] };

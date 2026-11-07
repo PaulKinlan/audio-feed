@@ -19,7 +19,6 @@ import {
   issueSetupLink,
   peekSetupLink,
   sameOrigin,
-  sameSiteRead,
   sessionCookie,
   sessionUser,
 } from "../auth/sessions.ts";
@@ -117,19 +116,16 @@ async function signedIn(ctx: AppContext, req: Request): Promise<User | Response>
 }
 
 /**
- * The signed-in user for a READ (audio-feed-6hw): 401 without a session, 403 from
- * elsewhere. The wall itself is `sameSiteRead` (browsers send no Origin on a
- * same-origin GET, so the state-change `sameOrigin` test would refuse every real
- * read; `Sec-Fetch-Site` is the cross-site evidence that IS present).
+ * Per-subscriber limit on feed discovery requests (audio-feed-oq4pz).
+ *
+ * 30 requests per 5-minute sliding window allows a user to explore and add feeds normally,
+ * while preventing an automated loop or malicious subscriber from using the server as an
+ * unbounded outbound fetch proxy.
  */
-async function readSignedIn(ctx: AppContext, req: Request): Promise<User | Response> {
-  const user = await sessionUser(ctx.stores.metadata, req);
-  if (!user) return reply({ error: "Sign in first." }, 401);
-  if (!sameSiteRead(req, baseUrl(ctx, req))) {
-    return reply({ error: "Cross-origin request refused." }, 403);
-  }
-  return user;
-}
+export const DISCOVER_FEED_RATE = { maxRequests: 30, windowMs: 5 * 60 * 1000 } as const;
+
+/** The window's namespace, so it cannot swap rows with another limiter. */
+const DISCOVER_FEED_WINDOW = "discover_feed";
 
 /**
  * Per-address limit on the anonymous challenge write (audio-feed-plmhk).
@@ -477,17 +473,32 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
     },
 
     /**
-     * Read-only feed discovery for the account page (audio-feed-6hw). It fetches
-     * a page the SIGNED-IN person asked for, through the same guards as article
-     * fetching (`articleUrl` + `publicLookup` + bounded read), and answers with
-     * feed URLs only. Same session and same-origin wall as every sibling here:
-     * without it a cross-site GET could make a signed-in browser read a page on
-     * the attacker's behalf.
+     * Feed discovery for the account page (audio-feed-6hw, audio-feed-oq4pz).
+     *
+     * POST with same-origin CSRF protection (`signedIn`). It fetches a page the
+     * SIGNED-IN person asked for, through the same guards as article fetching
+     * (`articleUrl` + `publicLookup` + bounded read + same-host redirect limit),
+     * rate-limited per subscriber, and answers with feed URLs only.
      */
     discoverFeed: async ({ req }) => {
-      const user = await readSignedIn(ctx, req);
+      const user = await signedIn(ctx, req);
       if (user instanceof Response) return user;
-      const target = new URL(req.url).searchParams.get("url") ?? "";
+      const limit = await new SlidingWindowRateLimiter(
+        DISCOVER_FEED_RATE,
+        store,
+        DISCOVER_FEED_WINDOW,
+      ).check(user.id);
+      if (!limit.allowed) {
+        return reply(
+          { error: "Too many feed discovery requests. Please wait a moment." },
+          429,
+          { "retry-after": String(Math.max(1, Math.ceil(limit.resetMs / 1000))) },
+        );
+      }
+      const input = (await body(req)) as { url?: unknown };
+      const target = typeof input?.url === "string" && input.url.trim()
+        ? input.url.trim()
+        : new URL(req.url).searchParams.get("url") ?? "";
       try {
         const page = articleUrl(target);
         const found = await (deps.discoverFeeds ?? discoverFeedsOnPage)(page.href);
