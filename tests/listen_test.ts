@@ -701,6 +701,62 @@ Deno.test("every sensitive path prefix is refused caching by the service worker 
   );
 });
 
+// audio-feed-k8yyr: LITERAL admission rows, independent of SENSITIVE_PREFIXES.
+// The derived row above takes its test paths FROM the constant it verifies, so a
+// mutation of the constant (e.g. restoring the "/listen/" trailing-slash spelling
+// that once admitted bare /listen into SHELL_CACHE) moves the expectation with it
+// and stays green. These paths are spelled by hand — /listen (bare: the app
+// start_url and shared-device landing page), /add (bookmarklet target), /account
+// (subscriber settings) — so the row pins the observable admission decision no
+// matter what the exported list says.
+Deno.test("bare /listen, /add, and /account navigations are refused shell-cache admission even without no-store (audio-feed-k8yyr)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+
+  // Forced-200 HTML with a PUBLIC cache-control header: no no-store, no private,
+  // so refusal can only come from the sensitive-prefix admission predicate itself.
+  const forcedPublic = () =>
+    Promise.resolve(
+      new Response("<!doctype html><html><body>sensitive landing</body></html>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "public, max-age=3600",
+        },
+      }),
+    );
+
+  const harness = createServiceWorkerHarness(swText, forcedPublic);
+
+  for (const path of ["/listen", "/add", "/account"]) {
+    const res = await harness.dispatch("fetch", {
+      request: navigateRequest(`${BASE}${path}`, { accept: "text/html" }),
+    });
+    assertEquals(res.response?.status, 200);
+    const cachedShell = harness.cachedUrls(SHELL_CACHE);
+    assertEquals(
+      cachedShell,
+      [],
+      `Navigation to ${BASE}${path} must be refused shell-cache admission, but it was stored: ${
+        cachedShell.join(", ")
+      }`,
+    );
+  }
+
+  // Positive control on the same writer path: a non-sensitive navigation IS
+  // admitted, so the refusals above are admission decisions rather than a dead
+  // cache writer producing a vacuous empty array.
+  const homeRes = await harness.dispatch("fetch", {
+    request: navigateRequest(`${BASE}/`, { accept: "text/html" }),
+  });
+  assertEquals(homeRes.response?.status, 200);
+  assertEquals(
+    harness.cachedUrls(SHELL_CACHE),
+    [`${BASE}/`],
+    "Public home must be admitted so the refusals above prove the admission predicate, not a broken writer",
+  );
+});
+
 Deno.test("service worker activation purges previous shell cache versions while preserving offline audio (audio-feed-s3f0)", async () => {
   const { fetch: appFetch } = await seeded();
   const swText = await (await appFetch(get("/sw.js"))).text();
