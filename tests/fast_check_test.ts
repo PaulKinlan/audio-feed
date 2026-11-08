@@ -10,7 +10,7 @@
  */
 
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
+import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
 import {
   allTestFiles,
   changedFiles,
@@ -232,43 +232,19 @@ Deno.test("hqer: the real repo graph selects the admin route's exercising suite,
 });
 
 // audio-feed-dzrx2 / audio-feed-v46l5: the direct-gate exception's justification is pinned BEHAVIOURALLY.
-// The suite prints an earned proof line after a successful bootstrap, carrying the values its own
-// success-path assertions consumed and a dynamic nonce from the audit.
-//
-// audio-feed-v46l5: reuse MEASURED_STARVED_POLL_MS (8_000ms) from scripts/proof-cdp.ts rather than
-// HANG_BOUND_MS (120_000ms). The child lockout_order_test suite normally finishes in ~0.7s. 8s provides
-// ~11.4x headroom under heavy eight-way host CPU starvation (which the constant was measured against
-// in audio-feed-6gst1) without allowing a hung child to stall the fast gate for minutes.
-export const DIRECT_GATE_SPAWN_BOUND_MS = MEASURED_STARVED_POLL_MS;
-
-/**
- * audio-feed-v46l5: deterministic checksum binding the runtime values of row 2:
- * bootstrap status (200), compare spy delta (1), total compare calls (4),
- * and remaining limiter reset window length (0).
- */
-export function computeProofChecksum(
-  status: number,
-  delta: number,
-  total: number,
-  remaining: number,
-): string {
-  let h = 0;
-  const str = `${status}:${delta}:${total}:${remaining}`;
-  for (let i = 0; i < str.length; i++) {
-    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
-  }
-  return (h >>> 0).toString(16);
-}
+// The suite prints the audit's fresh nonce only after the bootstrap success assertions.
+// The bound is a HANG ceiling, not an expected latency: five child runs on this VM took
+// 0.49-0.72s warm. The old 8s starved-browser-poll floor did not measure this Deno child
+// (spawn + module graph + four tests) and even that browser poll exceeded 8s under load.
+// Reuse the existing 120s hang ceiling to avoid rejecting cold-cache or saturated runs.
+export const DIRECT_GATE_SPAWN_BOUND_MS = HANG_BOUND_MS;
 
 /**
  * Run the one direct-gate suite and report whether it printed the earned proof line. Runs once per
  * audit: the exception is a single (route, file) pair, so there is one spawn, not one per route.
  *
- * audio-feed-v46l5:
- * (a) signal: AbortSignal.timeout(DIRECT_GATE_SPAWN_BOUND_MS) bounds the child so a hang fails
- *     fast and names the bound.
- * (b) The proof line requires parsed runtime values (status, spy delta, total calls, limiter
- *     reset counter, and checksum) so a static console.log cannot satisfy it.
+ * The abort signal bounds a hang and names the ceiling. A fresh nonce passed to the child
+ * must come back on the success path; the old constant-value checksum is not proof of execution.
  */
 export async function directGateProof(
   timeoutMs = DIRECT_GATE_SPAWN_BOUND_MS,
@@ -277,12 +253,19 @@ export async function directGateProof(
   // `<repo>/tests/` -> repo root, the cwd the gate itself runs the suite from.
   const root = import.meta.dirname!.replace(/\/tests$/, "");
   const signal = AbortSignal.timeout(timeoutMs);
+  const nonce = crypto.randomUUID();
   let output: Deno.CommandOutput;
   try {
     output = await new Deno.Command(Deno.execPath(), {
       // Written out literally so the derived execute relation names the suite (audio-feed-spawnlit:
       // the construction must be STARTED, which .output() below does).
-      args: overrideArgs ?? ["test", "--no-check", "tests/lockout_order_test.ts"],
+      args: overrideArgs ?? [
+        "test",
+        "--no-check",
+        "--allow-env=LOCKOUT_PROOF_NONCE",
+        "tests/lockout_order_test.ts",
+      ],
+      env: { LOCKOUT_PROOF_NONCE: nonce },
       cwd: root,
       stdout: "piped",
       stderr: "piped",
@@ -317,7 +300,7 @@ export async function directGateProof(
   }
 
   const match = stdout.match(
-    /lockout-order-proof row2:\s+bootstrap status=(\d+)\s+delta=(\d+)\s+total=(\d+)\s+remaining=(\d+)\s+checksum=([0-9a-fA-F]+)/,
+    /lockout-order-proof row2:\s+bootstrap status=(\d+)\s+delta=(\d+)\s+total=(\d+)\s+remaining=(\d+)\s+nonce=([0-9a-f-]+)/,
   );
   if (!match) {
     const tail = (stdout + stderr).trim().split("\n").slice(-4).join(" | ");
@@ -332,7 +315,7 @@ export async function directGateProof(
   const delta = Number(match[2]);
   const total = Number(match[3]);
   const remaining = Number(match[4]);
-  const checksum = match[5];
+  const echoedNonce = match[5];
 
   if (status !== 200 || delta !== 1 || total !== 4 || remaining !== 0) {
     return {
@@ -342,11 +325,10 @@ export async function directGateProof(
     };
   }
 
-  const expectedChecksum = computeProofChecksum(status, delta, total, remaining);
-  if (checksum !== expectedChecksum) {
+  if (echoedNonce !== nonce) {
     return {
       ok: false,
-      detail: `invalid proof checksum: got ${checksum}, expected ${expectedChecksum}`,
+      detail: `unearned proof nonce: child did not echo this audit run's nonce`,
     };
   }
 
@@ -2377,15 +2359,35 @@ Deno.test("audio-feed-v46l5: (a) direct-gate spawn is bounded and kills a hung c
   assert(elapsed < 2000, `bound must abort promptly, took ${elapsed}ms`);
 });
 
-Deno.test("audio-feed-v46l5: (b) a mutant suite printing hardcoded literal without running row2 reds", async () => {
-  // A child that exits 0 and prints the old unearned literal without running row 2
+Deno.test("audio-feed-v46l5: (b) old constants without a nonce red", async () => {
   const result = await directGateProof(DIRECT_GATE_SPAWN_BOUND_MS, [
     "eval",
-    'console.log("lockout-order-proof row2: bootstrap status=200 compareCalls=1");',
+    'console.log("lockout-order-proof row2: bootstrap status=200 delta=1 total=4 remaining=0");',
   ]);
-  assert(!result.ok, "hardcoded literal must not pass earned proof check");
-  assert(
-    result.detail.includes("unearned or malformed proof line"),
-    `detail must reject unearned line, got: ${result.detail}`,
-  );
+  assert(!result.ok, "hardcoded values without a nonce must not pass");
+  assert(result.detail.includes("unearned or malformed proof line"), result.detail);
+});
+
+Deno.test("audio-feed-v46l5: wrong nonce cannot forge a proof", async () => {
+  const result = await directGateProof(DIRECT_GATE_SPAWN_BOUND_MS, [
+    "eval",
+    'console.log("lockout-order-proof row2: bootstrap status=200 delta=1 total=4 remaining=0 nonce=00000000-0000-4000-8000-000000000000");',
+  ]);
+  assert(!result.ok, "a nonce from another run must not pass");
+  assert(result.detail.includes("unearned proof nonce"), result.detail);
+});
+
+Deno.test("audio-feed-v46l5: (c) importing the old checksum still cannot forge a proof", async () => {
+  const result = await directGateProof(DIRECT_GATE_SPAWN_BOUND_MS, [
+    "eval",
+    'import { computeProofChecksum } from "./tests/lockout_order_test.ts"; console.log(`lockout-order-proof row2: bootstrap status=200 delta=1 total=4 remaining=0 checksum=${computeProofChecksum(200, 1, 4, 0)}`);',
+  ]);
+  assert(!result.ok, "old-format checksum line without a nonce must not pass");
+  assert(result.detail.includes("unearned or malformed proof line"), result.detail);
+});
+
+Deno.test("audio-feed-v46l5: (d) real child echoes this audit's nonce after row 2", async () => {
+  const result = await directGateProof();
+  assert(result.ok, result.detail);
+  assertMatch(result.detail, /nonce=[0-9a-f-]+$/);
 });
