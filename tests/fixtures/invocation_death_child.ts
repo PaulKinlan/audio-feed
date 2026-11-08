@@ -21,7 +21,14 @@
  * uploading_audio -> await put -> death with the wrapper's deadline timer still in
  * the future.
  */
-import { DEFAULT_MARKER_WAIT_MS, MARKER_WAIT_MS_ENV } from "./invocation_death_window.ts";
+import {
+  DEFAULT_MARKER_WAIT_MS,
+  DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+  MARKER_WAIT_MS_ENV,
+  STAGE_DELAY_MS_ENV,
+  STAGE_WEDGE_ENV,
+  SURVIVE_PUT_START_WAIT_MS_ENV,
+} from "./invocation_death_window.ts";
 import { KvMetadataStore } from "../../src/storage/kv.ts";
 import type { BlobInfo, BlobObject, BlobStore } from "../../src/storage/mod.ts";
 import { runSynthesisBatch } from "../../src/worker/synthesis.ts";
@@ -43,10 +50,17 @@ class HangingPutBlobStore implements BlobStore {
   /** Monotonic ms of each put start and settlement, for the budget assertions. */
   putStartedAt: number[] = [];
   putSettledAt: number[] = [];
-  put(_key: string, _body: Uint8Array | ReadableStream<Uint8Array>, opts?: {
+  async put(_key: string, _body: Uint8Array | ReadableStream<Uint8Array>, opts?: {
     contentType?: string;
     signal?: AbortSignal;
   }): Promise<BlobInfo> {
+    const delayMs = Number(Deno.env.get(STAGE_DELAY_MS_ENV) ?? "0");
+    if (delayMs > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    if (Deno.env.get(STAGE_WEDGE_ENV) === "1") {
+      await new Promise<never>(() => {});
+    }
     this.started++;
     if (opts?.signal?.aborted) this.startedAfterAbort++;
     this.putStartedAt.push(performance.now());
@@ -144,7 +158,11 @@ if (!(await metadata.getEpisode("user-1", "episode-1"))) {
 
 const pcm = new Uint8Array(64);
 const wav = pcmToWav(pcm, { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
-const synth = () => Promise.resolve(decodedFromWav(wav));
+let lastProgressAt = Date.now();
+const synth = () => {
+  lastProgressAt = Date.now();
+  return Promise.resolve(decodedFromWav(wav));
+};
 
 const batchPromise = runSynthesisBatch(ctx, synth, {
   owner: `invocation-death-${round}`,
@@ -251,16 +269,73 @@ if (mode === "survive") {
   // The deadline is on the controlled clock (audio-feed-ga3jd): wait until the put
   // is OBSERVABLY started (an order fact, not a race), then advance past the
   // 4000-500=3500ms deadline so the abort lands mid-put on any host speed.
-  const putStartDeadline = Date.now() + 20_000;
-  while (hangingBlobs.started === 0) {
-    if (Date.now() > putStartDeadline) {
+  //
+  // audio-feed-wjtpb: the old 20s wall-clock was a guess about machine speed that
+  // flaked under VM gate load when earlier stages were starved. Now:
+  // (a) DEFAULT_SURVIVE_PUT_START_WAIT_MS derives from MEASURED_STARVED_POLL_MS with
+  //     the standard 15x headroom (120s);
+  // (b) SURVIVE_PUT_START_WAIT_MS_ENV allows explicit caller override (e.g. 0 or 100 for tests);
+  // (c) We wait on the EVENT first: if batchPromise settles before the put starts,
+  //     we abort immediately because no further progress is possible;
+  // (d) The deadline watchdog re-arms whenever observable stage progress occurs (phase/status changes),
+  //     so slow forward progress on a starved host never trips the bound, while a genuine
+  //     hang (no progress for putStartWaitMs) exits with SURVIVE-FATAL.
+  const rawPutStartWaitMs = Deno.env.get(SURVIVE_PUT_START_WAIT_MS_ENV);
+  let putStartWaitMs = DEFAULT_SURVIVE_PUT_START_WAIT_MS;
+  if (rawPutStartWaitMs !== undefined) {
+    const parsed = Number(rawPutStartWaitMs);
+    if (!Number.isInteger(parsed) || parsed < 0) {
       console.error(
-        `SURVIVE-FATAL: the put never started within 20s (stages starved) - aborting so the parent asserts red`,
+        `child: ${SURVIVE_PUT_START_WAIT_MS_ENV} must be a non-negative integer of milliseconds, got ${
+          JSON.stringify(rawPutStartWaitMs)
+        }`,
+      );
+      Deno.exit(2);
+    }
+    putStartWaitMs = parsed;
+  }
+
+  const batchOutcome = batchPromise.then(
+    () => "settled" as const,
+    (err: unknown) => `threw: ${err instanceof Error ? err.message : String(err)}` as const,
+  );
+  let settled: string | undefined;
+
+  let deadline = lastProgressAt + putStartWaitMs;
+  let lastPhase: string | undefined;
+  let lastStatus: string | undefined;
+
+  while (hangingBlobs.started === 0) {
+    if (Date.now() > deadline) {
+      console.error(
+        `SURVIVE-FATAL: the put never started within ${putStartWaitMs}ms (stages starved or hung) - aborting so the parent asserts red`,
       );
       Deno.exit(1);
     }
-    await new Promise((r) => setTimeout(r, 5));
+    const outcome = await Promise.race([
+      batchOutcome,
+      new Promise<undefined>((r) => setTimeout(r, 5)),
+    ]);
+    if (outcome !== undefined) {
+      settled = outcome;
+      break;
+    }
+    const episode = await metadata.getEpisode("user-1", "episode-1");
+    if (episode?.phase !== lastPhase || episode?.status !== lastStatus) {
+      lastPhase = episode?.phase;
+      lastStatus = episode?.status;
+      lastProgressAt = Date.now();
+      deadline = lastProgressAt + putStartWaitMs;
+    }
   }
+
+  if (hangingBlobs.started === 0 && settled !== undefined) {
+    console.error(
+      `SURVIVE-FATAL: batch settled before the put started (${settled}) - aborting so the parent asserts red`,
+    );
+    Deno.exit(1);
+  }
+
   await surviveTime.advance(4_000);
   const result = await batchPromise;
   const episode = await metadata.getEpisode("user-1", "episode-1");

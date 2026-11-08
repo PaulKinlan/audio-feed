@@ -41,3 +41,37 @@ export const DEFAULT_MARKER_WAIT_MS = MARKER_WAIT_HEADROOM * MEASURED_STARVED_PO
  * (the red path), negative or non-integer = usage error.
  */
 export const MARKER_WAIT_MS_ENV = "INVOCATION_DEATH_MARKER_WAIT_MS";
+
+/**
+ * The headroom multiplier over the starved floor for survive put start (audio-feed-wjtpb).
+ *
+ * 15 x MEASURED_STARVED_POLL_MS matches the repo's standard HANG_BOUND_MS derivation
+ * (scripts/proof-cdp.ts) and DEFAULT_MARKER_WAIT_MS: 120s of headroom so a gate-loaded
+ * VM never trips on scheduling delays while earlier stages run, but a genuine hang
+ * is bounded.
+ */
+export const SURVIVE_PUT_START_HEADROOM = 15;
+
+/** Function deriving the survive put-start wait from the starved-poll floor. */
+export function survivePutStartWaitMs(floorMs: number): number {
+  return SURVIVE_PUT_START_HEADROOM * floorMs;
+}
+
+/** The default give-up bound for the survive control put start: 120s (15 x 8_000ms). */
+export const DEFAULT_SURVIVE_PUT_START_WAIT_MS = survivePutStartWaitMs(MEASURED_STARVED_POLL_MS);
+
+/**
+ * Env var overriding the survive put-start wait in milliseconds; 0 = give up immediately
+ * (the red path), negative or non-integer = usage error.
+ */
+export const SURVIVE_PUT_START_WAIT_MS_ENV = "INVOCATION_DEATH_SURVIVE_PUT_START_WAIT_MS";
+
+/**
+ * Env var introducing an artificial delay in milliseconds before the put starts (for testing).
+ */
+export const STAGE_DELAY_MS_ENV = "INVOCATION_DEATH_STAGE_DELAY_MS";
+
+/**
+ * Env var forcing the child to wedge before starting the put (for testing the hang bound).
+ */
+export const STAGE_WEDGE_ENV = "INVOCATION_DEATH_STAGE_WEDGE";
