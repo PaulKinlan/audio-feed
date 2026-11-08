@@ -221,7 +221,8 @@ routes, listed separately because the attacker's position there is different.
     no subscriber data in the shell; data comes only from the gated API routes (`src/app.ts:150-153`).
   - Failed attempts on the header path AND bootstrap share ONE sliding-window lockout limiter
     (audio-feed-bns, store-shared so the bound holds across isolates; `src/compose/admin.ts:60-62`,
-    `:118-140`; bootstrap at `src/routes/account_api.ts:354-357`).
+    `:118-140`; bootstrap at `src/routes/account_api.ts:354-357`). The lockout gates attempts before
+    secret compare (audio-feed-pymwh), so candidates are not evaluated at line rate.
   - The observability API is a separate Bearer shared key, `timingSafeEqual`-compared, and closed
     when `AUDIOFEED_OBSERVABILITY_KEY` is unset (`src/routes/observability.ts:110-147`).
 - **Residual (documented, accepted):** the break-glass token is a static configured secret with no

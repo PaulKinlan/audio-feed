@@ -208,7 +208,7 @@ Deno.test("admin throttle: unauthenticated requests (no token) do not count as f
   assertEquals(success.status, 200);
 });
 
-Deno.test("admin throttle: valid credentials are NEVER locked out by prior failures", async () => {
+Deno.test("admin throttle: valid credentials succeed on unthrottled window; during lockout attempts are gated (audio-feed-pymwh)", async () => {
   const { fetch } = testApp({}, { maxFailures: 3, windowMs: 60_000 });
 
   // 3 wrong token attempts on this client IP -> triggers lockout for bad tokens
@@ -229,21 +229,22 @@ Deno.test("admin throttle: valid credentials are NEVER locked out by prior failu
   );
   assertEquals(blocked.status, 429);
 
-  // BUT valid credentials must NEVER be locked out: real admin presents correct token and succeeds (200)
-  const validRes = await fetch(
+  // audio-feed-pymwh: while locked out, attempts are refused BEFORE secret compare (preventing brute-force)
+  const validWhileLocked = await fetch(
     new Request(`${BASE}/api/admin/users`, {
       headers: { "x-admin-token": ADMIN_SECRET },
     }),
   );
-  assertEquals(validRes.status, 200, "valid admin token must never be locked out (anti-DoS)");
+  assertEquals(validWhileLocked.status, 429, "locked out client is refused before secret compare");
 
-  // And presenting valid credentials resets the failure counter for the IP
-  const postResetWrong = await fetch(
+  // An independent unthrottled client IP can authenticate with valid credentials
+  const otherClient = await fetch(
     new Request(`${BASE}/api/admin/users`, {
-      headers: { "x-admin-token": "wrong-again" },
+      headers: { "x-admin-token": ADMIN_SECRET },
     }),
+    { remoteAddr: { hostname: "10.8.8.8" } },
   );
-  assertEquals(postResetWrong.status, 401, "failure count was reset by valid auth");
+  assertEquals(otherClient.status, 200, "unthrottled client succeeds with valid credentials");
 });
 
 Deno.test("admin throttle: integration test driving server.fetch with real connection info", async () => {
@@ -310,14 +311,14 @@ Deno.test("admin throttle: integration test driving server.fetch with real conne
     );
     assertEquals(client2Res.status, 200, "independent IP must not be affected by client1");
 
-    // Client 1 with CORRECT token is accepted (not locked out!)
+    // Client 1 with token is refused with 429 while locked out (audio-feed-pymwh)
     const client1Valid = await booted.fetch(
       new Request(`${BASE}/api/admin/users`, {
         headers: { "x-admin-token": ADMIN_SECRET },
       }),
       client1,
     );
-    assertEquals(client1Valid.status, 200, "valid token on client1 succeeds and clears lockout");
+    assertEquals(client1Valid.status, 429, "client1 remains locked out until window expires");
   } finally {
     if (booted) await booted.shutdown();
   }

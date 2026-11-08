@@ -51,7 +51,12 @@ import type { LogBounds, LogRecord, LogSeverity } from "../storage/mod.ts";
 import { LOG_READ_LIMIT, summarizeRecords } from "../storage/log_shape.ts";
 import { json, problem } from "../http.ts";
 import { timingSafeEqual } from "../ids.ts";
-import { createObservabilityAuthLimiter, extractClientIp } from "../auth/rate_limit.ts";
+import {
+  createObservabilityAuthLimiter,
+  extractClientIp,
+  type FailedAuthLimiter,
+  guardSecretAuth,
+} from "../auth/rate_limit.ts";
 import { readQueueSnapshot } from "../observability/admin_report.ts";
 import { detectOverdueInvocations } from "../observability/invocation_overdue.ts";
 
@@ -121,16 +126,20 @@ function presentedKey(req: Request): string | null {
  * (src/compose/admin.ts:120-160) — in its own window, because this is a different secret
  * (src/auth/rate_limit.ts `createObservabilityAuthLimiter`).
  *
- * The order is the admin gate's, and it is what keeps monitoring alive: the key is verified FIRST,
- * so a caller holding it is never locked out, and a success resets the window, so a typo does not
- * count against the next faithful poll. Only a FAILED comparison can be throttled, and the 429 says
- * nothing the 401 did not already say — it does not reveal whether a key exists, only that this
- * client has run out of attempts.
+ * The order gates BEFORE secret compare (audio-feed-pymwh): attempts are checked and recorded
+ * before any secret comparison is evaluated. N+1 attempts are refused with 429 without comparing
+ * the secret, while a correct key on an unthrottled window succeeds and resets the counter.
  */
-async function authorise(
+export interface ObservabilityAuthDeps {
+  limiter?: FailedAuthLimiter;
+  compareKey?: (provided: string, expected: string) => boolean | Promise<boolean>;
+}
+
+export async function authorise(
   ctx: AppContext,
   req: Request,
   remoteAddr?: string,
+  deps: ObservabilityAuthDeps = {},
 ): Promise<Response | null> {
   const expected = ctx.config.observabilityKey;
   if (!expected) {
@@ -142,43 +151,47 @@ async function authorise(
     });
   }
   const presented = presentedKey(req);
-  // Constant time, and computed against the configured key either way, so a missing header costs
-  // the same as a wrong one.
-  const ok = presented !== null && timingSafeEqual(presented, expected);
 
   // Read from the store per request: the window lives in the shared store, not in module memory
   // (audio-feed-2zvc), so a fresh instance still reads one deployment-wide bound.
-  const failedAuth = createObservabilityAuthLimiter(ctx.stores.metadata);
+  const failedAuth = deps.limiter ?? createObservabilityAuthLimiter(ctx.stores.metadata);
   const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
 
-  if (ok) {
-    await failedAuth.reset(clientIp);
-    return null;
-  }
-
-  const lock = await failedAuth.isLockedOut(clientIp);
-  if (!lock.allowed) {
-    const refused = problem({
-      status: 429,
-      title: "too_many_auth_failures",
-      detail: "Too many failed observability key attempts from this client. Try again later.",
-    });
-    refused.headers.set("retry-after", Math.max(1, Math.ceil(lock.resetMs / 1000)).toString());
-    refused.headers.set("cache-control", "no-store");
-    return refused;
-  }
-
-  const failure = await failedAuth.recordFailure(clientIp);
-  const refused = problem({
-    status: 401,
-    title: "unauthorised",
-    detail: "Present the observability key as: Authorization: Bearer <key>.",
+  return await guardSecretAuth({
+    limiter: failedAuth,
+    clientKey: clientIp,
+    compare: () => {
+      if (presented === null) return false;
+      return deps.compareKey
+        ? deps.compareKey(presented, expected)
+        : timingSafeEqual(presented, expected);
+    },
+    onLockedOut: (retryAfterSec) => {
+      const refused = problem({
+        status: 429,
+        title: "too_many_auth_failures",
+        detail: "Too many failed observability key attempts from this client. Try again later.",
+      });
+      refused.headers.set("retry-after", retryAfterSec.toString());
+      refused.headers.set("cache-control", "no-store");
+      return refused;
+    },
+    onUnauthorized: (attempt) => {
+      const refused = problem({
+        status: 401,
+        title: "unauthorised",
+        detail: "Present the observability key as: Authorization: Bearer <key>.",
+      });
+      refused.headers.set("www-authenticate", 'Bearer realm="observability"');
+      if (attempt.remaining === 0) {
+        refused.headers.set(
+          "retry-after",
+          Math.max(1, Math.ceil(attempt.resetMs / 1000)).toString(),
+        );
+      }
+      return refused;
+    },
   });
-  refused.headers.set("www-authenticate", 'Bearer realm="observability"');
-  if (!failure.allowed) {
-    refused.headers.set("retry-after", Math.max(1, Math.ceil(failure.resetMs / 1000)).toString());
-  }
-  return refused;
 }
 
 interface ParsedQuery {
@@ -320,9 +333,12 @@ async function invocationScan(ctx: AppContext) {
   }
 }
 
-export function createObservabilityErrorsHandler(ctx: AppContext): Handler<AppContext> {
+export function createObservabilityErrorsHandler(
+  ctx: AppContext,
+  deps: ObservabilityAuthDeps = {},
+): Handler<AppContext> {
   return async ({ req, remoteAddr }) => {
-    const refused = await authorise(ctx, req, remoteAddr);
+    const refused = await authorise(ctx, req, remoteAddr, deps);
     if (refused) return refused;
     const parsed = parseQuery(new URL(req.url));
     if ("error" in parsed) return parsed.error;
@@ -362,9 +378,12 @@ export function createObservabilityErrorsHandler(ctx: AppContext): Handler<AppCo
   };
 }
 
-export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppContext> {
+export function createObservabilitySummaryHandler(
+  ctx: AppContext,
+  deps: ObservabilityAuthDeps = {},
+): Handler<AppContext> {
   return async ({ req, remoteAddr }) => {
-    const refused = await authorise(ctx, req, remoteAddr);
+    const refused = await authorise(ctx, req, remoteAddr, deps);
     if (refused) return refused;
     const parsed = parseQuery(new URL(req.url));
     if ("error" in parsed) return parsed.error;

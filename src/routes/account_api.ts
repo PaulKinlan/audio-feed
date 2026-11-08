@@ -36,14 +36,15 @@ import {
   getUserByEmail,
   isValidEmail,
   normaliseEmail,
-  requireAdminToken,
   rotateFeedToken,
+  tokensMatch,
   updatePreferences,
 } from "../auth/users.ts";
 import {
   createAdminAuthLimiter,
   extractClientIp,
   type FailedAuthLimiter,
+  guardSecretAuth,
   SlidingWindowRateLimiter,
 } from "../auth/rate_limit.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
@@ -89,6 +90,8 @@ export interface AccountDeps {
   regenerateOutdated: (userId: string, scope?: "outdated" | "all" | "failed") => Promise<number>;
   /** Test seam: shared failed admin auth rate limiter (audio-feed-bns). */
   adminAuthLimiter?: FailedAuthLimiter;
+  /** Test seam: custom token comparison for lockout ordering verification (audio-feed-pymwh). */
+  compareAdminToken?: (provided: string, expected: string) => boolean | Promise<boolean>;
 }
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -309,34 +312,34 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         return reply({ error: "ADMIN_TOKEN is not configured on this server." }, 503);
       }
 
-      // audio-feed-bns: throttle failed admin auth attempts without locking out valid credentials
+      // audio-feed-pymwh: throttle failed admin auth attempts BEFORE evaluating secret compare.
       const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
       // Shared through the store, so this path and adminGate count against ONE
       // bound even on different isolates (audio-feed-2zvc).
       const limiter = deps.adminAuthLimiter ?? createAdminAuthLimiter(ctx.stores.metadata);
 
-      try {
-        await requireAdminToken(adminToken.trim(), expected);
-        await limiter.reset(clientIp);
-      } catch {
-        // Token is invalid. Check if client IP is currently locked out.
-        const lock = await limiter.isLockedOut(clientIp);
-        if (!lock.allowed) {
-          const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
-          return reply(
+      const denied = await guardSecretAuth({
+        limiter,
+        clientKey: clientIp,
+        compare: () =>
+          deps.compareAdminToken
+            ? deps.compareAdminToken(adminToken.trim(), expected)
+            : tokensMatch(adminToken.trim(), expected),
+        onLockedOut: (retryAfterSec) =>
+          reply(
             { error: "Too many failed admin authentication attempts. Please try again later." },
             429,
             { "retry-after": retryAfterSec.toString() },
-          );
-        }
-
-        const fail = await limiter.recordFailure(clientIp);
-        const headers: Record<string, string> = {};
-        if (!fail.allowed) {
-          headers["retry-after"] = Math.max(1, Math.ceil(fail.resetMs / 1000)).toString();
-        }
-        return reply({ error: "Invalid admin token." }, 401, headers);
-      }
+          ),
+        onUnauthorized: (attempt) => {
+          const headers: Record<string, string> = {};
+          if (attempt.remaining === 0) {
+            headers["retry-after"] = Math.max(1, Math.ceil(attempt.resetMs / 1000)).toString();
+          }
+          return reply({ error: "Invalid admin token." }, 401, headers);
+        },
+      });
+      if (denied) return denied;
 
       const existingUser = await getUserByEmail(store, normalised);
       if (existingUser) {

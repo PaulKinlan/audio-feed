@@ -16,6 +16,7 @@ import type { VoiceSampleClient } from "../tts/voice-samples.ts";
 import type { SynthesisWorkerOptions, Synthesizer } from "../worker/synthesis.ts";
 import type { RequestAccessDeps } from "./access.ts";
 import type { FailedAuthLimiter } from "../auth/rate_limit.ts";
+import type { ObservabilityAuthDeps } from "../routes/observability.ts";
 
 /** Extraction of the capability token a podcast client can actually send. */
 const TOKEN_HEADERS = ["x-feed-token", "x-user-token"] as const;
@@ -143,6 +144,8 @@ export interface ComposeDeps {
   requestAccess?: RequestAccessDeps;
   /** Test seam: shared failed admin auth rate limiter (audio-feed-bns). */
   adminAuthLimiter?: FailedAuthLimiter;
+  /** Test seam: observability auth options (audio-feed-pymwh). */
+  observability?: ObservabilityAuthDeps;
 }
 
 export const badRequest = (message: string) =>
