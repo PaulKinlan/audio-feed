@@ -90,3 +90,15 @@ Deno.test("an unknown asset is a 404 and cannot traverse (audio-feed-3xq)", asyn
   const wrong = await handleAsset({ params: { name: "deadbeef.listen.css" } } as never);
   assertEquals(wrong.status, 404, "a mismatched content hash must not serve");
 });
+
+Deno.test("the sprite hider in listen.css uses overflow: clip (audio-feed-evy8v)", async () => {
+  const { fetch } = await app();
+  const url = assetUrl("listen.css");
+  const res = await fetch(new Request(`${BASE}${url}`));
+  assertEquals(res.status, 200);
+  const css = await res.text();
+  const spriteRule = css.match(/\.sprite\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  assert(spriteRule.length > 0, ".sprite rule must exist in listen.css");
+  assertStringIncludes(spriteRule, "overflow: clip;");
+  assert(!spriteRule.includes("overflow: hidden"), ".sprite must not use overflow: hidden");
+});
