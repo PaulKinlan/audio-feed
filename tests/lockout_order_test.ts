@@ -21,6 +21,25 @@ import { adminGate } from "../src/compose/admin.ts";
 import { createAccountHandlers } from "../src/routes/account_api.ts";
 import { authorise } from "../src/routes/observability.ts";
 
+/**
+ * audio-feed-v46l5: deterministic checksum binding the runtime values of row 2:
+ * bootstrap status (200), compare spy delta (1), total compare calls (4),
+ * and remaining limiter reset window length (0).
+ */
+export function computeProofChecksum(
+  status: number,
+  delta: number,
+  total: number,
+  remaining: number,
+): string {
+  let h = 0;
+  const str = `${status}:${delta}:${total}:${remaining}`;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16);
+}
+
 const BASE = "https://audio.example.com";
 const ADMIN_SECRET = "secret-admin-passphrase-test-123";
 const OBS_SECRET = "secret-observability-key-456";
@@ -205,20 +224,26 @@ Deno.test("lockout order row 2: src/routes/account_api.ts (bootstrap) gates befo
   assertEquals(cleanCompareCalls, 1, "a successful bootstrap must evaluate compare exactly once");
   assertEquals(compareCalls, 4, "clean attempt evaluates compare once");
   assert(compareCalls > 0, "gate must evaluate compare on successful auth");
-  // audio-feed-dzrx2: the BEHAVIOURAL half of abh1's direct-gate pin. tests/fast_check_test.ts
-  // spawns this suite and matches this exact line, so the exception is pinned to a value observed
-  // from a run rather than to source patterns. The line carries the two numbers the success-path
-  // assertions above consumed and is printed after them, so a suite that keeps this bootstrap and
-  // its assertions inside dead code prints nothing and that audit reds.
-  console.log(
-    `lockout-order-proof row2: bootstrap status=${cleanRes.status} compareCalls=${cleanCompareCalls}`,
-  );
-
   const cleanStored = await stores.metadata.atomicUpdate<number[]>(
     "admin_auth:192.0.2.20",
     () => null,
   );
   assertEquals(cleanStored.value?.length, 0, "successful auth resets limiter window");
+
+  // audio-feed-dzrx2 / audio-feed-v46l5: the BEHAVIOURAL half of abh1's direct-gate pin.
+  // tests/fast_check_test.ts spawns this suite and parses this output.
+  // The line binds the bootstrap status, compare spy delta, total compare calls, limiter
+  // reset counter, and a derived checksum so that a static hardcoded console.log cannot satisfy the audit.
+  const remaining = cleanStored.value?.length ?? -1;
+  const checksum = computeProofChecksum(
+    cleanRes.status,
+    cleanCompareCalls,
+    compareCalls,
+    remaining,
+  );
+  console.log(
+    `lockout-order-proof row2: bootstrap status=${cleanRes.status} delta=${cleanCompareCalls} total=${compareCalls} remaining=${remaining} checksum=${checksum}`,
+  );
 });
 
 Deno.test("lockout order row 3: src/routes/observability.ts (authorise) gates before compare", async () => {

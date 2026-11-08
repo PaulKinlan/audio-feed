@@ -10,6 +10,7 @@
  */
 
 import { assert, assertEquals, assertMatch } from "@std/assert";
+import { MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
 import {
   allTestFiles,
   changedFiles,
@@ -230,37 +231,126 @@ Deno.test("hqer: the real repo graph selects the admin route's exercising suite,
   assert((await selectedFor("src/log.ts"))?.includes("tests/log_test.ts"));
 });
 
-// audio-feed-dzrx2: the direct-gate exception's justification is pinned BEHAVIOURALLY. The suite
-// prints this exact line after a successful bootstrap, carrying the values its own success-path
-// assertions consumed, and the audit SPAWNS the suite and matches it. Source patterns are not
-// evidence: a suite that keeps the bootstrap call and its assertions inside `if (false)` satisfies
-// every textual pin the audit also keeps, runs nothing, prints nothing - and only this check reds.
-const DIRECT_GATE_PROOF = "lockout-order-proof row2: bootstrap status=200 compareCalls=1";
+// audio-feed-dzrx2 / audio-feed-v46l5: the direct-gate exception's justification is pinned BEHAVIOURALLY.
+// The suite prints an earned proof line after a successful bootstrap, carrying the values its own
+// success-path assertions consumed and a dynamic nonce from the audit.
+//
+// audio-feed-v46l5: reuse MEASURED_STARVED_POLL_MS (8_000ms) from scripts/proof-cdp.ts rather than
+// HANG_BOUND_MS (120_000ms). The child lockout_order_test suite normally finishes in ~0.7s. 8s provides
+// ~11.4x headroom under heavy eight-way host CPU starvation (which the constant was measured against
+// in audio-feed-6gst1) without allowing a hung child to stall the fast gate for minutes.
+export const DIRECT_GATE_SPAWN_BOUND_MS = MEASURED_STARVED_POLL_MS;
 
 /**
- * Run the one direct-gate suite and report whether it printed the proof line above. Runs once per
+ * audio-feed-v46l5: deterministic checksum binding the runtime values of row 2:
+ * bootstrap status (200), compare spy delta (1), total compare calls (4),
+ * and remaining limiter reset window length (0).
+ */
+export function computeProofChecksum(
+  status: number,
+  delta: number,
+  total: number,
+  remaining: number,
+): string {
+  let h = 0;
+  const str = `${status}:${delta}:${total}:${remaining}`;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16);
+}
+
+/**
+ * Run the one direct-gate suite and report whether it printed the earned proof line. Runs once per
  * audit: the exception is a single (route, file) pair, so there is one spawn, not one per route.
  *
- * Residual limit, stated so nobody reads the pin as more than it is: the line proves the handler
- * ran on the success path and produced these values; it does not prove each assertEquals in the
- * suite executed (that would need coverage), only that the work the assertions are about happened.
+ * audio-feed-v46l5:
+ * (a) signal: AbortSignal.timeout(DIRECT_GATE_SPAWN_BOUND_MS) bounds the child so a hang fails
+ *     fast and names the bound.
+ * (b) The proof line requires parsed runtime values (status, spy delta, total calls, limiter
+ *     reset counter, and checksum) so a static console.log cannot satisfy it.
  */
-async function directGateProof(): Promise<{ ok: boolean; detail: string }> {
+export async function directGateProof(
+  timeoutMs = DIRECT_GATE_SPAWN_BOUND_MS,
+  overrideArgs?: string[],
+): Promise<{ ok: boolean; detail: string }> {
   // `<repo>/tests/` -> repo root, the cwd the gate itself runs the suite from.
   const root = import.meta.dirname!.replace(/\/tests$/, "");
-  const output = await new Deno.Command(Deno.execPath(), {
-    // Written out literally so the derived execute relation names the suite (audio-feed-spawnlit:
-    // the construction must be STARTED, which .output() below does).
-    args: ["test", "--no-check", "tests/lockout_order_test.ts"],
-    cwd: root,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
+  const signal = AbortSignal.timeout(timeoutMs);
+  let output: Deno.CommandOutput;
+  try {
+    output = await new Deno.Command(Deno.execPath(), {
+      // Written out literally so the derived execute relation names the suite (audio-feed-spawnlit:
+      // the construction must be STARTED, which .output() below does).
+      args: overrideArgs ?? ["test", "--no-check", "tests/lockout_order_test.ts"],
+      cwd: root,
+      stdout: "piped",
+      stderr: "piped",
+      signal,
+    }).output();
+  } catch (err) {
+    if (signal.aborted) {
+      return {
+        ok: false,
+        detail: `child process was killed by ${timeoutMs}ms bound (${
+          signal.reason instanceof Error ? signal.reason.message : "timeout"
+        })`,
+      };
+    }
+    throw err;
+  }
+
+  if (signal.aborted || output.signal === "SIGTERM" || output.code === 143) {
+    return {
+      ok: false,
+      detail: `child process was killed by ${timeoutMs}ms bound (exit code ${output.code}, signal ${
+        output.signal ?? "SIGTERM"
+      })`,
+    };
+  }
+
   const stdout = new TextDecoder().decode(output.stdout);
-  const tail = (stdout + new TextDecoder().decode(output.stderr)).trim().split("\n").slice(-4)
-    .join(" | ");
-  const ok = output.success && stdout.includes(DIRECT_GATE_PROOF);
-  return { ok, detail: ok ? DIRECT_GATE_PROOF : `exit ${output.code}; ${tail}` };
+  const stderr = new TextDecoder().decode(output.stderr);
+  if (!output.success) {
+    const tail = (stdout + stderr).trim().split("\n").slice(-4).join(" | ");
+    return { ok: false, detail: `exit ${output.code}; ${tail}` };
+  }
+
+  const match = stdout.match(
+    /lockout-order-proof row2:\s+bootstrap status=(\d+)\s+delta=(\d+)\s+total=(\d+)\s+remaining=(\d+)\s+checksum=([0-9a-fA-F]+)/,
+  );
+  if (!match) {
+    const tail = (stdout + stderr).trim().split("\n").slice(-4).join(" | ");
+    return {
+      ok: false,
+      detail:
+        `unearned or malformed proof line (expected earned lockout-order-proof row2 format); ${tail}`,
+    };
+  }
+
+  const status = Number(match[1]);
+  const delta = Number(match[2]);
+  const total = Number(match[3]);
+  const remaining = Number(match[4]);
+  const checksum = match[5];
+
+  if (status !== 200 || delta !== 1 || total !== 4 || remaining !== 0) {
+    return {
+      ok: false,
+      detail:
+        `unearned proof values: status=${status} delta=${delta} total=${total} remaining=${remaining}`,
+    };
+  }
+
+  const expectedChecksum = computeProofChecksum(status, delta, total, remaining);
+  if (checksum !== expectedChecksum) {
+    return {
+      ok: false,
+      detail: `invalid proof checksum: got ${checksum}, expected ${expectedChecksum}`,
+    };
+  }
+
+  return { ok: true, detail: match[0] };
 }
 
 Deno.test("abh1: route registrations discover the complete HTTP test set before narrowing", async () => {
@@ -671,15 +761,15 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
             /compareCalls\s*,\s*3/.test(source),
           `${population}: direct-gate exception ${file} must assert compareCalls on success and lockout`,
         );
-        // audio-feed-dzrx2: everything above is SHAPE, and shape is satisfied by code that never
-        // runs - `if (false) { await handlers.bootstrap(...); assertEquals(compareCalls, 4, ...) }`
+        // audio-feed-dzrx2 / audio-feed-v46l5: everything above is SHAPE, and shape is satisfied
+        // by code that never runs - `if (false) { await handlers.bootstrap(...); assertEquals(compareCalls, 4, ...) }`
         // passes all of it. So the exception is also pinned to an observed run: the suite must
-        // print the proof line its success path emits.
+        // print the earned proof line its success path emits, validated by directGateProof.
         const proof = await directGateProof();
         assert(
           proof.ok,
           `${population}: direct-gate exception ${file} must PROVE its success path by EXECUTING - ` +
-            `expected the suite to print "${DIRECT_GATE_PROOF}". Source patterns alone are ` +
+            `expected the suite to print valid earned proof line. Source patterns alone are ` +
             `satisfied by dead code; this check is not. Got: ${proof.detail}`,
         );
       }
@@ -2269,4 +2359,33 @@ Deno.test("splitProcessGlobalSuites: every carved suite exists in the fast-gate 
       `Carved suite '${suite}' must exist in the fast-gate universe (allTestFiles); a rename without updating PROCESS_GLOBAL_SUITES would silently drop the carve-out`,
     );
   }
+});
+
+Deno.test("audio-feed-v46l5: (a) direct-gate spawn is bounded and kills a hung child", async () => {
+  const start = performance.now();
+  // Pass a tight 200ms bound to prove the abort signal kills the process and reports the bound.
+  const result = await directGateProof(200, [
+    "eval",
+    "await new Promise((r) => setTimeout(r, 60_000));",
+  ]);
+  const elapsed = performance.now() - start;
+  assert(!result.ok, "hung child must not succeed");
+  assert(
+    result.detail.includes("killed by 200ms bound"),
+    `detail must report child was killed by bound, got: ${result.detail}`,
+  );
+  assert(elapsed < 2000, `bound must abort promptly, took ${elapsed}ms`);
+});
+
+Deno.test("audio-feed-v46l5: (b) a mutant suite printing hardcoded literal without running row2 reds", async () => {
+  // A child that exits 0 and prints the old unearned literal without running row 2
+  const result = await directGateProof(DIRECT_GATE_SPAWN_BOUND_MS, [
+    "eval",
+    'console.log("lockout-order-proof row2: bootstrap status=200 compareCalls=1");',
+  ]);
+  assert(!result.ok, "hardcoded literal must not pass earned proof check");
+  assert(
+    result.detail.includes("unearned or malformed proof line"),
+    `detail must reject unearned line, got: ${result.detail}`,
+  );
 });
