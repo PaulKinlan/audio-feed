@@ -306,6 +306,18 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   // tests/account_regenerate_test.ts:73 as `t.post(...)` into a local post() helper that calls
   // fetch(new Request(...)). Both genuinely exercise the handler; neither carries the primitive
   // on its own line, so that rule would demote two real exercisers.
+  //
+  // audio-feed-em9ib: tighten the dispatch check beyond bare substring includes("fetch(").
+  // Strips comments and string literals, then requires a call to fetch(...) rather than
+  // matching an incidental comment, string literal, or prefetch(...) identifier.
+  const hasDispatch = (source: string): boolean => {
+    const stripped = source
+      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, "")
+      .replace(/"[^"\r\n\\]*(?:\\.[^"\r\n\\]*)*"/g, '""')
+      .replace(/'[^'\r\n\\]*(?:\\.[^'\r\n\\]*)*'/g, "''")
+      .replace(/`[^`\\]*(?:\\.[^`\\]*)*`/g, "``");
+    return /(?<!\w)fetch\s*\(/.test(stripped);
+  };
   const helperDispatches = (source: string, callee: string): boolean => {
     const name = callee.replace(/^.*\./, "");
     if (!/^[A-Za-z_$][\w$]*$/.test(name)) return false;
@@ -411,6 +423,49 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       exercisesRoute("tests/synthetic.ts", row.source, ["/login"], true),
       row.exercising,
       `classifier row must be ${row.exercising ? "exercising" : "mention-only"}: ${row.why}`,
+    );
+  }
+
+  const DISPATCH_ROWS: { why: string; source: string; passes: boolean }[] = [
+    { why: "bare fetch with Request", source: 'await fetch(new Request("/login"));', passes: true },
+    { why: "helper fetch", source: "await t.fetch(req);", passes: true },
+    { why: "app fetch", source: "await app.fetch(req);", passes: true },
+    {
+      why: "incidental fetch in line comment",
+      source: '// await fetch(new Request("/login"));\nconst req = new Request("/login");',
+      passes: false,
+    },
+    {
+      why: "incidental fetch in block comment",
+      source: '/* fetch(new Request("/login")) */\nconst req = new Request("/login");',
+      passes: false,
+    },
+    {
+      why: "incidental fetch in double-quoted string",
+      source: 'const msg = "fetch(url)";\nconst req = new Request("/login");',
+      passes: false,
+    },
+    {
+      why: "incidental fetch in single-quoted string",
+      source: "const msg = 'fetch(url)';\nconst req = new Request('/login');",
+      passes: false,
+    },
+    {
+      why: "incidental fetch in template string",
+      source: 'const msg = `fetch(url)`;\nconst req = new Request("/login");',
+      passes: false,
+    },
+    {
+      why: "prefetch identifier",
+      source: 'prefetch("/login");\nconst req = new Request("/login");',
+      passes: false,
+    },
+  ];
+  for (const row of DISPATCH_ROWS) {
+    assertEquals(
+      hasDispatch(row.source),
+      row.passes,
+      `dispatch rule must ${row.passes ? "pass" : "reject"}: ${row.why}`,
     );
   }
 
@@ -569,9 +624,21 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
           ABH1_PINNED_CLASSIFICATION["src/routes/account_api.ts"]!.exercises.includes(file),
           `${population}: direct-gate exception must remain pinned as exercising: ${file}`,
         );
+        // audio-feed-62lgx: pin the exception's justification - the direct-gate suite must
+        // actually invoke the route handler and assert its compare spy on the success path.
+        const source = sources.get(file)!;
+        assert(
+          /\bhandlers\.bootstrap\s*\(/.test(source),
+          `${population}: direct-gate exception ${file} must invoke handlers.bootstrap() directly`,
+        );
+        assert(
+          (/compareCalls\s*,\s*4/.test(source) || /compareCalls\s*>\s*0/.test(source)) &&
+            /compareCalls\s*,\s*3/.test(source),
+          `${population}: direct-gate exception ${file} must assert compareCalls on success and lockout`,
+        );
       }
       assert(
-        directGateException || sources.get(file)!.includes("fetch("),
+        directGateException || hasDispatch(sources.get(file)!),
         `${population}: ${file} is classified as exercising ${route.file} but never calls fetch( — a constructed Request that is never dispatched exercises nothing`,
       );
     }
