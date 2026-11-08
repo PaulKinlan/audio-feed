@@ -240,8 +240,11 @@ routes, listed separately because the attacker's position there is different.
   redirect chains; a hostile feed also controls the content later narrated to the subscriber.
 - **Mitigations (`src/ingest/url.ts`, `src/routes/account_api.ts`):** only global-unicast hosts are
   fetchable — loopback, LAN, metadata and transition ranges are denied (`:53`); every redirect target is
-  re-validated and chains are capped at 5 (`:238`, `:310-311`, `:348`, `:537`); reads are bounded at 2 MiB
-  and 15 s (`:512-513`); a public hostname that resolves to a private address is refused (`:456-457`);
+  re-validated and chains are capped at 5 (`:238`, `:310-311`, `:348`, `:537`); reads are bounded per
+  content type — `MAX_HTML_BYTES` 2 MiB (`:41`) for HTML and other non-PDF reads, `MAX_PDF_BYTES`
+  10 MiB (`:42`) for PDF, selected at `:255` — with a 15 s deadline (`:512-513`), and the PDF bound's
+  parse-time residuals are recorded below; a public hostname that resolves to a private address is
+  refused (`:456-457`);
   feed discovery re-validates each redirect hop through `articleUrl` and `publicLookup`; `POST /api/account/discover-feed` is
   gated by the strict same-origin CSRF wall (`signedIn`, refusing GET via 405 Method Not Allowed) and
   rate-limited per subscriber (`DISCOVER_FEED_RATE` 30 requests / 5 min, `src/routes/account_api.ts`).
