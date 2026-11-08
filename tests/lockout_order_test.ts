@@ -190,6 +190,9 @@ Deno.test("lockout order row 2: src/routes/account_api.ts (bootstrap) gates befo
     headers: { "content-type": "application/json", "origin": BASE },
     body: JSON.stringify({ email: "bootstrap-ok@example.com", adminToken: ADMIN_SECRET }),
   });
+  // audio-feed-dzrx2: counted as a DELTA across this one call, so the success row proves the
+  // comparison happened on THIS bootstrap instead of inheriting a total from the lockout attempts.
+  const callsBeforeClean = compareCalls;
   const cleanRes = await handlers.bootstrap({
     ctx,
     req: cleanReq,
@@ -197,9 +200,19 @@ Deno.test("lockout order row 2: src/routes/account_api.ts (bootstrap) gates befo
     params: {},
     url: new URL(cleanReq.url),
   });
+  const cleanCompareCalls = compareCalls - callsBeforeClean;
   assertEquals(cleanRes.status, 200, "correct secret on unthrottled window must bootstrap user");
+  assertEquals(cleanCompareCalls, 1, "a successful bootstrap must evaluate compare exactly once");
   assertEquals(compareCalls, 4, "clean attempt evaluates compare once");
   assert(compareCalls > 0, "gate must evaluate compare on successful auth");
+  // audio-feed-dzrx2: the BEHAVIOURAL half of abh1's direct-gate pin. tests/fast_check_test.ts
+  // spawns this suite and matches this exact line, so the exception is pinned to a value observed
+  // from a run rather than to source patterns. The line carries the two numbers the success-path
+  // assertions above consumed and is printed after them, so a suite that keeps this bootstrap and
+  // its assertions inside dead code prints nothing and that audit reds.
+  console.log(
+    `lockout-order-proof row2: bootstrap status=${cleanRes.status} compareCalls=${cleanCompareCalls}`,
+  );
 
   const cleanStored = await stores.metadata.atomicUpdate<number[]>(
     "admin_auth:192.0.2.20",

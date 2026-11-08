@@ -230,6 +230,39 @@ Deno.test("hqer: the real repo graph selects the admin route's exercising suite,
   assert((await selectedFor("src/log.ts"))?.includes("tests/log_test.ts"));
 });
 
+// audio-feed-dzrx2: the direct-gate exception's justification is pinned BEHAVIOURALLY. The suite
+// prints this exact line after a successful bootstrap, carrying the values its own success-path
+// assertions consumed, and the audit SPAWNS the suite and matches it. Source patterns are not
+// evidence: a suite that keeps the bootstrap call and its assertions inside `if (false)` satisfies
+// every textual pin the audit also keeps, runs nothing, prints nothing - and only this check reds.
+const DIRECT_GATE_PROOF = "lockout-order-proof row2: bootstrap status=200 compareCalls=1";
+
+/**
+ * Run the one direct-gate suite and report whether it printed the proof line above. Runs once per
+ * audit: the exception is a single (route, file) pair, so there is one spawn, not one per route.
+ *
+ * Residual limit, stated so nobody reads the pin as more than it is: the line proves the handler
+ * ran on the success path and produced these values; it does not prove each assertEquals in the
+ * suite executed (that would need coverage), only that the work the assertions are about happened.
+ */
+async function directGateProof(): Promise<{ ok: boolean; detail: string }> {
+  // `<repo>/tests/` -> repo root, the cwd the gate itself runs the suite from.
+  const root = import.meta.dirname!.replace(/\/tests$/, "");
+  const output = await new Deno.Command(Deno.execPath(), {
+    // Written out literally so the derived execute relation names the suite (audio-feed-spawnlit:
+    // the construction must be STARTED, which .output() below does).
+    args: ["test", "--no-check", "tests/lockout_order_test.ts"],
+    cwd: root,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const stdout = new TextDecoder().decode(output.stdout);
+  const tail = (stdout + new TextDecoder().decode(output.stderr)).trim().split("\n").slice(-4)
+    .join(" | ");
+  const ok = output.success && stdout.includes(DIRECT_GATE_PROOF);
+  return { ok, detail: ok ? DIRECT_GATE_PROOF : `exit ${output.code}; ${tail}` };
+}
+
 Deno.test("abh1: route registrations discover the complete HTTP test set before narrowing", async () => {
   const app = await Deno.readTextFile(new URL("../src/app.ts", import.meta.url));
   const accountRoutes = [
@@ -273,7 +306,9 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   //
   // What this does not catch / accepted limits (P2, audio-feed-jmq5b):
   // - This is a STATIC heuristic over source text. It never executes a suite, so "exercising"
-  //   means "has the shape of a dispatch", not "was observed to dispatch".
+  //   means "has the shape of a dispatch", not "was observed to dispatch". The one place the
+  //   audit does execute anything is the direct-gate exception, which audio-feed-dzrx2 runs and
+  //   pins on a printed proof line.
   // - The exclusions in DO_NOT_EXERCISE are string literals pinned to today's identifiers: the
   //   host-spoof rows (evil.example), the service-worker harness shape (harness.dispatch,
   //   request.url.endsWith), log metadata (route: + path), table fixtures (expected + path) and
@@ -635,6 +670,17 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
           (/compareCalls\s*,\s*4/.test(source) || /compareCalls\s*>\s*0/.test(source)) &&
             /compareCalls\s*,\s*3/.test(source),
           `${population}: direct-gate exception ${file} must assert compareCalls on success and lockout`,
+        );
+        // audio-feed-dzrx2: everything above is SHAPE, and shape is satisfied by code that never
+        // runs - `if (false) { await handlers.bootstrap(...); assertEquals(compareCalls, 4, ...) }`
+        // passes all of it. So the exception is also pinned to an observed run: the suite must
+        // print the proof line its success path emits.
+        const proof = await directGateProof();
+        assert(
+          proof.ok,
+          `${population}: direct-gate exception ${file} must PROVE its success path by EXECUTING - ` +
+            `expected the suite to print "${DIRECT_GATE_PROOF}". Source patterns alone are ` +
+            `satisfied by dead code; this check is not. Got: ${proof.detail}`,
         );
       }
       assert(
