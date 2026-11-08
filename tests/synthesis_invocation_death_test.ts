@@ -28,7 +28,17 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { KvMetadataStore } from "../src/storage/kv.ts";
-import { DEFAULT_MARKER_WAIT_MS, MARKER_WAIT_MS_ENV } from "./fixtures/invocation_death_window.ts";
+import {
+  DEFAULT_MARKER_WAIT_MS,
+  DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+  MARKER_WAIT_MS_ENV,
+  STAGE_DELAY_MS_ENV,
+  STAGE_WEDGE_ENV,
+  SURVIVE_PUT_START_HEADROOM,
+  SURVIVE_PUT_START_WAIT_MS_ENV,
+  survivePutStartWaitMs,
+} from "./fixtures/invocation_death_window.ts";
+import { MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
 
 const CHILD = new URL("./fixtures/invocation_death_child.ts", import.meta.url).pathname;
 
@@ -231,6 +241,137 @@ Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget 
     await Deno.remove(kvPath).catch(() => {});
   }
 });
+
+Deno.test(
+  "audio-feed-wjtpb: survive control passes when child is artificially delayed before the put",
+  async () => {
+    // With an artificial delay introduced before the put (sleep before the put),
+    // the survive control must still pass: the watchdog and derived bound accommodate
+    // stage delays, and the abort still lands mid-put once started.
+    const kvPath = await Deno.makeTempFile({
+      prefix: "audio-feed-wjtpb-delay-",
+      suffix: ".kv",
+    });
+    try {
+      const child = spawnChild(kvPath, "survive", 1, {
+        [STAGE_DELAY_MS_ENV]: "50",
+      });
+      const output = await child.output();
+      const out = new TextDecoder().decode(output.stdout);
+      const err = new TextDecoder().decode(output.stderr);
+      const status = await child.status;
+      assertEquals(
+        status.success,
+        true,
+        `delayed survive child failed: ${out}${err}`,
+      );
+
+      const line = out.split("\n").find((l) => l.startsWith("SURVIVE:"));
+      assert(line, `delayed survive child printed no SURVIVE line: ${out}`);
+      const r = JSON.parse(line.slice("SURVIVE:".length)) as {
+        yielded: unknown[];
+        failed: string[];
+        putStarted: number;
+        putSettled: number;
+        putAborted: number;
+        putStartedBeforeDeadline: boolean;
+      };
+
+      assertEquals(r.putStarted, 1, "the delayed put must have started");
+      assertEquals(
+        r.putStartedBeforeDeadline,
+        true,
+        "the delayed put must still start before deadline fires",
+      );
+      assertEquals(r.putAborted, 1, "the put must be aborted cleanly");
+      assertEquals(r.yielded.length, 1, "delayed survive converts to clean yield");
+    } finally {
+      await Deno.remove(kvPath).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "audio-feed-wjtpb: survive control fails within bound when child is genuinely wedged",
+  async () => {
+    // When the child genuinely wedges before starting the put, the put never starts.
+    // The watchdog/bound must expire and exit 1 with SURVIVE-FATAL within the configured bound.
+    const kvPath = await Deno.makeTempFile({
+      prefix: "audio-feed-wjtpb-wedge-",
+      suffix: ".kv",
+    });
+    try {
+      const boundMs = 100;
+      const startedAt = Date.now();
+      const child = spawnChild(kvPath, "survive", 1, {
+        [STAGE_WEDGE_ENV]: "1",
+        [SURVIVE_PUT_START_WAIT_MS_ENV]: String(boundMs),
+      });
+      const output = await child.output();
+      const elapsed = Date.now() - startedAt;
+      const err = new TextDecoder().decode(output.stderr);
+      const status = await child.status;
+
+      assertEquals(status.code, 1, `wedged child must exit 1 (stderr: ${err})`);
+      assertStringIncludes(err, "SURVIVE-FATAL: the put never started");
+      assert(
+        elapsed < 10_000,
+        `wedged child must fail within bound (bound: ${boundMs}ms, took ${elapsed}ms)`,
+      );
+    } finally {
+      await Deno.remove(kvPath).catch(() => {});
+    }
+  },
+);
+
+Deno.test("audio-feed-wjtpb: survive put-start wait is derived from MEASURED_STARVED_POLL_MS", () => {
+  assert(
+    DEFAULT_SURVIVE_PUT_START_WAIT_MS > 20_000,
+    "the survive put-start ceiling must exceed the old fixed 20000ms that failed under gate load",
+  );
+  // A VALUE assertion cannot answer "is this derived?" - a literal equal to the product
+  // satisfies it (audio-feed-p3hmf: 15 * 8_000 stayed green through mutants). So ask the
+  // RULE instead: a synthetic floor a literal could not have anticipated.
+  assertEquals(
+    survivePutStartWaitMs(16_000),
+    240_000,
+    "the ceiling must track the floor, not today's value",
+  );
+  assertEquals(
+    survivePutStartWaitMs(1),
+    SURVIVE_PUT_START_HEADROOM,
+    "headroom factor must scale the floor",
+  );
+  assertEquals(
+    survivePutStartWaitMs(MEASURED_STARVED_POLL_MS),
+    DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+  );
+  assertEquals(
+    DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+    15 * MEASURED_STARVED_POLL_MS,
+    "15x the measured floor, on the nose",
+  );
+
+  // Pin the definition line in fixtures/invocation_death_window.ts with comments stripped (p3hmf shape).
+  const rawSource = Deno.readTextFileSync(
+    new URL("fixtures/invocation_death_window.ts", import.meta.url),
+  );
+  const stripped = codeOnly(rawSource);
+  const definition = stripped
+    .split("\n")
+    .find((line) => line.startsWith("export const DEFAULT_SURVIVE_PUT_START_WAIT_MS ="));
+  assertEquals(
+    definition,
+    "export const DEFAULT_SURVIVE_PUT_START_WAIT_MS = survivePutStartWaitMs(MEASURED_STARVED_POLL_MS);",
+    "DEFAULT_SURVIVE_PUT_START_WAIT_MS must be the RULE applied to the measured floor, not a literal",
+  );
+});
+
+function codeOnly(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|\s)\/\/.*$/gm, "$1");
+}
 
 Deno.test("audio-feed-aqms: invocation killed mid-upload leaves claim non-terminal, then abandonment after 3 leases", async () => {
   const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-", suffix: ".kv" });
