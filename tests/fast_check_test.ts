@@ -326,35 +326,6 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     }
     return false;
   };
-  // audio-feed-pymwh: is there a dispatch anywhere in this suite?
-  //
-  // Two accepted shapes: a real `fetch(` call, or a Request CONSTRUCTED into a binding that is
-  // then passed as an argument to some call (the direct-gate idiom). Deliberately conservative:
-  // the second shape needs the binding to appear inside a call's parentheses, so a suite that
-  // only builds Requests and asserts on them still counts as having no dispatch.
-  const hasDispatch = (source: string): boolean => {
-    if (source.includes("fetch(")) return true;
-    const bindings = [
-      ...source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Request\s*\(/g),
-    ]
-      .map(([, name]) => name);
-    return bindings.some((name) => {
-      // The binding must be handed to a call that could be a dispatch. Assertion helpers are
-      // excluded on purpose: `assertEquals(req.method, "GET")` reads a Request, it does not
-      // exercise a handler, and accepting it would make the construct-only fixture shape
-      // (the one this assertion exists to catch) count as an exerciser.
-      const calls = [...source.matchAll(
-        new RegExp(
-          `([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?)\\s*\\([^()]*\\b${name}\\b[^()]*\\)`,
-          "g",
-        ),
-      )];
-      return calls.some(([, callee]) => {
-        const simple = (callee ?? "").split(".").pop() ?? "";
-        return !/^assert|^expect$/.test(simple);
-      });
-    });
-  };
   const exercisesRoute = (
     _file: string,
     source: string,
@@ -526,6 +497,9 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
         "tests/auth_login_options_limit_test.ts",
         "tests/auth_routes_test.ts",
         "tests/feed_discovery_test.ts",
+        // audio-feed-4laa9: direct-gate suite; its compare spy proves lockout skips comparison.
+        // Keep pinned here so a known classification flip reds; do not exempt new suites.
+        "tests/lockout_order_test.ts",
         "tests/sources_body_cap_test.ts",
         "tests/webmcp_admin_forms_test.ts",
       ],
@@ -583,24 +557,22 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       exercises.length > 0,
       `${population}: ${route.file} has no exercising candidate suite; do not narrow`,
     );
-    // An exerciser must be able to dispatch. A suite that only CONSTRUCTS a Request for the
-    // route URL (the origin_test / report-shaped fixture shape) has no dispatch and must not
-    // be counted as exercising; this is the general form of the isTrustedReportOrigin exclusion.
-    //
-    // "Dispatch" is wider than `fetch(`: this repo's dominant idiom for a route's auth path is
-    // to build a Request and hand it straight to the gate or handler function, e.g.
-    // `adminGate(ctx, req, clientIp, { limiter, compare })` in tests/lockout_order_test.ts
-    // (audio-feed-pymwh). Such a suite exercises the handler's behaviour without going through
-    // the router, and a fetch-only rule called it a suite that "never dispatched" when the
-    // request was dispatched into the exact function under test. The predicate below therefore
-    // accepts a construct-and-pass shape, but only when the constructed Request is BOUND to a
-    // name and that name appears inside a call's argument list - not for a Request that is only
-    // built, asserted on, or stored.
+    // An exerciser must dispatch through fetch. The sole named exception tests the gate
+    // directly by design: its compare spy asserts the comparison was NOT called at lockout.
+    // Keep it pinned as EXERCISING so a classification flip reds below; new suites get no
+    // exception and must fetch even if they pass a Request to a handler.
     for (const file of exercises) {
-      const source = sources.get(file)!;
+      const directGateException = route.file === "src/routes/account_api.ts" &&
+        file === "tests/lockout_order_test.ts";
+      if (directGateException) {
+        assert(
+          ABH1_PINNED_CLASSIFICATION["src/routes/account_api.ts"]!.exercises.includes(file),
+          `${population}: direct-gate exception must remain pinned as exercising: ${file}`,
+        );
+      }
       assert(
-        hasDispatch(source),
-        `${population}: ${file} is classified as exercising ${route.file} but never dispatches — a constructed Request that is never passed to a call and never fetched exercises nothing`,
+        directGateException || sources.get(file)!.includes("fetch("),
+        `${population}: ${file} is classified as exercising ${route.file} but never calls fetch( — a constructed Request that is never dispatched exercises nothing`,
       );
     }
     const named = await nameMatchedTests([route.file]);
