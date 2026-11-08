@@ -48,6 +48,7 @@ import {
   pixelDistribution,
   sectionRetainsInk,
 } from "./exww-section-measures.ts";
+import { withHangBound } from "./proof-cdp.ts";
 
 /**
  * PNG pixel height, read from the IHDR chunk. Used to prove what a committed capture COVERS rather
@@ -346,8 +347,7 @@ const proof = runProof("audio-feed-exww", async (checker) => {
       }
 
       /**
-       * The two-argument until() calls below pass no explicit budget, so each inherits this
-       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * This host has MEASURED a bare `readyState === "complete"`
        * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
        * That measured starved floor is the unit.
        *
@@ -361,7 +361,7 @@ const proof = runProof("audio-feed-exww", async (checker) => {
       async function until(expr: string, desc = expr, timeout = 10_000) {
         const start = performance.now();
         while (performance.now() - start < timeout) {
-          if (await js(`Boolean(${expr})`)) return;
+          if (await withHangBound(js(`Boolean(${expr})`), desc)) return;
           await sleep(50);
         }
         throw new Error(`Timeout waiting for: ${desc}`);

@@ -113,6 +113,10 @@ Deno.test(
     const value = await withHangBound("Page.enable", Promise.resolve({ enabled: true }), 150);
     assertEquals(value, { enabled: true });
 
+    // The (reply, what) order is also accepted (audio-feed-hibea).
+    const valueReversed = await withHangBound(Promise.resolve({ ok: true }), "Page.enable", 150);
+    assertEquals(valueReversed, { ok: true });
+
     // A reply that arrives as an ERROR keeps its own error unwrapped - the bound converts only
     // a reply that never comes into CdpHangBoundExceeded, never a real failure into a hang.
     await assertRejects(

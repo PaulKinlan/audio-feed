@@ -224,8 +224,20 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
 export async function withHangBound<T>(
   what: string,
   reply: Promise<T>,
+  timeoutMs?: number,
+): Promise<T>;
+export async function withHangBound<T>(
+  reply: Promise<T>,
+  what: string,
+  timeoutMs?: number,
+): Promise<T>;
+export async function withHangBound<T>(
+  first: string | Promise<T>,
+  second: Promise<T> | string,
   timeoutMs = HANG_BOUND_MS,
 ): Promise<T> {
+  const what = typeof first === "string" ? first : (second as string);
+  const reply = (typeof first === "string" ? second : first) as Promise<T>;
   let timer: ReturnType<typeof setTimeout> | 0 = 0;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(

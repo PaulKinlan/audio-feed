@@ -37,6 +37,7 @@ import {
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 import { inImagePixels, MIN_CLAIM_INK_LEGIBILITY, pixelContrast } from "./exww-section-measures.ts";
+import { withHangBound } from "./proof-cdp.ts";
 
 await runProof("request-access-browser-proof", async (checker) => {
   const { profileDir: PROFILE, cleanup } = await createTempChromeProfile(
@@ -224,8 +225,7 @@ await runProof("request-access-browser-proof", async (checker) => {
   }
 
   /**
-   * The two-argument until() calls below pass no timeout, so each inherits the private
-   * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+   * This host has MEASURED a bare `readyState === "complete"` evaluate
    * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
    * measured starved floor is the unit.
    *
@@ -239,7 +239,7 @@ await runProof("request-access-browser-proof", async (checker) => {
   async function until(expr: string, desc: string, timeoutMs = 8000) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      if (await js(expr)) return;
+      if (await withHangBound(js(expr), desc)) return;
       await sleep(50);
     }
     throw new Error(`timed out waiting for: ${desc}`);

@@ -30,6 +30,7 @@ import {
   waitForChromeProfileUnused,
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
+import { CdpHangBoundExceeded, withHangBound } from "./proof-cdp.ts";
 
 await runProof("landing-tooltip-browser-proof", async (checker) => {
   const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
@@ -121,8 +122,7 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
   }
 
   /**
-   * The two-argument until() calls below pass no timeout, so each inherits the private
-   * copy's 15s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+   * This host has MEASURED a bare `readyState === "complete"` evaluate
    * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
    * measured starved floor is the unit.
    *
@@ -139,8 +139,11 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
       // During a navigation the execution context is destroyed mid-poll; that is progress, not
       // failure — swallow and keep asking.
       try {
-        if (await js(`Boolean(${expr})`)) return;
-      } catch { /* context destroyed mid-navigation */ }
+        if (await withHangBound(js(`Boolean(${expr})`), desc)) return;
+      } catch (err) {
+        if (err instanceof CdpHangBoundExceeded) throw err;
+        /* context destroyed mid-navigation */
+      }
       await sleep(50);
     }
     throw new Error(`Timeout waiting for: ${desc}`);
