@@ -39,6 +39,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 import { runProof, withChrome } from "./proof-helper.ts";
+import { withHangBound } from "./proof-cdp.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-qz3x/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -99,8 +100,7 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         return r?.result?.value;
       }
       /**
-       * The two-argument until() calls below pass no timeout, so each inherits the private
-       * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * This host has MEASURED a bare `readyState === "complete"` evaluate
        * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
        * measured starved floor is the unit.
        *
@@ -114,7 +114,7 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
       async function until(expr: string, desc: string, timeoutMs = 8000): Promise<void> {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
-          if (await js(`Boolean(${expr})`)) return;
+          if (await withHangBound(js(`Boolean(${expr})`), desc)) return;
           await sleep(50);
         }
         throw new Error(`Timeout waiting for: ${desc}`);

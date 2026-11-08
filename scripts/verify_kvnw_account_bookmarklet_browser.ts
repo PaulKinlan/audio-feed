@@ -31,6 +31,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { evidencePngDigestLine } from "./evidence-png-digest.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "./harness-port.ts";
+import { CdpHangBoundExceeded, withHangBound } from "./proof-cdp.ts";
 
 const PROOF_PORT = resolveHarnessPort([], Deno.env.get("BOOKMARKLET_PROOF_PORT"));
 if (PROOF_PORT === 0) throw new Error("Bookmarklet evidence requires a fixed port, not 0");
@@ -141,8 +142,7 @@ await runProof("audio-feed-kvnw", async (checker) => {
       }
 
       /**
-       * The two-argument until() calls below pass no explicit budget, so each inherits this
-       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * This host has MEASURED a bare `readyState === "complete"`
        * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
        * That measured starved floor is the unit.
        *
@@ -157,8 +157,9 @@ await runProof("audio-feed-kvnw", async (checker) => {
         const start = Date.now();
         while (Date.now() - start < timeout) {
           try {
-            if (await js(expr)) return;
-          } catch {
+            if (await withHangBound(js(expr), desc)) return;
+          } catch (err) {
+            if (err instanceof CdpHangBoundExceeded) throw err;
             // transient during navigation
           }
           await sleep(100);

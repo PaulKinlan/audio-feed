@@ -48,6 +48,7 @@ import {
   withChrome,
   writeScratchFile,
 } from "./proof-helper.ts";
+import { withHangBound } from "./proof-cdp.ts";
 
 const ADMIN_TOKEN = "harness-admin";
 const PER_TYPE_DEADLINE_MS = 240_000; // synthesis of a small document, generously bounded
@@ -292,9 +293,7 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
         return r.result?.value;
       }
       /**
-       * The two-argument until() calls below pass no timeout, so each inherits the private
-       * copy's 15s default - still far below what a starved host can need. This host has
-       * MEASURED a bare `readyState === "complete"` evaluate legitimately exceeding 8s under
+       * This host has MEASURED a bare `readyState === "complete"` evaluate legitimately exceeding 8s under
        * eight-way CPU saturation (audio-feed-6gst1). That measured starved floor is the unit.
        *
        * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
@@ -307,7 +306,7 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       async function until(expr: string, desc: string, timeoutMs = 15_000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
-          if (await js(expr)) return;
+          if (await withHangBound(js(expr), desc)) return;
           await sleep(100);
         }
         throw new Error(`ProofTimeout: ${desc}`);

@@ -18,6 +18,7 @@ import {
   writeEvidenceReadme,
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
+import { withHangBound } from "./proof-cdp.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-xw7/", import.meta.url).pathname;
 
@@ -75,8 +76,7 @@ await runProof("audio-feed-xw7", async (checker) => {
       }
 
       /**
-       * The two-argument until() calls below pass no explicit budget, so each inherits this
-       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * This host has MEASURED a bare `readyState === "complete"`
        * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
        * That measured starved floor is the unit.
        *
@@ -90,7 +90,7 @@ await runProof("audio-feed-xw7", async (checker) => {
       async function until(expr: string, desc: string, timeoutMs = 8000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
-          if (await js(expr)) return;
+          if (await withHangBound(js(expr), desc)) return;
           await sleep(50);
         }
         throw new Error(`timed out waiting for: ${desc}`);

@@ -30,6 +30,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
+import { withHangBound } from "./proof-cdp.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -146,8 +147,7 @@ await runProof("audio-feed-3xq", async (checker) => {
       }
 
       /**
-       * The two-argument until() calls below pass no timeout, so each inherits the private
-       * copy's 15s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * This host has MEASURED a bare `readyState === "complete"` evaluate
        * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
        * measured starved floor is the unit.
        *
@@ -161,7 +161,7 @@ await runProof("audio-feed-3xq", async (checker) => {
       async function until(expr: string, desc = expr, timeout = 15_000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
-          if (await js(`Boolean(${expr})`)) return;
+          if (await withHangBound(js(`Boolean(${expr})`), desc)) return;
           await sleep(50);
         }
         throw new Error(`Timeout waiting for: ${desc}`);

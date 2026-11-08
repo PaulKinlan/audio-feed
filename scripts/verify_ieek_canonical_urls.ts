@@ -25,6 +25,7 @@ import { memoryStores } from "../src/config.ts";
 import { canonicalAudioKey, enclosureUrl, toFeedEpisode } from "../src/feed/adapter.ts";
 import { audioBlobKey } from "../src/types.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { withHangBound } from "./proof-cdp.ts";
 
 export const COMMITTED_SHA = "3fd98e28e034cf3bc60b90ef345681d0deb78d38";
 export const COMMITTED_TREE = "fa4371042eb50e3b9e20447b66184de1c584d531";
@@ -619,8 +620,7 @@ export async function runVerification(): Promise<VerificationResult> {
 
       const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       /**
-       * The two-argument until() calls below pass no timeout, so each inherits the private
-       * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * This host has MEASURED a bare `readyState === "complete"` evaluate
        * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
        * measured starved floor is the unit.
        *
@@ -634,7 +634,7 @@ export async function runVerification(): Promise<VerificationResult> {
       async function until(expr: string, desc: string, timeoutMs = 8000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
-          if (await js(expr)) return;
+          if (await withHangBound(js(expr), desc)) return;
           await sleep(50);
         }
         throw new Error(`Timed out waiting for: ${desc}`);
