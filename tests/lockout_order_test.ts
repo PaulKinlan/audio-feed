@@ -21,6 +21,23 @@ import { adminGate } from "../src/compose/admin.ts";
 import { createAccountHandlers } from "../src/routes/account_api.ts";
 import { authorise } from "../src/routes/observability.ts";
 
+/** Legacy checksum retained only to regression-test the old forgeable proof line.
+ * All of its inputs are public constants; it is not an execution credential.
+ */
+export function computeProofChecksum(
+  status: number,
+  delta: number,
+  total: number,
+  remaining: number,
+): string {
+  let h = 0;
+  const str = `${status}:${delta}:${total}:${remaining}`;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16);
+}
+
 const BASE = "https://audio.example.com";
 const ADMIN_SECRET = "secret-admin-passphrase-test-123";
 const OBS_SECRET = "secret-observability-key-456";
@@ -205,20 +222,25 @@ Deno.test("lockout order row 2: src/routes/account_api.ts (bootstrap) gates befo
   assertEquals(cleanCompareCalls, 1, "a successful bootstrap must evaluate compare exactly once");
   assertEquals(compareCalls, 4, "clean attempt evaluates compare once");
   assert(compareCalls > 0, "gate must evaluate compare on successful auth");
-  // audio-feed-dzrx2: the BEHAVIOURAL half of abh1's direct-gate pin. tests/fast_check_test.ts
-  // spawns this suite and matches this exact line, so the exception is pinned to a value observed
-  // from a run rather than to source patterns. The line carries the two numbers the success-path
-  // assertions above consumed and is printed after them, so a suite that keeps this bootstrap and
-  // its assertions inside dead code prints nothing and that audit reds.
-  console.log(
-    `lockout-order-proof row2: bootstrap status=${cleanRes.status} compareCalls=${cleanCompareCalls}`,
-  );
-
   const cleanStored = await stores.metadata.atomicUpdate<number[]>(
     "admin_auth:192.0.2.20",
     () => null,
   );
   assertEquals(cleanStored.value?.length, 0, "successful auth resets limiter window");
+
+  // Only the audit's spawned child receives a nonce. Emit it after the success assertions;
+  // ordinary test runs have no nonce and do not need environment permission.
+  if (
+    Deno.permissions.querySync({ name: "env", variable: "LOCKOUT_PROOF_NONCE" }).state === "granted"
+  ) {
+    const nonce = Deno.env.get("LOCKOUT_PROOF_NONCE");
+    if (nonce) {
+      const remaining = cleanStored.value?.length ?? -1;
+      console.log(
+        `lockout-order-proof row2: bootstrap status=${cleanRes.status} delta=${cleanCompareCalls} total=${compareCalls} remaining=${remaining} nonce=${nonce}`,
+      );
+    }
+  }
 });
 
 Deno.test("lockout order row 3: src/routes/observability.ts (authorise) gates before compare", async () => {
