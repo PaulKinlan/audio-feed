@@ -290,8 +290,9 @@ routes, listed separately because the attacker's position there is different.
   stop a run that has begun; and the counter is module state, so the cap is **per isolate**, not
   fleet-wide — the exposure is 2 x the isolate count, rising with the fleet rather than capped by
   it. The worst case the tree makes derivable: a subscriber is admitted at most 50 submissions per
-  rolling 24 hours, counted BEFORE the fetch (`refuseIngestOverCreationCap`,
-  `src/compose/ingest.ts:178-193`, composed into `/api/ingest` and `/api/upload` at `:216-219`),
+  rolling 24 hours at the default budget — the cap IS that subscriber's funded budget, so an
+  admin-set personal budget raises it (`refuseIngestOverCreationCap`,
+  `src/compose/ingest.ts:178-193`, composed into `/api/ingest` and `/api/upload` at `:216-219`) —
   so ≤ **50 x 10 MiB** of PDF per subscriber per day with **at most 2 parses executing at once per
   isolate**. Input size and document COUNT are bounded; parse DURATION is not, so the residual is
   CPU time proportional to document size, inside a per-isolate concurrency window rather than
@@ -308,19 +309,20 @@ routes, listed separately because the attacker's position there is different.
   4 MiB limit, answered as HTTP 413 carrying `limit: MAX_DOCX_INFLATED_BYTES`, with the reader
   cancelled in `finally` (`:217`) — the upload is rejected before extraction, before the
   192,000-byte `MAX_NARRATION_BYTES` check (`:16`, `:845-872`) and before any paid call;
-  `tests/upload_test.ts:544-604` and `:606-644` pin the deflated and stored shapes. Compressed input is
-  separately capped at `MAX_UPLOAD_BYTES` 10 MiB (`:15`, read bounded at `:499-507`), the entry's
-  declared size is re-checked against the real buffer (`:399-401`), and extraction is a linear SCAN
-  of the capped XML rather than a DOM (`extractDocxParagraphs`, `:269-311`, audio-feed-heeem), so
-  working memory stays proportional to the ceiling. WHY ACCEPTED rather than bounded further: 4 MiB
-  is a **per-document, per-request** ceiling with no concurrency counter behind it — unlike PDF
-  parsing there is no cap on how many inflations run at once and no 429 shedding — so K concurrent
-  uploads inflate K x 4 MiB at once. Worst case derivable: per upload at most 4 MiB of inflated
-  XML, one linear scan over it, and extracted text limited downstream to 192,000 narration bytes —
-  a few MiB of transient allocation plus a linear pass, multiplied by the uploads a subscriber has
-  in flight, whose COUNT the 50-per-24h creation cap bounds (`src/compose/ingest.ts:178-193`). Two
-  formats are NOT parsed at all: legacy `.doc` returns 415 (`:665-678`) and a bare zip archive
-  returns 415 (`:680-693`).
+  `tests/upload_test.ts:544-604` and `:606-644` pin the deflated and stored shapes. Compressed
+  input is separately capped at `MAX_UPLOAD_BYTES` 10 MiB (`:15`, read bounded at `:499-507`), the
+  entry's declared size is re-checked against the real buffer (`:399-401`), and extraction is a
+  linear SCAN of the capped XML rather than a DOM (`extractDocxParagraphs`, `:269-311`,
+  audio-feed-heeem), so working memory stays proportional to the ceiling. WHY ACCEPTED rather than
+  bounded further: 4 MiB is a **per-document, per-request** ceiling with no concurrency counter
+  behind it — unlike PDF parsing there is no cap on how many inflations run at once and no 429
+  shedding — so K concurrent uploads inflate K x 4 MiB at once. Worst case derivable: per upload at
+  most 4 MiB of inflated XML, one linear scan over it, and extracted text limited downstream to
+  192,000 narration bytes — a few MiB of transient allocation plus a linear pass, multiplied by the
+  uploads a subscriber has in flight, whose COUNT the per-subscriber creation cap bounds — 50 per
+  rolling 24 hours at the default budget (`src/compose/ingest.ts:178-193`). Two formats are NOT
+  parsed at all: legacy `.doc` returns 415 (`:665-678`) and a bare zip archive returns 415
+  (`:680-693`).
 
 
 ### Boundary 7 — Static, well-known and public pages
