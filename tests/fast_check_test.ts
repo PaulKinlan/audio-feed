@@ -326,6 +326,35 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     }
     return false;
   };
+  // audio-feed-pymwh: is there a dispatch anywhere in this suite?
+  //
+  // Two accepted shapes: a real `fetch(` call, or a Request CONSTRUCTED into a binding that is
+  // then passed as an argument to some call (the direct-gate idiom). Deliberately conservative:
+  // the second shape needs the binding to appear inside a call's parentheses, so a suite that
+  // only builds Requests and asserts on them still counts as having no dispatch.
+  const hasDispatch = (source: string): boolean => {
+    if (source.includes("fetch(")) return true;
+    const bindings = [
+      ...source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Request\s*\(/g),
+    ]
+      .map(([, name]) => name);
+    return bindings.some((name) => {
+      // The binding must be handed to a call that could be a dispatch. Assertion helpers are
+      // excluded on purpose: `assertEquals(req.method, "GET")` reads a Request, it does not
+      // exercise a handler, and accepting it would make the construct-only fixture shape
+      // (the one this assertion exists to catch) count as an exerciser.
+      const calls = [...source.matchAll(
+        new RegExp(
+          `([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?)\\s*\\([^()]*\\b${name}\\b[^()]*\\)`,
+          "g",
+        ),
+      )];
+      return calls.some(([, callee]) => {
+        const simple = (callee ?? "").split(".").pop() ?? "";
+        return !/^assert|^expect$/.test(simple);
+      });
+    });
+  };
   const exercisesRoute = (
     _file: string,
     source: string,
@@ -557,10 +586,21 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     // An exerciser must be able to dispatch. A suite that only CONSTRUCTS a Request for the
     // route URL (the origin_test / report-shaped fixture shape) has no dispatch and must not
     // be counted as exercising; this is the general form of the isTrustedReportOrigin exclusion.
+    //
+    // "Dispatch" is wider than `fetch(`: this repo's dominant idiom for a route's auth path is
+    // to build a Request and hand it straight to the gate or handler function, e.g.
+    // `adminGate(ctx, req, clientIp, { limiter, compare })` in tests/lockout_order_test.ts
+    // (audio-feed-pymwh). Such a suite exercises the handler's behaviour without going through
+    // the router, and a fetch-only rule called it a suite that "never dispatched" when the
+    // request was dispatched into the exact function under test. The predicate below therefore
+    // accepts a construct-and-pass shape, but only when the constructed Request is BOUND to a
+    // name and that name appears inside a call's argument list - not for a Request that is only
+    // built, asserted on, or stored.
     for (const file of exercises) {
+      const source = sources.get(file)!;
       assert(
-        sources.get(file)!.includes("fetch("),
-        `${population}: ${file} is classified as exercising ${route.file} but never calls fetch( — a constructed Request that is never dispatched exercises nothing`,
+        hasDispatch(source),
+        `${population}: ${file} is classified as exercising ${route.file} but never dispatches — a constructed Request that is never passed to a call and never fetched exercises nothing`,
       );
     }
     const named = await nameMatchedTests([route.file]);

@@ -113,8 +113,8 @@ export {
 /** Build every lane seam for a real server. Called by src/server.ts. */
 export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHandlers {
   return {
-    observabilityErrors: createObservabilityErrorsHandler(ctx),
-    observabilitySummary: createObservabilitySummaryHandler(ctx),
+    observabilityErrors: createObservabilityErrorsHandler(ctx, deps.observability),
+    observabilitySummary: createObservabilitySummaryHandler(ctx, deps.observability),
     cwvBeacon: createCwvHandler(ctx),
     masterFeed: createMasterFeedHandler(ctx),
     sourceFeed: createSourceFeedHandler(ctx),

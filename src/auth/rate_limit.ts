@@ -473,3 +473,56 @@ export function createAdminAuthLimiter(store: RateLimitStore): FailedAuthLimiter
 export function createObservabilityAuthLimiter(store: RateLimitStore): FailedAuthLimiter {
   return new FailedAuthLimiter(store, { namespace: OBSERVABILITY_AUTH_NAMESPACE });
 }
+
+export interface GuardSecretAuthOptions {
+  /** The failed-auth sliding-window limiter protecting this secret. */
+  limiter: FailedAuthLimiter;
+  /** The client key (typically IP address) to throttle. */
+  clientKey: string;
+  /**
+   * The secret compare function.
+   * MUST NOT be called if the client is locked out.
+   */
+  compare: () => boolean | Promise<boolean>;
+  /** Build the 429 response when client has exceeded attempts. */
+  onLockedOut: (retryAfterSec: number) => Response;
+  /** Build the 401 response when secret compare fails. */
+  onUnauthorized: (attempt: RateLimitResult) => Response;
+}
+
+/**
+ * Gate authentication against a shared secret with failed-attempt rate limiting.
+ *
+ * Checks and records the attempt in the limiter BEFORE any secret comparison is
+ * evaluated (audio-feed-pymwh).
+ *
+ * 1. If the client has already exceeded its attempt budget, returns 429 immediately
+ *    WITHOUT calling `compare`. Refused attempts do not extend the sliding window
+ *    (lines 137-145).
+ * 2. If the client is within budget, records the attempt and evaluates `compare()`.
+ * 3. On successful comparison, resets the failure counter for this client and returns null.
+ * 4. On failed comparison, returns 401. The attempt was already recorded in step 2.
+ */
+export async function guardSecretAuth(
+  options: GuardSecretAuthOptions,
+): Promise<Response | null> {
+  const attempt = await options.limiter.recordFailure(options.clientKey);
+  if (!attempt.allowed) {
+    const retryAfterSec = Math.max(1, Math.ceil(attempt.resetMs / 1000));
+    return options.onLockedOut(retryAfterSec);
+  }
+
+  let ok = false;
+  try {
+    ok = await options.compare();
+  } catch {
+    ok = false;
+  }
+
+  if (ok) {
+    await options.limiter.reset(options.clientKey);
+    return null;
+  }
+
+  return options.onUnauthorized(attempt);
+}

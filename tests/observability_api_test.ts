@@ -1011,9 +1011,8 @@ Deno.test("audio-feed-obslimit: a good key still works — after one typo, and a
   );
   assertEquals((await fetch(...guess("/api/observability/errors", KEY, hostname))).status, 200);
 
-  // Spend the window on bad keys, then present the real one. The key is verified BEFORE the lock is
-  // consulted (the admin gate's order), so holding the key is never punished for a stranger's
-  // guessing — and the success resets the counter, which the next (bad) attempt proves.
+  // Spend the window on bad keys. The attempt after the bound is refused BEFORE the key is
+  // compared (audio-feed-pymwh), so guesses cannot be evaluated at line rate.
   for (let i = 0; i < FAILURE_BOUND + 1; i++) {
     await fetch(...guess("/api/observability/errors", `exhaust-${i}`, hostname));
   }
@@ -1023,12 +1022,15 @@ Deno.test("audio-feed-obslimit: a good key still works — after one typo, and a
   );
   assertEquals(
     (await fetch(...guess("/api/observability/errors", KEY, hostname))).status,
-    200,
-    "a correct key must still be answered while the client is locked out",
+    429,
+    "while locked out, attempts are refused without comparing the key",
   );
+
+  // An independent unthrottled client IP can authenticate with the valid key
+  const otherHost = "203.0.113.9";
   assertEquals(
-    (await fetch(...guess("/api/observability/errors", "after-reset", hostname))).status,
-    401,
-    "a successful authentication resets the failure window",
+    (await fetch(...guess("/api/observability/errors", KEY, otherHost))).status,
+    200,
+    "an unthrottled client succeeds with valid credentials",
   );
 });

@@ -22,15 +22,16 @@ import {
   IllegalTransitionError,
   isValidEmail,
   listUsers,
-  requireAdminToken,
   rotateFeedToken,
   suspendUser,
+  tokensMatch,
   UnknownUserError,
 } from "../auth/users.ts";
 import {
   createAdminAuthLimiter,
   extractClientIp,
-  type FailedAuthLimiter,
+  FailedAuthLimiter,
+  guardSecretAuth,
 } from "../auth/rate_limit.ts";
 import { isAudioMode, utcDayKey } from "../types.ts";
 import {
@@ -66,11 +67,16 @@ import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../typ
  * with sliding window lockout (HTTP 429), while successful admin auth resets the
  * counter.
  */
+export interface AdminGateDeps {
+  limiter?: FailedAuthLimiter;
+  compare?: (provided: string, expected: string) => boolean | Promise<boolean>;
+}
+
 export async function adminGate(
   ctx: AppContext,
   req: Request,
   remoteAddr?: string,
-  limiter?: FailedAuthLimiter,
+  limiterOrDeps?: FailedAuthLimiter | AdminGateDeps,
 ): Promise<Response | null> {
   const bearer = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")
     ? req.headers.get("authorization")!.slice(7).trim()
@@ -115,22 +121,23 @@ export async function adminGate(
     });
   }
 
-  // audio-feed-bns: throttle failed admin auth attempts without locking out valid credentials
+  const deps: AdminGateDeps = limiterOrDeps instanceof FailedAuthLimiter
+    ? { limiter: limiterOrDeps }
+    : (limiterOrDeps ?? {});
+
+  // audio-feed-pymwh: throttle failed admin auth attempts BEFORE evaluating secret compare.
   const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
   // Shared through the store, so the header path and the bootstrap path count
   // against ONE bound even on different isolates (audio-feed-2zvc).
-  const failedAuth = limiter ?? createAdminAuthLimiter(ctx.stores.metadata);
+  const failedAuth = deps.limiter ?? createAdminAuthLimiter(ctx.stores.metadata);
 
-  try {
-    await requireAdminToken(presented, expected);
-    await failedAuth.reset(clientIp);
-    return null;
-  } catch {
-    // Token is invalid. Check if client IP is currently locked out.
-    const lock = await failedAuth.isLockedOut(clientIp);
-    if (!lock.allowed) {
-      const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
-      return Response.json(
+  return guardSecretAuth({
+    limiter: failedAuth,
+    clientKey: clientIp,
+    compare: () =>
+      deps.compare ? deps.compare(presented, expected) : tokensMatch(presented, expected),
+    onLockedOut: (retryAfterSec) =>
+      Response.json(
         { error: "Too many failed admin authentication attempts. Please try again later." },
         {
           status: 429,
@@ -139,19 +146,18 @@ export async function adminGate(
             "cache-control": "no-store",
           },
         },
-      );
-    }
-
-    const fail = await failedAuth.recordFailure(clientIp);
-    const headers: Record<string, string> = { "cache-control": "no-store" };
-    if (!fail.allowed) {
-      headers["retry-after"] = Math.max(1, Math.ceil(fail.resetMs / 1000)).toString();
-    }
-    return Response.json({ error: "Unauthorized: admin token required" }, {
-      status: 401,
-      headers,
-    });
-  }
+      ),
+    onUnauthorized: (attempt) => {
+      const headers: Record<string, string> = { "cache-control": "no-store" };
+      if (attempt.remaining === 0) {
+        headers["retry-after"] = Math.max(1, Math.ceil(attempt.resetMs / 1000)).toString();
+      }
+      return Response.json({ error: "Unauthorized: admin token required" }, {
+        status: 401,
+        headers,
+      });
+    },
+  });
 }
 
 /**
