@@ -199,6 +199,7 @@ Deno.test("lockout order row 2: src/routes/account_api.ts (bootstrap) gates befo
   });
   assertEquals(cleanRes.status, 200, "correct secret on unthrottled window must bootstrap user");
   assertEquals(compareCalls, 4, "clean attempt evaluates compare once");
+  assert(compareCalls > 0, "gate must evaluate compare on successful auth");
 
   const cleanStored = await stores.metadata.atomicUpdate<number[]>(
     "admin_auth:192.0.2.20",
