@@ -15,7 +15,7 @@ import { resolveOrigin } from "../origin.ts";
 import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
 import { problem, readCappedJson } from "../http.ts";
-import { approvedUserFor, forbidden, loadUserByFeedToken, notFound } from "./shared.ts";
+import { approvedUserFor, loadUserByFeedToken, notFound } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import type { ComposeDeps } from "./shared.ts";
 import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../types.ts";
@@ -63,17 +63,20 @@ export const FEED_IP_WINDOW = "feed_ip";
 export const FEED_EPISODE_CAP = 200;
 
 /**
- * Upper bound on the number of `listEpisodePage` pages scanned per feed request (audio-feed-oxyp1).
- * Page size is `FEED_EPISODE_CAP` (200). With `publishable: true` filtering at the store layer,
- * each page contains publishable episodes, so `FEED_MAX_PAGES = 3` bounds publishable work
- * (up to 600 publishable episodes) without bounding reach past unpublishable noise.
+ * Pages scanned once a feed request has found at least one publishable episode (audio-feed-oxyp1).
+ * Page size is `FEED_EPISODE_CAP` (200). This is the cap that binds reach on a NON-empty feed: the
+ * store's `publishable: true` filter runs over a page whose `limit` bounds the underlying SCAN, so
+ * three pages is at most 600 raw index entries — fewer than 600 publishable episodes when junk is
+ * interleaved — and ready episodes past that point are not reached.
  */
 export const FEED_MAX_PAGES = 3;
 
 /**
- * Hard ceiling on total underlying scan pages if non-publishable records are encountered (audio-feed-oxyp1).
- * Allows scanning through up to 2,000 records (10 pages) to reach ready episodes on stores with
- * unfiltered index scans (such as KV), while guaranteeing the scan never runs indefinitely.
+ * Hard ceiling on total underlying scan pages while a feed request has found NOTHING publishable
+ * (audio-feed-oxyp1). Lets an all-pending or junk-led index scan through up to 2,000 raw records
+ * (10 pages) to reach the first ready episode, while guaranteeing the scan never runs indefinitely.
+ * It does NOT extend reach on a feed that already found a publishable episode: that case is bound
+ * by `FEED_MAX_PAGES`.
  */
 export const FEED_MAX_SCAN_PAGES = 10;
 
@@ -144,12 +147,17 @@ async function publishableEpisodes(
   baseUrl: string,
   filter: { sourceId?: string; mode?: AudioMode } = {},
 ): Promise<FeedEpisode[]> {
-  // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found or `FEED_MAX_PAGES` is reached.
-  // audio-feed-oxyp1 bounds the work per request without bounding reach:
+  // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found or the page cap is reached.
+  // audio-feed-oxyp1 bounds the work per request:
   // 1. The query requests publishable episodes directly (`publishable: true`), so unpublishable
-  //    junk (pending/failed/synthesizing) never consumes page slots or blocks reaching ready episodes.
-  // 2. At most `FEED_MAX_PAGES` pages (up to 600 publishable episodes) are scanned per request.
-  // 3. Only publishable episodes are considered — pending/failed items never trigger blob head() calls.
+  //    junk (pending/failed/synthesizing) never consumes a match slot on a store that filters
+  //    before the limit (the memory store).
+  // 2. The scan is capped at `FEED_MAX_PAGES` (3) once a page has yielded a publishable episode,
+  //    and at `FEED_MAX_SCAN_PAGES` (10) only while every page so far yielded none. Because
+  //    `listEpisodePage`'s limit bounds the underlying SCAN, 3 pages is at most 600 RAW index
+  //    entries: on a store that filters after the limit (KV), ready episodes past that are not
+  //    reached when the feed is non-empty.
+  // 3. Only publishable episodes are considered — pending/failed items never trigger head().
   // 4. Blob head() calls for legacy records lacking byteLength are capped at `FEED_MAX_HEAD_CALLS`.
   //
   // `listEpisodePage`'s limit bounds the SCAN, not the matches, so a short page is not the end —
@@ -211,6 +219,17 @@ async function publishableEpisodes(
         pagesScanned: pages,
       }),
     );
+  } else if (cursor && publishable.length > 0 && pages >= FEED_MAX_PAGES) {
+    // The sharper edge of the bound: the feed is non-empty and the publishable-page cap stopped the
+    // scan while the store still had entries to give. Reach past this point is silently truncated.
+    console.warn(
+      JSON.stringify({
+        event: "feed.publishable_page_cap_reached",
+        userId,
+        pagesScanned: pages,
+        episodesReturned: publishable.length,
+      }),
+    );
   }
 
   return publishable;
@@ -235,8 +254,13 @@ function feedResponse(xml: string): Response {
  * deliberately ignored rather than rejected with 400 to preserve compatibility
  * with podcast aggregators and apps that append query parameters.
  *
- * Non-approved users get 403 even though the gate is about synthesis cost: their
- * feed would otherwise keep serving audio generated before a suspension.
+ * A non-approved owner is refused because their feed would otherwise keep serving
+ * audio generated before a suspension — but the refusal is the SAME 404 an unknown
+ * token gets (audio-feed-vcpyi). These routes are unauthenticated capability URLs,
+ * so anything that distinguishes "this token exists, and the account is pending"
+ * from "no such token" turns the path into an existence-and-status oracle, which is
+ * the policy `/listen` already follows (audio-feed-se8s8). The status string is not
+ * interpolated anywhere in the response: the body is byte-identical either way.
  */
 export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFeed"] {
   return async ({ params, req, remoteAddr }) => {
@@ -245,8 +269,9 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
     if (refused) return refused;
 
     const user = await loadUserByFeedToken(ctx, token);
-    if (!user) return notFound("Unknown feed");
-    if (user.status !== "approved") return forbidden(`Feed unavailable (status: ${user.status})`);
+    // One refusal for both halves: unknown token and non-approved owner answer the
+    // same response, so a caller holding a token learns nothing about the account.
+    if (!user || user.status !== "approved") return notFound("Unknown feed");
 
     // Per request, not per process: an unconfigured deployment used to emit
     // localhost enclosures that no podcast client could fetch (audio-feed-0k3).
@@ -265,7 +290,11 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
       link: baseUrl,
       description: "All subscribed audio-feed episodes: direct reads and deep dives.",
       author: user.displayName,
-      ownerEmail: user.email,
+      // No `ownerEmail`, deliberately (audio-feed-zlu04). This document is a
+      // capability handed to third-party podcast clients and directories, so an
+      // `<itunes:owner><itunes:email>` built from `user.email` published the
+      // subscriber's account address outside deployment control. The generator
+      // still supports the field; these routes must never fill it from the account.
       language: "en",
       categories: ["News", "Technology"],
     };
@@ -289,8 +318,8 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
     if (refused) return refused;
 
     const user = await loadUserByFeedToken(ctx, token);
-    if (!user) return notFound("Unknown feed");
-    if (user.status !== "approved") return forbidden(`Feed unavailable (status: ${user.status})`);
+    // Same uniform refusal as the master feed (audio-feed-vcpyi).
+    if (!user || user.status !== "approved") return notFound("Unknown feed");
 
     const sourceId = params.sourceId ?? "";
     const mode: AudioMode = params.mode === "deepdive" ? "deepdive" : "direct";
@@ -307,7 +336,7 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
       link: source.siteUrl ?? baseUrl,
       description: `${modeLabel} audio of ${source.title} articles.`,
       author: source.title,
-      ownerEmail: user.email,
+      // No `ownerEmail` here either — see the master feed above (audio-feed-zlu04).
       language: "en",
       categories: ["News", "Technology"],
     };

@@ -280,8 +280,9 @@ Deno.test("suspending stops the feed immediately", async () => {
   );
   assertEquals(suspended.status, 200);
   assertEquals((await suspended.json()).status, "suspended");
-  // A suspended subscriber's feed stops serving, so a revocation is immediate.
-  assertEquals((await fetch(req(feed))).status, 403);
+  // A suspended subscriber's feed stops serving, so a revocation is immediate — and it is refused
+  // exactly as an unknown token is (audio-feed-vcpyi), so the refusal confirms nothing.
+  assertEquals((await fetch(req(feed))).status, 404);
   // And their synthesis is refused too.
   const ingest = await fetch(
     req("/api/ingest", {

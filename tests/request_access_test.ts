@@ -527,9 +527,16 @@ Deno.test("POST /api/request-access: spend gate authority & end-to-end access li
   assertEquals(playerPending.status, 404);
   assertStringIncludes(await playerPending.text(), "Unknown feed");
 
-  // 4. Pending user CANNOT access master feed (403 forbidden)
+  // 4. Pending user CANNOT access master feed, and the refusal is the SAME 404 the player gives
+  // (audio-feed-vcpyi): the feed routes answer one response for an unknown token and a non-approved
+  // owner alike, so holding a token cannot confirm it or reveal the account's status.
   const feedPending = await fetch(new Request(`${BASE}/feed/${token}/master.xml`));
-  assertEquals(feedPending.status, 403);
+  assertEquals(feedPending.status, 404);
+  assertStringIncludes(await feedPending.text(), "Unknown feed");
+  assertEquals(
+    await (await fetch(new Request(`${BASE}/feed/no-such-token/master.xml`))).text(),
+    JSON.stringify({ error: "Unknown feed" }),
+  );
 
   // 5. Admin approves user
   const approveRes = await fetch(

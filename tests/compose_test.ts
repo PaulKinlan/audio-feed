@@ -337,7 +337,9 @@ Deno.test("a safe audioKey propagates a blob-store head transport failure during
 
 Deno.test("unapproved users have no feed, and unknown tokens are 404", async () => {
   const { fetch } = await seededApp();
-  assertEquals((await fetch(req("/feed/token-pending-1/master.xml"))).status, 403);
+  // One refusal for both: a non-approved owner answers what an unknown token answers
+  // (audio-feed-vcpyi), so the path is not an existence-and-status oracle.
+  assertEquals((await fetch(req("/feed/token-pending-1/master.xml"))).status, 404);
   assertEquals((await fetch(req("/feed/nobody/master.xml"))).status, 404);
   assertEquals((await fetch(req("/feed/token-user-1/unknown-source/direct.xml"))).status, 404);
 });
