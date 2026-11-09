@@ -21,6 +21,8 @@ import {
   FEED_TOKEN_WINDOW,
 } from "../src/compose/feeds.ts";
 import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
+import { KvMetadataStore } from "../src/storage/kv.ts";
+import { MemoryBlobStore } from "../src/storage/memory.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { Episode } from "../src/types.ts";
 import type { MetadataStore } from "../src/storage/mod.ts";
@@ -174,14 +176,143 @@ Deno.test("feed routes: N requests allowed, N+1 refused 429 before any store rea
   );
 });
 
-// Row (b): an account with many pending episodes returns within the work bound rather than paging forever - assert the head() call count
-Deno.test("feed work bound: an account with many pending episodes returns within work bound rather than paging forever (audio-feed-oxyp1)", async () => {
+// Row (a): 600 pending/failed followed by 10 ready -> the feed contains all 10 ready episodes (audio-feed-oxyp1)
+Deno.test("feed row (a): 600 pending/failed followed by 10 ready episodes yields all 10 ready episodes (audio-feed-oxyp1)", async () => {
+  const stores = memoryStores();
+  const REACH_TOKEN = "token-reach-test";
+  await seedUser(stores, "user-reach", REACH_TOKEN);
+
+  // 10 ready playable episodes, older createdAt so they sit behind pending/failed in newest-first scan.
+  const baseTime = Date.parse("2026-09-01T10:00:00.000Z");
+  for (let i = 0; i < 10; i++) {
+    const id = `ready-${i}`;
+    const key = `audio/user-reach/direct/${id}.mp3`;
+    await stores.blobs.put(key, new Uint8Array(500), { contentType: "audio/mpeg" });
+    await stores.metadata.putArticle(
+      makeArticle({
+        id: `art-${id}`,
+        userId: "user-reach",
+        sourceId: "src-a",
+        title: `Ready Article ${i}`,
+      }),
+    );
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id,
+        userId: "user-reach",
+        sourceId: "src-a",
+        articleId: `art-${id}`,
+        title: `Ready Article ${i}`,
+        status: "ready",
+        audioKey: key,
+        byteLength: 500,
+        contentType: "audio/mpeg",
+        createdAt: new Date(baseTime + i * 1000).toISOString(),
+        readyAt: new Date(baseTime + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  // 600 newer pending/failed episodes (300 pending + 300 failed).
+  // These sit ahead of the ready episodes in the newest-first index.
+  const junkTime = Date.parse("2026-09-02T10:00:00.000Z");
+  for (let i = 0; i < 600; i++) {
+    const id = `junk-${i}`;
+    const isFailed = i % 2 === 0;
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id,
+        userId: "user-reach",
+        sourceId: "src-a",
+        title: `Junk Article ${id}`,
+        status: isFailed ? ("failed" as const) : ("pending" as const),
+        audioKey: undefined,
+        byteLength: undefined,
+        createdAt: new Date(junkTime + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  const { fetch } = app(stores);
+  const res = await fetch(new Request(`${BASE}/feed/${REACH_TOKEN}/master.xml`), CLIENT);
+  assertEquals(res.status, 200);
+  const xml = await drain(res);
+
+  // The feed must contain ALL 10 ready episodes, NOT 0!
+  assertEquals(
+    countXmlItems(xml),
+    10,
+    "feed must reach all 10 ready episodes despite 600 preceding junk records",
+  );
+
+  // Also verify against KvMetadataStore to prove reach across storage adapters:
+  const kv = await Deno.openKv(":memory:");
+  const kvStores: Stores = {
+    metadata: new KvMetadataStore(kv, { ownsConnection: true }),
+    blobs: new MemoryBlobStore(),
+    describe: "blobs=memory metadata=kv",
+  };
+  await seedUser(kvStores, "user-kv-reach", REACH_TOKEN);
+  for (let i = 0; i < 10; i++) {
+    const id = `ready-${i}`;
+    const key = `audio/user-kv-reach/direct/${id}.mp3`;
+    await kvStores.blobs.put(key, new Uint8Array(500), { contentType: "audio/mpeg" });
+    await kvStores.metadata.putArticle(
+      makeArticle({
+        id: `art-${id}`,
+        userId: "user-kv-reach",
+        sourceId: "src-a",
+        title: `Ready Article ${i}`,
+      }),
+    );
+    await kvStores.metadata.putEpisode(
+      makeEpisode({
+        id,
+        userId: "user-kv-reach",
+        sourceId: "src-a",
+        articleId: `art-${id}`,
+        title: `Ready Article ${i}`,
+        status: "ready",
+        audioKey: key,
+        byteLength: 500,
+        contentType: "audio/mpeg",
+        createdAt: new Date(baseTime + i * 1000).toISOString(),
+        readyAt: new Date(baseTime + i * 1000).toISOString(),
+      }),
+    );
+  }
+  for (let i = 0; i < 600; i++) {
+    const id = `junk-${i}`;
+    await kvStores.metadata.putEpisode(
+      makeEpisode({
+        id,
+        userId: "user-kv-reach",
+        sourceId: "src-a",
+        title: `Junk Article ${id}`,
+        status: i % 2 === 0 ? ("failed" as const) : ("pending" as const),
+        createdAt: new Date(junkTime + i * 1000).toISOString(),
+      }),
+    );
+  }
+  const kvApp = app(kvStores);
+  const kvRes = await kvApp.fetch(new Request(`${BASE}/feed/${REACH_TOKEN}/master.xml`), CLIENT);
+  assertEquals(kvRes.status, 200);
+  const kvXml = await drain(kvRes);
+  assertEquals(
+    countXmlItems(kvXml),
+    10,
+    "KV store feed must reach all 10 ready episodes despite 600 preceding junk records",
+  );
+  await kvStores.metadata.close();
+});
+
+// Row (b): a huge all-pending account still returns within the bound and does not page forever (audio-feed-oxyp1)
+Deno.test("feed row (b): a huge all-pending account still returns within the bound and does not page forever (audio-feed-oxyp1)", async () => {
   const stores = memoryStores();
   await seedUser(stores);
 
-  // 500 pending episodes (more than 2 full pages of 200 items).
-  // Each has an audioKey and byteLength 0, representing synthesizing/pending work.
-  for (let i = 0; i < 500; i++) {
+  // 1,000 pending episodes (huge backlog of unfinished work).
+  for (let i = 0; i < 1000; i++) {
     const id = `pending-${i}`;
     await stores.metadata.putEpisode(
       makeEpisode({
@@ -225,54 +356,16 @@ Deno.test("feed work bound: an account with many pending episodes returns within
     "pending episodes are not publishable and must NEVER trigger blob head() calls",
   );
 
-  // Assertion: pagination must be bounded by FEED_MAX_PAGES (3), not paging 500 episodes forever!
+  // Assertion: pagination must be bounded by FEED_MAX_PAGES (3), not paging 1000 episodes forever!
   assert(
     pageCalls <= FEED_MAX_PAGES,
     `pages scanned (${pageCalls}) must be capped at FEED_MAX_PAGES (${FEED_MAX_PAGES})`,
   );
-
-  // Furthermore, test the FEED_MAX_HEAD_CALLS bound with legacy ready episodes missing byteLength:
-  // Create a separate user with 50 ready episodes that have byteLength: 0.
-  const LEGACY_TOKEN = "token-legacy-ready";
-  await seedUser(stores, "user-legacy", LEGACY_TOKEN);
-  for (let i = 0; i < 50; i++) {
-    const id = `legacy-ep-${i}`;
-    const key = `audio/user-legacy/direct/${id}.mp3`;
-    await stores.blobs.put(key, new Uint8Array(100), { contentType: "audio/mpeg" });
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id,
-        userId: "user-legacy",
-        sourceId: "src-a",
-        title: `Legacy Article ${id}`,
-        status: "ready",
-        audioKey: key,
-        byteLength: 0,
-      }),
-    );
-  }
-
-  headCalls = 0;
-  const legacyRes = await fetch(
-    new Request(`${BASE}/feed/${LEGACY_TOKEN}/master.xml`),
-    { remoteAddr: { hostname: "198.51.100.13" } },
-  );
-  assertEquals(legacyRes.status, 200);
-  const legacyXml = await drain(legacyRes);
-
-  // All 50 episodes are publishable and must appear in the feed.
-  assertEquals(countXmlItems(legacyXml), 50, "all 50 legacy episodes must appear in the feed");
-
-  // But head() calls must be strictly capped at FEED_MAX_HEAD_CALLS (30), not 50!
-  assertEquals(
-    headCalls,
-    FEED_MAX_HEAD_CALLS,
-    `head() calls (${headCalls}) must be capped at FEED_MAX_HEAD_CALLS (${FEED_MAX_HEAD_CALLS})`,
-  );
+  assertEquals(countXmlItems(xml), 0, "all-pending account has 0 publishable items");
 });
 
-// Row (c): a normal small account is unaffected (all episodes present)
-Deno.test("feed normal account: a normal small account is unaffected and all episodes present (audio-feed-oxyp1)", async () => {
+// Row (c): a normal 30-episode account unchanged (audio-feed-oxyp1)
+Deno.test("feed row (c): a normal 30-episode account unchanged (audio-feed-oxyp1)", async () => {
   const stores = memoryStores();
   await seedUser(stores);
 
@@ -328,6 +421,123 @@ Deno.test("feed normal account: a normal small account is unaffected and all epi
   assertEquals(deepdiveRes.status, 200);
   const deepdiveXml = await drain(deepdiveRes);
   assertEquals(countXmlItems(deepdiveXml), 15, "deepdive feed must carry all 15 deepdive episodes");
+});
+
+// Row (d): the head() cap row stays green (audio-feed-oxyp1)
+Deno.test("feed row (d): the head() cap row stays green (audio-feed-oxyp1)", async () => {
+  const stores = memoryStores();
+  const LEGACY_TOKEN = "token-legacy-ready";
+  await seedUser(stores, "user-legacy", LEGACY_TOKEN);
+
+  // 50 ready episodes that have byteLength: 0.
+  for (let i = 0; i < 50; i++) {
+    const id = `legacy-ep-${i}`;
+    const key = `audio/user-legacy/direct/${id}.mp3`;
+    await stores.blobs.put(key, new Uint8Array(100), { contentType: "audio/mpeg" });
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id,
+        userId: "user-legacy",
+        sourceId: "src-a",
+        title: `Legacy Article ${id}`,
+        status: "ready",
+        audioKey: key,
+        byteLength: 0,
+      }),
+    );
+  }
+
+  let headCalls = 0;
+  const originalHead = stores.blobs.head.bind(stores.blobs);
+  stores.blobs.head = (key: string) => {
+    headCalls++;
+    return originalHead(key);
+  };
+
+  const { fetch } = app(stores);
+  const legacyRes = await fetch(
+    new Request(`${BASE}/feed/${LEGACY_TOKEN}/master.xml`),
+    { remoteAddr: { hostname: "198.51.100.13" } },
+  );
+  assertEquals(legacyRes.status, 200);
+  const legacyXml = await drain(legacyRes);
+
+  // All 50 episodes are publishable and must appear in the feed.
+  assertEquals(countXmlItems(legacyXml), 50, "all 50 legacy episodes must appear in the feed");
+
+  // But head() calls must be strictly capped at FEED_MAX_HEAD_CALLS (30), not 50!
+  assertEquals(
+    headCalls,
+    FEED_MAX_HEAD_CALLS,
+    `head() calls (${headCalls}) must be capped at FEED_MAX_HEAD_CALLS (${FEED_MAX_HEAD_CALLS})`,
+  );
+});
+
+// Silent-empty guard: feed never returns 200-with-zero-items when the store holds ready episodes (audio-feed-oxyp1)
+Deno.test("feed silent-empty guard: feed never returns 200-with-zero-items when the store holds ready episodes (audio-feed-oxyp1)", async () => {
+  const stores = memoryStores();
+  const SILENT_TOKEN = "token-silent-empty";
+  await seedUser(stores, "user-silent", SILENT_TOKEN);
+
+  // 5 ready episodes sitting behind 600 pending/failed records.
+  const baseTime = Date.parse("2026-09-01T10:00:00.000Z");
+  for (let i = 0; i < 5; i++) {
+    const id = `silent-ready-${i}`;
+    const key = `audio/user-silent/direct/${id}.mp3`;
+    await stores.blobs.put(key, new Uint8Array(200), { contentType: "audio/mpeg" });
+    await stores.metadata.putArticle(
+      makeArticle({
+        id: `art-${id}`,
+        userId: "user-silent",
+        sourceId: "src-a",
+        title: `Article ${i}`,
+      }),
+    );
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id,
+        userId: "user-silent",
+        sourceId: "src-a",
+        articleId: `art-${id}`,
+        title: `Article ${i}`,
+        status: "ready",
+        audioKey: key,
+        byteLength: 200,
+        contentType: "audio/mpeg",
+        createdAt: new Date(baseTime + i * 1000).toISOString(),
+        readyAt: new Date(baseTime + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  // 600 junk records ahead in the index.
+  const junkTime = Date.parse("2026-09-02T10:00:00.000Z");
+  for (let i = 0; i < 600; i++) {
+    const id = `silent-junk-${i}`;
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id,
+        userId: "user-silent",
+        sourceId: "src-a",
+        title: `Junk ${id}`,
+        status: i % 2 === 0 ? "failed" : "pending",
+        createdAt: new Date(junkTime + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  const { fetch } = app(stores);
+  const res = await fetch(new Request(`${BASE}/feed/${SILENT_TOKEN}/master.xml`), CLIENT);
+  assertEquals(res.status, 200, "feed returns 200 OK");
+  const xml = await drain(res);
+
+  const items = countXmlItems(xml);
+  // Must NOT be 0 (the silent-empty defect)!
+  assert(
+    items > 0,
+    `feed must never return 200 with zero items when ready episodes exist in the store (got ${items})`,
+  );
+  assertEquals(items, 5, "feed must contain all 5 ready episodes");
 });
 
 // Row (d): refusal does not extend the window

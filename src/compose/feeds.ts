@@ -64,11 +64,18 @@ export const FEED_EPISODE_CAP = 200;
 
 /**
  * Upper bound on the number of `listEpisodePage` pages scanned per feed request (audio-feed-oxyp1).
- * Page size is `FEED_EPISODE_CAP` (200). With `FEED_MAX_PAGES = 3`, up to 600 scanned records are
- * examined to find up to 200 publishable episodes (allowing up to 400 non-publishable records intermingled).
- * An account with thousands of pending/failed episodes stops after 3 pages instead of paging indefinitely.
+ * Page size is `FEED_EPISODE_CAP` (200). With `publishable: true` filtering at the store layer,
+ * each page contains publishable episodes, so `FEED_MAX_PAGES = 3` bounds publishable work
+ * (up to 600 publishable episodes) without bounding reach past unpublishable noise.
  */
 export const FEED_MAX_PAGES = 3;
+
+/**
+ * Hard ceiling on total underlying scan pages if non-publishable records are encountered (audio-feed-oxyp1).
+ * Allows scanning through up to 2,000 records (10 pages) to reach ready episodes on stores with
+ * unfiltered index scans (such as KV), while guaranteeing the scan never runs indefinitely.
+ */
+export const FEED_MAX_SCAN_PAGES = 10;
 
 /**
  * Upper bound on outbound blob `head()` calls per feed request (audio-feed-oxyp1).
@@ -138,11 +145,12 @@ async function publishableEpisodes(
   filter: { sourceId?: string; mode?: AudioMode } = {},
 ): Promise<FeedEpisode[]> {
   // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found or `FEED_MAX_PAGES` is reached.
-  // audio-feed-oxyp1 bounds the work per request:
-  // 1. At most `FEED_MAX_PAGES` pages are scanned so an account with many pending/failed episodes
-  //    cannot cause unbounded KV paging.
-  // 2. Only publishable episodes are considered — pending/failed items never trigger blob head() calls.
-  // 3. Blob head() calls for legacy records lacking byteLength are capped at `FEED_MAX_HEAD_CALLS`.
+  // audio-feed-oxyp1 bounds the work per request without bounding reach:
+  // 1. The query requests publishable episodes directly (`publishable: true`), so unpublishable
+  //    junk (pending/failed/synthesizing) never consumes page slots or blocks reaching ready episodes.
+  // 2. At most `FEED_MAX_PAGES` pages (up to 600 publishable episodes) are scanned per request.
+  // 3. Only publishable episodes are considered — pending/failed items never trigger blob head() calls.
+  // 4. Blob head() calls for legacy records lacking byteLength are capped at `FEED_MAX_HEAD_CALLS`.
   //
   // `listEpisodePage`'s limit bounds the SCAN, not the matches, so a short page is not the end —
   // the loop continues while a cursor advances. The cursor guard is not decoration: a store that
@@ -158,6 +166,7 @@ async function publishableEpisodes(
       userId,
       sourceId: filter.sourceId,
       mode: filter.mode,
+      publishable: true,
       limit: FEED_EPISODE_CAP,
       cursor,
     });
@@ -188,7 +197,21 @@ async function publishableEpisodes(
       if (mapped) publishable.push(mapped);
     }
     cursor = page.cursor === cursor ? undefined : page.cursor;
-  } while (cursor && publishable.length < FEED_EPISODE_CAP && pages < FEED_MAX_PAGES);
+  } while (
+    cursor &&
+    publishable.length < FEED_EPISODE_CAP &&
+    (publishable.length > 0 ? pages < FEED_MAX_PAGES : pages < FEED_MAX_SCAN_PAGES)
+  );
+
+  if (cursor && publishable.length === 0 && pages >= FEED_MAX_SCAN_PAGES) {
+    console.warn(
+      JSON.stringify({
+        event: "feed.scan_ceiling_reached",
+        userId,
+        pagesScanned: pages,
+      }),
+    );
+  }
 
   return publishable;
 }

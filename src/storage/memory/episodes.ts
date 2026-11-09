@@ -100,6 +100,7 @@ export function createEpisodesRepository(
         .filter((e) => !query.sourceId || e.sourceId === query.sourceId)
         .filter((e) => !query.mode || e.mode === query.mode)
         .filter((e) => !query.status || e.status === query.status)
+        .filter((e) => !query.publishable || isPublishable(e))
         .sort(byNewestFirst);
       // Cursor is the last returned episode's position in the total order, NOT an
       // array index: the array is rebuilt per call, so a concurrent delete behind

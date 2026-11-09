@@ -61,6 +61,12 @@ export interface EpisodeQuery {
   /** Omit to include both modes. */
   mode?: AudioMode;
   status?: EpisodeStatus;
+  /**
+   * When true, only publishable episodes are returned (ready, or regenerating with playable audio).
+   * Used by RSS and podcast feeds so reach to playable episodes is independent of unpublishable
+   * noise (pending/failed/synthesizing) and the page cap bounds publishable work (audio-feed-oxyp1).
+   */
+  publishable?: boolean;
   /** Newest first. Default 50. */
   limit?: number;
 }

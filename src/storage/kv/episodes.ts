@@ -249,6 +249,7 @@ export function createEpisodesRepository(
           if (query.sourceId && episode.sourceId !== query.sourceId) continue;
           if (query.mode && episode.mode !== query.mode) continue;
           if (query.status && episode.status !== query.status) continue;
+          if (query.publishable && !isPublishable(episode)) continue;
           episodes.push(episode);
           if (episodes.length >= limit) break;
         }
