@@ -1976,6 +1976,7 @@ if (
   !("closedBy" in HTMLDialogElement.prototype)
 ) {
   // TODO(baseline/dialog-closedby): remove this click shim; keep closedby="any" on the dialog.
+  // TODO(baseline/closedby): remove the JS fallback
   shareDialogEl.addEventListener("click", (event) => {
     if (event.target !== shareDialogEl) return;
     const rect = shareDialogEl.getBoundingClientRect();
