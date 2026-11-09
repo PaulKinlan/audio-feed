@@ -90,12 +90,27 @@
  * ran <dir> and wrote no record" and goes red (that guarantee is NEVER gated: it is the detector for
  * the exact "ran and wrote nothing" silence this bead exists to close).
  *
- * WHAT AN ARTEFACT HASH PROVES (audio-feed-fufd0): each `artefacts` entry is the sha256 of the bytes
- * on disk when the record was written, so it attests "this is the file on disk at record time" and
- * detects a file edited afterwards - NOT that a re-run reproduces the file: audio-feed-icl4's
- * repro.json embeds `capturedAt`, so its hash differs every run and still pre-flights clean (the
- * record is rewritten from the same disk it describes), while audio-feed-wzv9's artefacts are stable.
- * Canonicalising volatile fields before hashing is a separate decision, not what this tier does.
+ * WHAT AN ARTEFACT HASH PROVES (audio-feed-fufd0): the record carries TWO digests per file.
+ *
+ *  - `artefacts` is the sha256 of the bytes on disk when the record was written. It attests "this is
+ *    the file on disk at record time" and detects a file edited afterwards. It does NOT attest that
+ *    a re-run reproduces the file: audio-feed-icl4's repro.json embeds `capturedAt`, so its RAW hash
+ *    differs every run and still pre-flights clean (the record is rewritten from the same disk it
+ *    describes), while audio-feed-wzv9's artefacts are stable. The raw rule is unchanged and stays
+ *    the hard one, so tamper detection is exactly as strict as it was.
+ *  - `canonicalArtefacts` is the sha256 of a CANONICAL PROJECTION of the same file: JSON artefacts
+ *    only, object keys sorted recursively, and the value of each field in VOLATILE_ARTEFACT_FIELDS
+ *    replaced by a fixed sentinel. That digest is stable across runs of the same proof, so it CAN
+ *    attest reproducibility: a re-capture whose non-volatile content changed is a named incident
+ *    (`RECORD DERIVED CHANGED`). A missing field still changes it (the sentinel is a value, not a
+ *    deletion), and the list is versioned so widening it is a visible format change, never a silent
+ *    loosening. `canonicalVersion: 1` accompanies the map; records written before it (every
+ *    committed record today) carry no canonical map and get no canonical rule, which is why this
+ *    addition cannot red an existing record.
+ *
+ * The wall clock stays IN the artefact - an artefact that says when it was captured is useful - it is
+ * simply outside the hashed region's volatile-free projection, and run.json's own startedAt/endedAt
+ * are outside the hashed region entirely.
  *
  * AMENDMENT 1 (Paul): the "no run.json => exit 1" rule must NOT be armed until the records exist.
  * It lives behind the single constant EVIDENCE_RECORDS_ENFORCED below. While it is false the run path
@@ -329,6 +344,14 @@ export interface RunRecord {
   marker: boolean;
   /** sha256 of every file in the evidence dir except README.md and run.json. */
   artefacts: Record<string, string>;
+  /**
+   * sha256 of each JSON artefact's canonical projection - keys sorted, volatile field values
+   * replaced by VOLATILE_SENTINEL - so the digest is comparable across runs (audio-feed-fufd0).
+   * Optional: a record written before this field existed carries none and gets no canonical rule.
+   */
+  canonicalArtefacts?: Record<string, string>;
+  /** Which VOLATILE_ARTEFACT_FIELDS list produced `canonicalArtefacts`; absent means none. */
+  canonicalVersion?: number;
 }
 
 export type RunRecordRead =
@@ -587,13 +610,57 @@ export async function shaIsAncestor(root: string, sha: string): Promise<ShaHisto
 const RECORD_EXCLUDED = new Set(["README.md", RECORD_FILE]);
 
 /**
- * sha256 of every file under the evidence dir, except README.md and run.json (audio-feed-h22ml).
+ * Fields whose VALUE cannot attest anything about the thing under test, so the canonical projection
+ * replaces it before hashing (audio-feed-fufd0). Each entry says why a differing value is not a
+ * change in the artefact's meaning:
+ *
+ *  - `capturedAt` / `ranAt` / `startedAt` / `endedAt` / `finishedAt` - wall-clock stamps of the
+ *    recording, read from the machine clock. A re-run cannot and must not reproduce them; icl4's
+ *    repro.json is exactly this shape.
+ *  - `finishedAtMs` - the same wall clock as `finishedAt`, in epoch milliseconds (0cmu).
+ *  - `elapsedMs` - how long the recorded run took, which moves with machine load and is a timing
+ *    fact about the run, never an assertion about the system under test.
+ *
+ * The list is only ever allowed to make the canonical digest LESS sensitive to the clock, never to
+ * content, because the raw `artefacts` digest is unchanged and stays the tamper rule. A field that
+ * belongs here but is missing is a FALSE RED (visible, fixable); a name that matches non-volatile
+ * content is lost sensitivity, which is why every entry needs the reason above.
+ */
+export const VOLATILE_ARTEFACT_FIELDS: Record<string, string> = {
+  capturedAt:
+    "wall clock stamped when the artefact was written; a re-run cannot and should not reproduce it",
+  ranAt: "wall clock stamped when the recorded run started; moves every run",
+  startedAt: "wall clock stamp of the recorded run's start; a timing fact, not an assertion",
+  endedAt: "wall clock stamp of the recorded run's end; a timing fact, not an assertion",
+  finishedAt: "wall clock stamp of the recorded run's finish; a timing fact, not an assertion",
+  finishedAtMs: "the same wall clock as finishedAt, in epoch milliseconds",
+  elapsedMs: "how long the recorded run took; moves with machine load, asserts nothing",
+};
+
+/** Stands in for every volatile value; substituting (not deleting) keeps key presence significant. */
+export const VOLATILE_SENTINEL = "<volatile>";
+
+/** Bump when VOLATILE_ARTEFACT_FIELDS changes, so a widening is a visible format change. */
+export const CANONICAL_PROJECTION_VERSION = 1;
+
+function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  return crypto.subtle.digest("SHA-256", bytes).then(
+    (digest) =>
+      `sha256:${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")}`,
+  );
+}
+
+/**
+ * Every file under the evidence dir, except top-level README.md and run.json (audio-feed-h22ml).
  * Keys are dir-relative paths with a stable sort so records diff cleanly. Symlinks are skipped here
  * (the tree walk refuses them outright); nested directories are walked because a declared dir may
- * carry README-less asset subdirectories.
+ * carry README-less asset subdirectories. Shared by both digest maps so raw and canonical can never
+ * disagree about which files are in scope.
  */
-export async function hashEvidenceDir(dirAbs: string): Promise<Record<string, string>> {
-  const artefacts: Record<string, string> = {};
+async function forEachEvidenceFile(
+  dirAbs: string,
+  visit: (rel: string, bytes: Uint8Array<ArrayBuffer>) => Promise<void>,
+): Promise<void> {
   async function walk(rel: string): Promise<void> {
     const abs = rel === "" ? dirAbs : join(dirAbs, rel);
     const entries: Deno.DirEntry[] = [];
@@ -607,17 +674,63 @@ export async function hashEvidenceDir(dirAbs: string): Promise<Record<string, st
         continue;
       }
       if (rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
-      const digest = await crypto.subtle.digest(
-        "SHA-256",
-        await Deno.readFile(join(dirAbs, childRel)),
-      );
-      artefacts[childRel] = `sha256:${
-        [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")
-      }`;
+      await visit(childRel, await Deno.readFile(join(dirAbs, childRel)));
     }
   }
   await walk("");
+}
+
+/** sha256 of every file under the evidence dir, except README.md and run.json (audio-feed-h22ml). */
+export async function hashEvidenceDir(dirAbs: string): Promise<Record<string, string>> {
+  const artefacts: Record<string, string> = {};
+  await forEachEvidenceFile(dirAbs, async (rel, bytes) => {
+    artefacts[rel] = await sha256Hex(bytes);
+  });
   return artefacts;
+}
+
+function canonicalise(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalise);
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) {
+      out[key] = Object.prototype.hasOwnProperty.call(VOLATILE_ARTEFACT_FIELDS, key)
+        ? VOLATILE_SENTINEL
+        : canonicalise(source[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * sha256 of a JSON artefact's canonical projection (audio-feed-fufd0), or null for a file that is not
+ * JSON or does not parse - a non-JSON artefact keeps its raw digest only rather than gaining a rule
+ * that cannot be reasoned about. Stable across runs that differ only in VOLATILE_ARTEFACT_FIELDS.
+ */
+async function canonicalDigest(
+  name: string,
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<string | null> {
+  if (!name.endsWith(".json")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  return await sha256Hex(new TextEncoder().encode(JSON.stringify(canonicalise(parsed))));
+}
+
+/** The canonical digest of every JSON artefact in the dir, keyed and scoped as hashEvidenceDir. */
+export async function hashEvidenceDirCanonical(dirAbs: string): Promise<Record<string, string>> {
+  const canonical: Record<string, string> = {};
+  await forEachEvidenceFile(dirAbs, async (rel, bytes) => {
+    const digest = await canonicalDigest(rel, bytes);
+    if (digest !== null) canonical[rel] = digest;
+  });
+  return canonical;
 }
 
 /**
@@ -900,6 +1013,44 @@ export async function validateRunRecord(
       }
     }
   }
+
+  // The canonical rule (audio-feed-fufd0): only for a record that carries a canonical map at the
+  // version this tier writes. It names content that changed outside the declared volatile fields,
+  // which is the only thing that can catch a proof that silently stops producing the same result.
+  const recordedCanonical = record.canonicalArtefacts;
+  if (recordedCanonical !== undefined) {
+    if (typeof recordedCanonical !== "object" || Array.isArray(recordedCanonical)) {
+      incidents.push(
+        `RECORD INCOMPLETE: ${ctx.dir} ${RECORD_FILE} has no canonical artefact map`,
+      );
+    } else if (record.canonicalVersion !== CANONICAL_PROJECTION_VERSION) {
+      incidents.push(
+        `RECORD UNDATED: ${ctx.dir} ${RECORD_FILE} canonicalVersion ${
+          JSON.stringify(record.canonicalVersion ?? null)
+        } is not the version this tier writes (${CANONICAL_PROJECTION_VERSION})`,
+      );
+    } else {
+      const actualCanonical = await hashEvidenceDirCanonical(join(ctx.root, ctx.dir));
+      const names = new Set([
+        ...Object.keys(recordedCanonical),
+        ...Object.keys(actualCanonical),
+      ]);
+      for (const name of [...names].sort()) {
+        const expected = recordedCanonical[name];
+        const got = actualCanonical[name];
+        if (typeof expected !== "string" || got === undefined) {
+          incidents.push(
+            `RECORD GAP: ${ctx.dir} artefact ${name} is in the canonical map but not a canonical JSON artefact on disk`,
+          );
+        } else if (expected !== got) {
+          incidents.push(
+            `RECORD DERIVED CHANGED: ${ctx.dir} artefact ${name} content changed outside the volatile fields ` +
+              `(recorded ${expected}, on disk ${got}) - a re-run did not reproduce the artefact`,
+          );
+        }
+      }
+    }
+  }
   return incidents;
 }
 
@@ -918,6 +1069,7 @@ export async function writeRunRecord(
 ): Promise<void> {
   const sha = await gitHeadSha(root);
   const artefacts = await hashEvidenceDir(join(root, declaration.dir));
+  const canonicalArtefacts = await hashEvidenceDirCanonical(join(root, declaration.dir));
   const record: RunRecord = {
     script: declaration.declared,
     sha: sha ?? "",
@@ -927,6 +1079,8 @@ export async function writeRunRecord(
     exit: result.code,
     marker: result.hasAssertionSignal,
     artefacts,
+    canonicalArtefacts,
+    canonicalVersion: CANONICAL_PROJECTION_VERSION,
   };
   await Deno.writeTextFile(
     runRecordPath(root, declaration.dir),
