@@ -252,18 +252,40 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       /**
        * audio-feed-7xlrw: this proof no longer carries a private CDP client or a private
        * `until()`. The deleted copy's reply wait was a bare `await new Promise` on its own
-       * pending map, bounded per call by this file's 20s `withDeadline`; its poll armed a
+       * pending map, bounded per call by this file's own `withDeadline`; its poll armed a
        * FRESH full hang bound on every iteration rather than the budget left in the wait it
        * was serving. connectCdp() races every evaluate against the derived HANG_BOUND_MS and
-       * bounds each poll by what is LEFT of that wait; each raw command here keeps this
-       * file's own 20s per-reply deadline explicitly, because that number is what turns a
-       * reply the browser drops mid-navigation (the sign-in redirect destroys the execution
-       * context) into a named "ProofTimeout", and this sweep moves the bound's SOURCE, not
-       * the budget. Evaluates inherit the shared `js()` bound instead of the 20s reply
-       * deadline: outside a poll that is a wider ceiling before the same named failure, and
-       * inside a poll the until() budget is what binds.
+       * bounds each poll by what is LEFT of that wait; each raw command here keeps its own
+       * per-reply deadline explicitly (see RAW_CDP_REPLY_HEADROOM below), because that number
+       * is what turns a reply the browser drops mid-navigation (the sign-in redirect destroys
+       * the execution context) into a named "ProofTimeout". Evaluates inherit the shared
+       * `js()` bound instead: outside a poll that is a wider ceiling before the same named
+       * failure, and inside a poll the until() budget is what binds.
+       *
+       * audio-feed-op0vg: the multiple below is the whole point. The bound used to be a bare
+       * `20_000`, and 20s is 2.5 x the 8s floor MEASURED for a bare
+       * `document.readyState === "complete"` evaluate (audio-feed-6gst1) - a LIGHTER operation
+       * than the raw replies it bounded (`Page.navigate` across a sign-in redirect,
+       * `DOM.getDocument`/`querySelector`/`setFileInputFiles`, screenshots). The tree's own
+       * convention gives the lighter wait 15 x that floor (HANG_BOUND_MS = 120s), so 2.5 x was
+       * a ceiling for the heavier wait BELOW the ceiling for the lighter one, which is the same
+       * shape audio-feed-c0l7b recorded: a bound is only defensible anchored to a measurement of
+       * the same workload, and 15 x is the smallest multiple that does not invert the ordering.
+       *
+       * Arithmetic: RAW_CDP_REPLY_HEADROOM (15) x MEASURED_STARVED_POLL_MS (8_000) = 120_000.
+       * That is deliberately the same 120s the shared HANG_BOUND_MS derives, and the same bound
+       * the sibling proofs already give their raw commands by omitting the third argument
+       * (bookmarklet-, account-, voice-audition-, home-player-link-, verify_qz3x_*); this file
+       * states it rather than inheriting it because here it is the number under discussion. No
+       * starved RAW-round-trip measurement exists on this host, so the multiple is the floor the
+       * poll measurement supports and nothing larger is claimed: a measured starved screenshot or
+       * navigation round-trip is what would justify raising RAW_CDP_REPLY_HEADROOM. The raise
+       * from 20s to 120s only moves how long a HUNG reply takes to fail by name; no page that
+       * answers is waited on any longer, and these raw commands sit outside `withDeadline`, so
+       * the per-type budget is untouched.
        */
-      const CDP_REPLY_HANG_BOUND_MS = 20_000;
+      const RAW_CDP_REPLY_HEADROOM = 15;
+      const CDP_REPLY_HANG_BOUND_MS = RAW_CDP_REPLY_HEADROOM * MEASURED_STARVED_POLL_MS;
       const { cdp: rawCdp, js, until } = await connectCdp({ port: chrome.port });
       // deno-lint-ignore no-explicit-any
       const cdp = (method: string, params: Record<string, unknown> = {}): Promise<any> =>
