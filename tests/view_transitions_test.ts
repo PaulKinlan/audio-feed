@@ -25,6 +25,7 @@ import {
   waitForChromeProfileUnused,
 } from "../scripts/proof-helper.ts";
 import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
+import { browserRowIgnored, computedKey, readCssInChrome } from "./css_engine.ts";
 
 const BASE = "https://audio.example.com";
 
@@ -295,6 +296,65 @@ Deno.test("shell & player define persistent view-transition-name identifiers (au
   const css = await res.text();
   assertStringIncludes(css, "view-transition-name: app-header;");
   assertStringIncludes(css, "view-transition-name: player-dock;");
+});
+
+/**
+ * audio-feed-yi6na: the row above matches TEXT for `view-transition-name: app-header` /
+ * `app-brand` / `player-dock`. `view-transition-name` is a property whose WHOLE POINT is that
+ * two elements in two documents carry the same name — a typo, an invalid ident, or a rule the
+ * cascade drops leaves the text in the sheet and breaks the transition silently (the header
+ * snaps instead of morphing). This row asks the engine what the elements actually COMPUTE.
+ */
+Deno.test({
+  name:
+    "view-transition names compute on the real header, brand and dock elements (audio-feed-yi6na)",
+  ignore: browserRowIgnored,
+  async fn() {
+    const assetModule = await import("../src/routes/assets.ts");
+    const listenUrl = assetModule.assetUrl("listen.css");
+    const listenRes = assetModule.handleAsset(
+      // deno-lint-ignore no-explicit-any
+      { params: { name: listenUrl.replace("/assets/", "") } } as any,
+    );
+    const listenCss = await listenRes.text();
+
+    const reading = await readCssInChrome({
+      css: `${SHELL_CSS}\n${listenCss}`,
+      body: '<header class="app"><a class="brand" href="#">brand</a></header>' +
+        '<div class="dock"></div>' +
+        '<div class="site-header"><a class="brand" href="#">brand</a></div>',
+      declarations: [
+        { property: "view-transition-name", value: "app-header" },
+        { property: "view-transition-name", value: "player-dock" },
+      ],
+      probes: [
+        { selector: "header.app", property: "view-transition-name" },
+        { selector: ".dock", property: "view-transition-name" },
+        { selector: ".site-header .brand", property: "view-transition-name" },
+      ],
+    });
+
+    // The names must be valid idents the engine accepts; `app_header` or a missing dash in the
+    // custom-ident grammar is dropped, and the string row above cannot tell.
+    assert(
+      reading.computed[computedKey("header.app", "view-transition-name")] === "app-header",
+      "the player header must compute view-transition-name: app-header so it morphs across " +
+        `navigation (got ${reading.computed[computedKey("header.app", "view-transition-name")]})`,
+    );
+    assert(
+      reading.computed[computedKey(".dock", "view-transition-name")] === "player-dock",
+      "the player dock must compute view-transition-name: player-dock so playback survives the " +
+        `navigation (got ${reading.computed[computedKey(".dock", "view-transition-name")]})`,
+    );
+    // app-brand is unique to the shell and is what makes the wordmark persist; a `.brand` that
+    // computes `none` here is a name the shell never wrote or a rule the cascade dropped.
+    assert(
+      reading.computed[computedKey(".site-header .brand", "view-transition-name")] ===
+        "app-brand",
+      "the shell wordmark must compute view-transition-name: app-brand (got " +
+        `${reading.computed[computedKey(".site-header .brand", "view-transition-name")]})`,
+    );
+  },
 });
 
 Deno.test("pages include view transition declarations in rendered markup (audio-feed-rra)", async () => {
