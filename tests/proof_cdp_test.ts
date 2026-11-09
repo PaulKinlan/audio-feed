@@ -141,6 +141,7 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
   // would push these above one; the assertion is what makes "exactly one evaluate" checkable.
   let neverAnswersCount = 0;
   let neverAnswersUntilCount = 0;
+  let neverAnswersDefaultCount = 0;
 
   const server = Deno.serve({
     port: 0,
@@ -195,6 +196,10 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
             neverAnswersCount++;
           } else if (msg.params.expression === "never_answers_until") {
             neverAnswersUntilCount++;
+          } else if (msg.params.expression === "never_answers_default") {
+            // Counted and deliberately UNANSWERED, like `never_answers`: the difference is only
+            // that the CALLER passes no bound, so the wait must end at the shared default.
+            neverAnswersDefaultCount++;
           } else {
             socket.send(
               JSON.stringify({
@@ -482,6 +487,108 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         Error,
         'throw_error: {"text":"uncaught error"}',
       );
+
+      // 13. js()'s DEFAULT is a bound too: a call site that states no budget inherits
+      // HANG_BOUND_MS, and an evaluate the page never answers must reject as CdpHangBoundExceeded
+      // at exactly that default instead of waiting for the lane's killer (audio-feed-go4le).
+      //
+      // This is the row the swept bootstrap proofs lean on: `bootstrap-browser-proof.ts` and
+      // `bootstrap-refusal-browser-proof.ts` used to carry a private `js()` with NO timeout at
+      // all, so every bare `await js(...)` in them was unbounded. They now call the shared client
+      // with no third argument, which is only safe if the DEFAULT is a real deadline. Driven on
+      // the fake clock for the same reason as row 10: the property is that the armed timer fires
+      // at HANG_BOUND_MS, and asserting host promptness would only measure the box.
+      //
+      // THE MUTANT: delete the timer race in `js()` (leave the bare `await cdp(...)`) and this row
+      // never settles - it hangs until the test runner's own timeout kills it rather than passing,
+      // which is the difference between a bound and no bound.
+      const jsDefaultClock = new FakeTime();
+      let jsDefaultSettled = false;
+      let jsDefaultError: unknown = null;
+      let jsDefaultElapsed = -1;
+      try {
+        const jsDefaultStart = Date.now();
+        void client.js("never_answers_default").then(
+          () => {
+            jsDefaultSettled = true;
+          },
+          (err: unknown) => {
+            jsDefaultSettled = true;
+            jsDefaultError = err;
+          },
+        );
+        await jsDefaultClock.tickAsync(HANG_BOUND_MS);
+        await jsDefaultClock.runMicrotasks();
+        jsDefaultElapsed = Date.now() - jsDefaultStart;
+      } finally {
+        jsDefaultClock.restore();
+      }
+      assert(
+        jsDefaultSettled,
+        "a bare js() call must inherit the 120s hang bound: the evaluate was never answered, so " +
+          "the race had to have settled - it was still pending after the default elapsed",
+      );
+      assertEquals(
+        jsDefaultElapsed,
+        HANG_BOUND_MS,
+        "a js() call with no explicit bound must fire at HANG_BOUND_MS, not at a fixed 8s or never",
+      );
+      assert(
+        jsDefaultError instanceof CdpHangBoundExceeded,
+        `a starved unbounded-by-the-caller evaluate must reject as CdpHangBoundExceeded, got ${
+          String(jsDefaultError)
+        }`,
+      );
+      assertStringIncludes(
+        (jsDefaultError as Error).message,
+        `got no answer in ${HANG_BOUND_MS}ms`,
+      );
+      // Real round-trip before counting, for the same reason as rows 10 and 11.
+      await client.cdp("Page.enable");
+      assertEquals(
+        neverAnswersDefaultCount,
+        1,
+        `the default bound must leave exactly one evaluate sent, not a poll; server saw ${
+          String(neverAnswersDefaultCount)
+        }`,
+      );
+
+      // 14. The swept proofs carry NO private copy of the client any more (audio-feed-go4le). A
+      // private `js()` is how the unbounded evaluate came back the first time: the copy sent
+      // `Runtime.evaluate` with no timeout and no race, so a main thread that never answered had
+      // no ceiling. Source-pinned, because the wiring is the property - the behaviour it buys is
+      // rows 10, 11 and 13 above, and those test the shared helper the swept files now call.
+      // The paths are LITERAL, one read per swept file: a template-built path here derived a
+      // directory relation on `scripts/`, which widened the fast gate's selection for every script
+      // change (pinned by tests/fast_gate_subset_test.ts, and it said so by name on the first run
+      // of this gate). Two literal reads name exactly the two files this row is about.
+      const sweptProofs: [string, string][] = [
+        [
+          "bootstrap-browser-proof.ts",
+          await Deno.readTextFile(
+            new URL("../scripts/bootstrap-browser-proof.ts", import.meta.url),
+          ),
+        ],
+        [
+          "bootstrap-refusal-browser-proof.ts",
+          await Deno.readTextFile(
+            new URL("../scripts/bootstrap-refusal-browser-proof.ts", import.meta.url),
+          ),
+        ],
+      ];
+      for (const [swept, sweptSource] of sweptProofs) {
+        assertStringIncludes(sweptSource, "connectCdp(chrome.port)");
+        assert(
+          !sweptSource.includes("async function js(") &&
+            !sweptSource.includes("async function until("),
+          `${swept} must not re-declare a private js()/until(): the private js() had no timeout ` +
+            "and the private until() defaulted to an un-derived 8s",
+        );
+        assert(
+          !/until\([^)]*,\s*(8000|10000|15_000|15000)\s*,?\s*\)/u.test(sweptSource),
+          `${swept} must pass the derived HANG_BOUND_MS, not a bare literal count`,
+        );
+      }
     } finally {
       client.close();
     }
