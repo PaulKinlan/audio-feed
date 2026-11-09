@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-run=git,bd --allow-env
+#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run=git,bd --allow-env
 /**
  * audio-feed-j7580: In-repo history channel producer for the threat-model station.
  *
@@ -444,7 +444,7 @@ if (import.meta.main) {
     console.log(`Threat Model History Channel Producer
 
 Usage:
-  deno run --allow-read --allow-run=git,bd --allow-env scripts/threat-model-history.ts [flags]
+  deno run --allow-read --allow-write --allow-run=git,bd --allow-env scripts/threat-model-history.ts [flags]
 
 Flags:
   --json, -j                  Output structured JSON matching factory threat-model contract
@@ -478,6 +478,11 @@ Flags:
         description: b.summary_snippet,
       })
     );
+    // audio-feed-dmsm5: the one write in this script, and the reason both the task and the shebang
+    // grant --allow-write. The destination is the caller's (--export-beads-jsonl <path>), so no
+    // path-scoped grant can be written down ahead of time. Without the grant this line threw
+    // NotCapable AFTER the whole mine had run: exit 1 and nothing on stdout, which a host cannot
+    // tell apart from "there is no history".
     await Deno.writeTextFile(exportPath, lines.join("\n") + "\n");
     console.error(`Exported ${lines.length} issues to ${exportPath}`);
   }

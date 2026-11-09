@@ -380,3 +380,96 @@ Deno.test("generateHistoryChannel produces host-contract compliant schema with e
     assert(!("labels" in bug));
   }
 });
+
+/**
+ * audio-feed-dmsm5 — `--export-beads-jsonl` is the host hand-off, and it could not run under the
+ * permissions this repo documents for it: both invocations below died with NotCapable, exit 1 and
+ * an empty stdout, which a host cannot tell apart from "there is no history".
+ *
+ * The two rows take their argument lists from the two places the grant is written down — the
+ * script's shebang and the `threat-model:history` task — rather than hardcoding a command, so the
+ * grant under test is the documented one. Mutants, both run by hand on this commit: delete
+ * `--allow-write` from the shebang (row 1 reds) or from the task (row 2 reds). Each fails with
+ * `NotCapable`, exit 1, and no file at the export path.
+ */
+const producerRoot = new URL("../", import.meta.url).pathname;
+const producerScript = new URL("../scripts/threat-model-history.ts", import.meta.url).pathname;
+const PRODUCER_ARGV0 = "#!/usr/bin/env -S deno run ";
+
+async function runProducer(args: string[]): Promise<Deno.CommandOutput> {
+  return await new Deno.Command(Deno.execPath(), {
+    args,
+    cwd: producerRoot,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+}
+
+function producerFailure(out: Deno.CommandOutput): string {
+  return `exit=${out.code} stderr=${new TextDecoder().decode(out.stderr)}`;
+}
+
+/**
+ * The export is one JSON object per line in the bd issues.jsonl shape the host miner reads: the
+ * channel's `summary_snippet` is emitted under that format's `description` field.
+ */
+async function assertExportFile(exportPath: string, out: Deno.CommandOutput): Promise<void> {
+  const stderr = new TextDecoder().decode(out.stderr);
+  assert(stderr.includes("Exported "), `producer must report the export: ${stderr}`);
+  const written = await Deno.readTextFile(exportPath);
+  assert(written.length > 0, "the export path must hold the hand-off, not an empty file");
+  for (const line of written.split("\n")) {
+    if (!line.trim()) continue;
+    const record = JSON.parse(line);
+    assertEquals(Object.keys(record).sort(), [
+      "close_reason",
+      "description",
+      "id",
+      "issue_type",
+      "status",
+      "title",
+    ]);
+  }
+}
+
+Deno.test("the shebang's own grants can run --export-beads-jsonl (audio-feed-dmsm5)", async () => {
+  const shebang = (await Deno.readTextFile(producerScript)).split("\n")[0]!;
+  assert(shebang.startsWith(PRODUCER_ARGV0), `shebang must invoke deno run: ${shebang}`);
+  const granted = shebang.slice(PRODUCER_ARGV0.length).trim().split(/\s+/);
+
+  const dir = await Deno.makeTempDir({ prefix: "dmsm5-shebang-" });
+  try {
+    const exportPath = `${dir}/issues.jsonl`;
+    const out = await runProducer([
+      ...granted,
+      producerScript,
+      "--limit",
+      "3",
+      "--export-beads-jsonl",
+      exportPath,
+    ]);
+    assertEquals(out.code, 0, `shebang grants must carry the write: ${producerFailure(out)}`);
+    await assertExportFile(exportPath, out);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("the documented task can run --export-beads-jsonl (audio-feed-dmsm5)", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "dmsm5-task-" });
+  try {
+    const exportPath = `${dir}/issues.jsonl`;
+    const out = await runProducer([
+      "task",
+      "threat-model:history",
+      "--limit",
+      "3",
+      "--export-beads-jsonl",
+      exportPath,
+    ]);
+    assertEquals(out.code, 0, `the task's grants must carry the write: ${producerFailure(out)}`);
+    await assertExportFile(exportPath, out);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
