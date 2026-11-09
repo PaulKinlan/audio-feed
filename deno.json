@@ -45,7 +45,11 @@
     "inventory": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/legacy-audio-inventory.ts",
     "migrate-legacy-audio": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
     "migrate:audio-keys": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
-    "threat-model:history": "deno run --allow-read --allow-run=git,bd --allow-env scripts/threat-model-history.ts",
+    // audio-feed-dmsm5: --allow-write belongs to the --export-beads-jsonl hand-off, the flag this
+    // task exists to serve. Its path is the caller's, so it cannot be path-scoped ahead of time, and
+    // without the grant the documented invocation died with NotCapable (exit 1, empty stdout) after
+    // the whole mine had already run. It is the only grant added: the script writes exactly one file.
+    "threat-model:history": "deno run --allow-read --allow-write --allow-run=git,bd --allow-env scripts/threat-model-history.ts",
     // audio-feed-pnw73: `deno test --no-check` is deliberate and sound ONLY here, because the
     // `deno check main.ts src tests scripts` immediately to its left type-checks the same tree over
     // the same roots first. Doing it twice cost ~5-7% of the whole gate (measured: 201.4s/259.8s
