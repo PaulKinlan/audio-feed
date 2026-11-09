@@ -1490,3 +1490,296 @@ Deno.test({
     );
   },
 });
+
+/**
+ * Page-load bound for the real player row (audio-feed-31c5o): the same 15x the measured starved-poll
+ * floor (scripts/proof-cdp.ts) that bounds every other wait in this file. It is a HANG bound on a
+ * page that must load a module, its stylesheet and five rendered rows from a local server - not a
+ * latency promise.
+ */
+const PLAYER_LOAD_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS;
+
+/**
+ * What one pass of the REAL player page reports about its tooltip (audio-feed-31c5o).
+ *
+ * Every field is read from the page itself: `stub` and `inPageSupports` prove the engine stub was in
+ * force (a stub that never landed would make "no inline left/top" green for the wrong reason),
+ * `episodeRows` proves the module evaluated past `$("audio")` to the code that renders rows, and
+ * `inlineLeft`/`inlineTop` are the only styles the fallback writes.
+ */
+interface PlayerTooltipReading {
+  stub: boolean | null;
+  inPageSupports: boolean;
+  episodeRows: number;
+  tooltipVisible: boolean;
+  inlineLeft: string;
+  inlineTop: string;
+  targetLabel: string;
+  targetRect: { left: number; top: number; right: number; bottom: number };
+  tooltipRect: { left: number; top: number; right: number; bottom: number };
+  viewport: { width: number; height: number };
+  onScreen: boolean;
+}
+
+/**
+ * The engine's answer to `CSS.supports("anchor-name", ...)`, installed BEFORE the page's own module
+ * evaluates (audio-feed-31c5o).
+ *
+ * Why not an inline stub like `guardHarness`'s: this is the real player page, and src/assets/listen.js
+ * is a `<script type="module">`. A module is deferred, so a stub written into the page would have to
+ * be in the page already — and the page is the app's, not the test's. `Page.addScriptToEvaluateOnNewDocument`
+ * runs at document creation, before any script element in the document executes, which is the only
+ * point early enough. `globalThis.__anchorSupportStub` is the page's own receipt that it ran.
+ *
+ * Only `anchor-name` is intercepted; every other query goes to the engine, so the stub cannot change
+ * anything the page does besides the guard under test.
+ */
+const anchorNameStub = (supports: boolean) =>
+  `(() => {
+  const original = CSS.supports.bind(CSS);
+  CSS.supports = (property, value) => property === "anchor-name" ? ${supports} : original(property, value);
+  globalThis.__anchorSupportStub = ${supports};
+})();`;
+
+/** The first `[data-tooltip]` trigger on the page that a real pointer can actually land on. */
+const CHOOSE_TOOLTIP_TARGET = `(() => {
+  const blocked = [];
+  const target = [...document.querySelectorAll("[data-tooltip]")].find((el) => {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
+    const at = document.elementFromPoint(x, y);
+    const reachable = at === el || el.contains(at);
+    if (!reachable) blocked.push((el.id || el.tagName) + " is under " + ((at && (at.id || at.tagName)) || "nothing"));
+    return reachable;
+  });
+  if (!target) return JSON.stringify({ chosen: null, center: null, blocked });
+  globalThis.__tooltipTarget = target;
+  const rect = target.getBoundingClientRect();
+  return JSON.stringify({
+    chosen: target.id || target.getAttribute("data-tooltip"),
+    center: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+    blocked
+  });
+})()`;
+
+/** Everything the row asserts about one pass, read from the page after the pointer has moved onto a trigger. */
+const READ_PLAYER_TOOLTIP = `(() => {
+  const tip = document.getElementById("appTooltip");
+  const target = globalThis.__tooltipTarget;
+  if (!tip || !target) return JSON.stringify({ missing: true });
+  const r = target.getBoundingClientRect();
+  const t = tip.getBoundingClientRect();
+  return JSON.stringify({
+    stub: globalThis.__anchorSupportStub ?? null,
+    inPageSupports: CSS.supports("anchor-name", "--a"),
+    episodeRows: document.querySelectorAll("#episodes .episode").length,
+    tooltipVisible: tip.classList.contains("visible"),
+    inlineLeft: tip.style.left,
+    inlineTop: tip.style.top,
+    targetLabel: target.id || target.getAttribute("data-tooltip"),
+    targetRect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
+    tooltipRect: { left: t.left, top: t.top, right: t.right, bottom: t.bottom },
+    viewport: { width: innerWidth, height: innerHeight },
+    onScreen: t.top >= 0 && t.left >= 0 && t.bottom <= innerHeight && t.right <= innerWidth
+  });
+})()`;
+
+Deno.test({
+  name:
+    "anchor-positioning: the real player page takes the fallback path only when the engine reports no anchor positioning (audio-feed-31c5o)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // WHY THE REAL PAGE (audio-feed-31c5o). src/assets/listen.js is a page MODULE, not a standalone
+    // client like src/assets/tooltip-client.js, and it cannot be executed against a fixture: its `$`
+    // helper throws "player shell is missing #<id>", and the calls that use it (`$("audio")` at the top
+    // of the file) run BEFORE the tooltip listeners register - so every fixture harness dies first and
+    // the guard at `if (!supportsAnchorPositioning)` never executes. That is exactly how the guard was
+    // still pinned only by source text: replacing it with `if (true)` made the getBoundingClientRect
+    // fallback overwrite the anchor rules on every engine, and every row in this file stayed green,
+    // because the rows that DID run observed the SHELL copy (src/assets/tooltip-client.js), which the
+    // player page does not carry. Nothing was watching this file's copy.
+    //
+    // So the page is built the way the app builds it: `createListenHarness` seeds a real token through
+    // the real stores and renders it through the real `createApp`/`createHandlers` (the same page
+    // scripts/listen-browser-proof.ts and tests/listen_test.ts already drive), an in-process server
+    // hands it out, and the module the browser loads is the content-addressed /assets/<hash>.listen.js
+    // the page itself asks for. Nothing in the module is stubbed; the audio element is real, and the
+    // only thing this row decides is the engine's answer at load.
+    const { createListenHarness } = await import("../scripts/listen-harness.ts");
+    // Port 0 for the harness's own base URL: the row navigates to the port the SERVER reports, so the
+    // page's absolute links are the only thing the placeholder base costs, and this row never
+    // dereferences one (no audio is played, no share link is read).
+    const harness = await createListenHarness(0);
+    const server = Deno.serve({ port: 0, hostname: "127.0.0.1", onListen() {} }, harness.fetch);
+    const port = (server.addr as Deno.NetAddr).port;
+    const page = `http://127.0.0.1:${port}/listen/${harness.token}`;
+
+    const playerPass = async (
+      cdp: (method: string, params?: Record<string, unknown>) => Promise<unknown>,
+      js: (expression: string) => Promise<string>,
+      until: (expr: string, desc: string, timeoutMs?: number) => Promise<void>,
+      supports: boolean,
+    ): Promise<PlayerTooltipReading> => {
+      // THE TIMING THAT MAKES THIS ROW POSSIBLE: the script is added BEFORE navigation, so it runs at
+      // document creation - ahead of the page's own module, and ahead of the module's top-level
+      // `CSS.supports("anchor-name", "--a")`.
+      const added = await cdp("Page.addScriptToEvaluateOnNewDocument", {
+        source: anchorNameStub(supports),
+      }) as { identifier: string };
+      try {
+        await cdp("Page.navigate", { url: page });
+        // Episode rows are rendered by the same module: their presence is the page's own proof that
+        // the file evaluated past `$("audio")` to the code that registers the tooltip listeners.
+        await until(
+          `document.querySelectorAll("#episodes .episode").length > 0`,
+          `the player module to render episode rows (stub says anchor support ${supports})`,
+          PLAYER_LOAD_WAIT_MS,
+        );
+        const choice = JSON.parse(await js(CHOOSE_TOOLTIP_TARGET));
+        assert(
+          choice.chosen !== null,
+          `the player page must expose a tooltip trigger a pointer can reach${
+            choice.blocked?.length ? ` (blocked: ${choice.blocked.join("; ")})` : ""
+          }`,
+        );
+        // A REAL pointer transition, not a synthetic dispatchEvent: the page's listeners are on
+        // document, and a real mouse move is what a listener actually does.
+        await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: 4, y: 4 });
+        await cdp("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: choice.center.x,
+          y: choice.center.y,
+        });
+        await until(
+          `document.getElementById("appTooltip")?.classList.contains("visible") === true`,
+          "the tooltip to become visible after a real pointer move onto a [data-tooltip] trigger",
+          PLAYER_LOAD_WAIT_MS,
+        );
+        return JSON.parse(await js(READ_PLAYER_TOOLTIP)) as PlayerTooltipReading;
+      } finally {
+        await cdp("Page.removeScriptToEvaluateOnNewDocument", { identifier: added.identifier });
+      }
+    };
+
+    try {
+      // The module the browser runs must be the file this repo edits: read the URL out of the served
+      // page, fetch it over the same server, and compare with src/assets/listen.js on disk. Without
+      // this, the row could pin a copy (the shell's tooltip client) and stay green while the player
+      // module changed.
+      const html = await (await harness.fetch(new Request(page))).text();
+      const moduleSrc = /<script type="module" src="([^"]+)"/.exec(html)?.[1];
+      assert(
+        moduleSrc,
+        "the player page must load its client as a module script, or this row is not running the module",
+      );
+      const served = await (await fetch(`http://127.0.0.1:${port}${moduleSrc}`)).text();
+      assertEquals(
+        served,
+        await Deno.readTextFile("src/assets/listen.js"),
+        `the module the page loads (${moduleSrc}) must be src/assets/listen.js's own bytes - a row that pins a copy of the client cannot see the real one change`,
+      );
+
+      const readings = await withChrome(async (chrome) => {
+        const { cdp, js, until, close } = await connectCdp(chrome.port);
+        try {
+          await cdp("Page.enable");
+          await cdp("Emulation.setDeviceMetricsOverride", {
+            width: 1280,
+            height: 900,
+            deviceScaleFactor: 1,
+            mobile: false,
+          });
+          // The negative control FIRST: unless the stub reaches the module, the assertion below
+          // would pass because the fallback never ran at all - a row green for the wrong reason.
+          const fallback = await playerPass(cdp, js, until, false);
+          const anchor = await playerPass(cdp, js, until, true);
+          return { fallback, anchor };
+        } finally {
+          close();
+        }
+      });
+
+      const { fallback, anchor } = readings;
+
+      // The stub landed, and it landed before the module read it (both passes).
+      assertEquals(
+        fallback.stub,
+        false,
+        "the false stub must be in place before the page's own scripts run; the page never saw it",
+      );
+      assertEquals(
+        anchor.stub,
+        true,
+        "the true stub must be in place before the page's scripts run",
+      );
+      assertEquals(
+        fallback.inPageSupports,
+        false,
+        "the page must observe the stubbed engine answer",
+      );
+      assertEquals(anchor.inPageSupports, true, "the page must observe the stubbed engine answer");
+      assert(
+        fallback.episodeRows > 0 && anchor.episodeRows > 0,
+        `the player module must have evaluated on both passes (rows: ${fallback.episodeRows} / ${anchor.episodeRows})`,
+      );
+
+      // PASS 1 - an engine without anchor positioning: the fallback writes both inline coordinates.
+      assert(
+        fallback.inlineLeft !== "" && fallback.inlineTop !== "",
+        `an engine reporting no anchor positioning must take the getBoundingClientRect fallback and write inline left/top; it wrote left="${fallback.inlineLeft}" top="${fallback.inlineTop}" (trigger ${fallback.targetLabel}), so this harness never reached the fallback`,
+      );
+      assertEquals(
+        Math.round(parseFloat(fallback.inlineLeft)),
+        Math.round(fallback.targetRect.left),
+        `the fallback must place the tooltip at the trigger's left edge (wrote left="${fallback.inlineLeft}" for a trigger at ${fallback.targetRect.left})`,
+      );
+      assertEquals(
+        Math.round(parseFloat(fallback.inlineTop)),
+        Math.round(fallback.targetRect.bottom + 8),
+        `the fallback must place the tooltip 8px below the trigger (wrote top="${fallback.inlineTop}" for a trigger bottom of ${fallback.targetRect.bottom})`,
+      );
+
+      // PASS 2 - an engine that reports anchor positioning: the guard must keep the fallback out.
+      // This is the assertion the `if (true)` mutation breaks; nothing else in this file observes it.
+      assertEquals(
+        anchor.inlineLeft,
+        "",
+        `src/assets/listen.js's own guard must keep the fallback off the anchor path, but the player wrote inline left="${anchor.inlineLeft}" - the guard no longer governs the fallback`,
+      );
+      assertEquals(
+        anchor.inlineTop,
+        "",
+        `src/assets/listen.js's own guard must keep the fallback off the anchor path, but the player wrote inline top="${anchor.inlineTop}"`,
+      );
+      // "No inline style" must not be "no tooltip": the stylesheet's anchor rules still place it.
+      assertEquals(
+        anchor.tooltipVisible,
+        true,
+        "the tooltip must actually show on the anchor path, or the empty inline styles prove nothing",
+      );
+      const gapAbove = Math.abs((anchor.targetRect.top - 8) - anchor.tooltipRect.bottom) <= 1.5;
+      const gapBelow = Math.abs((anchor.targetRect.bottom + 8) - anchor.tooltipRect.top) <= 1.5;
+      assert(
+        gapAbove || gapBelow,
+        `on the anchor path the stylesheet must place the tooltip 8px from its trigger (trigger ${anchor.targetRect.top}-${anchor.targetRect.bottom}, tooltip ${anchor.tooltipRect.top}-${anchor.tooltipRect.bottom}) - the anchor rules did not place it`,
+      );
+      const startAligned = Math.abs(anchor.tooltipRect.left - anchor.targetRect.left) <= 1.5;
+      const endAligned = Math.abs(anchor.tooltipRect.right - anchor.targetRect.right) <= 1.5;
+      assert(
+        startAligned || endAligned,
+        `on the anchor path the tooltip must align with its trigger's start or end edge (trigger ${anchor.targetRect.left}-${anchor.targetRect.right}, tooltip ${anchor.tooltipRect.left}-${anchor.tooltipRect.right})`,
+      );
+      assert(
+        anchor.onScreen,
+        `the anchor-placed tooltip must stay inside the viewport (${
+          JSON.stringify(anchor.tooltipRect)
+        } in ${JSON.stringify(anchor.viewport)})`,
+      );
+    } finally {
+      await server.shutdown();
+    }
+  },
+});
