@@ -59,6 +59,14 @@ routes, listed separately because the attacker's position there is different.
     `/audio` precedent is approval-before-blob (audio-feed-7kdhb): the owner's approval is checked on
     the key that actually resolved, failing closed, BEFORE any blob read or cache spend, so a refusal
     cannot confirm blob existence (`src/routes/audio.ts:221-244`).
+  - The feed routes follow the same rule (audio-feed-vcpyi): an unknown token and a
+    known-but-unapproved owner answer the IDENTICAL 404 `{"error":"Unknown feed"}` with no status
+    detail, so holding a capability cannot confirm it or read the account's lifecycle out of a refusal
+    (`src/compose/feeds.ts:120-124`, `:166-169`).
+  - The served feed document carries no subscriber identity (audio-feed-zlu04): `ownerEmail` is never
+    populated from the account, so no `<itunes:owner><itunes:email>` is emitted. A capability URL is
+    pasted into third-party clients and directories, and an address published that way cannot be
+    recalled (`src/compose/feeds.ts:143-148`, `:186-187`).
   - The retry POST is a PAID mutation behind the weaker credential, walled three ways (audio-feed-8jzgl):
     a same-origin wall, two sliding windows (10/10 min per token+address, 30/10 min per token) and a
     durable lifetime ceiling of 5 retries per episode (`src/routes/listen.ts:882-901`).

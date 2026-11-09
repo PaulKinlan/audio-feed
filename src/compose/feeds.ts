@@ -15,7 +15,7 @@ import { resolveOrigin } from "../origin.ts";
 import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
 import { readCappedJson } from "../http.ts";
-import { approvedUserFor, forbidden, loadUserByFeedToken, notFound } from "./shared.ts";
+import { approvedUserFor, loadUserByFeedToken, notFound } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import type { ComposeDeps } from "./shared.ts";
 import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../types.ts";
@@ -107,15 +107,21 @@ function feedResponse(xml: string): Response {
  * deliberately ignored rather than rejected with 400 to preserve compatibility
  * with podcast aggregators and apps that append query parameters.
  *
- * Non-approved users get 403 even though the gate is about synthesis cost: their
- * feed would otherwise keep serving audio generated before a suspension.
+ * A non-approved owner is refused because their feed would otherwise keep serving
+ * audio generated before a suspension — but the refusal is the SAME 404 an unknown
+ * token gets (audio-feed-vcpyi). These routes are unauthenticated capability URLs,
+ * so anything that distinguishes "this token exists, and the account is pending"
+ * from "no such token" turns the path into an existence-and-status oracle, which is
+ * the policy `/listen` already follows (audio-feed-se8s8). The status string is not
+ * interpolated anywhere in the response: the body is byte-identical either way.
  */
 export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFeed"] {
   return async ({ params, req }) => {
     const token = params.token ?? "";
     const user = await loadUserByFeedToken(ctx, token);
-    if (!user) return notFound("Unknown feed");
-    if (user.status !== "approved") return forbidden(`Feed unavailable (status: ${user.status})`);
+    // One refusal for both halves: unknown token and non-approved owner answer the
+    // same response, so a caller holding a token learns nothing about the account.
+    if (!user || user.status !== "approved") return notFound("Unknown feed");
 
     // Per request, not per process: an unconfigured deployment used to emit
     // localhost enclosures that no podcast client could fetch (audio-feed-0k3).
@@ -134,7 +140,11 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
       link: baseUrl,
       description: "All subscribed audio-feed episodes: direct reads and deep dives.",
       author: user.displayName,
-      ownerEmail: user.email,
+      // No `ownerEmail`, deliberately (audio-feed-zlu04). This document is a
+      // capability handed to third-party podcast clients and directories, so an
+      // `<itunes:owner><itunes:email>` built from `user.email` published the
+      // subscriber's account address outside deployment control. The generator
+      // still supports the field; these routes must never fill it from the account.
       language: "en",
       categories: ["News", "Technology"],
     };
@@ -155,8 +165,8 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
   return async ({ params, req }) => {
     const token = params.token ?? "";
     const user = await loadUserByFeedToken(ctx, token);
-    if (!user) return notFound("Unknown feed");
-    if (user.status !== "approved") return forbidden(`Feed unavailable (status: ${user.status})`);
+    // Same uniform refusal as the master feed (audio-feed-vcpyi).
+    if (!user || user.status !== "approved") return notFound("Unknown feed");
 
     const sourceId = params.sourceId ?? "";
     const mode: AudioMode = params.mode === "deepdive" ? "deepdive" : "direct";
@@ -173,7 +183,7 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
       link: source.siteUrl ?? baseUrl,
       description: `${modeLabel} audio of ${source.title} articles.`,
       author: source.title,
-      ownerEmail: user.email,
+      // No `ownerEmail` here either — see the master feed above (audio-feed-zlu04).
       language: "en",
       categories: ["News", "Technology"],
     };
