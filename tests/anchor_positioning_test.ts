@@ -16,18 +16,46 @@ import { renderAccountPage } from "../src/routes/account.ts";
 import { renderHomePage } from "../src/routes/home.ts";
 import { renderShell, TOOLTIP_CLIENT, TOOLTIP_HTML } from "../src/routes/shell.ts";
 import { assetUrl, handleAsset } from "../src/routes/assets.ts";
+import { DESIGN_TOKENS } from "../src/routes/tokens.ts";
 import type { RouteContext } from "../src/router.ts";
 import { shippedCss } from "./admin_css.ts";
 import { withChrome } from "../scripts/proof-helper.ts";
 import { connectCdp } from "../scripts/proof-cdp.ts";
 
-async function getListenCss(): Promise<string> {
-  const url = assetUrl("listen.css");
+/**
+ * A stylesheet read by the NAME a row makes a claim about, with the source it came from (audio-feed-97mfn).
+ *
+ * Why the identity assertion: `shippedCss(renderAdminPage(...))` returns the admin page's inline
+ * SHELL_CSS *plus* every linked asset, so a row titled "admin stylesheet" was satisfied by the shell's
+ * copy of the same rules. Deleting both position-try-fallbacks declarations from src/assets/admin.css
+ * left every row green - the claim lived in the row's name, not in its assertion. A row that names a
+ * stylesheet now reads that stylesheet: the bytes the server serves for `name` must END WITH that
+ * file's own bytes on disk (equality for the verbatim assets; the documented DESIGN_TOKENS prefix for
+ * listen.css), so the CSS under test cannot be another stylesheet that happens to carry the same text.
+ * The page-level claim - what the browser actually gets - stays its own row.
+ */
+async function namedStylesheet(
+  name: string,
+): Promise<{ name: string; source: string; css: string }> {
+  const url = assetUrl(name);
   const fileName = url.replace("/assets/", "");
   const res = handleAsset(
     { params: { name: fileName } } as unknown as RouteContext<unknown>,
   );
-  return await res.text();
+  const css = await res.text();
+  // The URL is /assets/<hash>.<name>; the file on disk is src/assets/<name>, without the hash.
+  const source = `src/assets/${name}`;
+  const onDisk = await Deno.readTextFile(source);
+  assertEquals(
+    css.slice(css.length - onDisk.length),
+    onDisk,
+    `${name}: the CSS under test must be ${source}'s own bytes - a row that names a stylesheet cannot be satisfied by a different stylesheet's copy of the same rules`,
+  );
+  return { name, source, css };
+}
+
+async function getListenCss(): Promise<string> {
+  return (await namedStylesheet("listen.css")).css;
 }
 
 Deno.test("anchor-positioning: player stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", async () => {
@@ -45,13 +73,12 @@ Deno.test("anchor-positioning: player stylesheet delivers anchor-positioning rul
   assert(css.includes("flip-inline"));
 });
 
-Deno.test("anchor-positioning: admin stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", () => {
-  const adminHtml = renderAdminPage({
-    nonce: "test-nonce",
-    publicBaseUrl: "https://example.com",
-    adminConfigured: true,
-  });
-  const adminCss = shippedCss(adminHtml);
+Deno.test("anchor-positioning: admin stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", async () => {
+  // src/assets/admin.css, not the admin PAGE: the two are different claims and need different rows
+  // (audio-feed-97mfn). shippedCss() answers "what reaches the browser" and the shell's inline copy
+  // answers it even when admin.css has lost the rules, which is how this row stayed green through
+  // the deletion of both position-try-fallbacks declarations.
+  const { css: adminCss } = await namedStylesheet("admin.css");
   assert(adminCss.includes(".tooltip"));
   assert(adminCss.includes(".tooltip.visible"));
   assert(adminCss.includes("pointer-events: auto"));
@@ -61,6 +88,25 @@ Deno.test("anchor-positioning: admin stylesheet delivers anchor-positioning rule
   assert(adminCss.includes("top: anchor(bottom)"));
   assert(adminCss.includes("position-try-fallbacks: flip-block"));
   assert(adminCss.includes("flip-inline"));
+});
+
+Deno.test("anchor-positioning: the admin page delivers anchor-positioning rules to the browser from among its stylesheets (audio-feed-97mfn)", () => {
+  // The PAGE-level claim audio-feed-3xq part 3 asked for, kept as its own row so it cannot stand in
+  // for a per-stylesheet one: it says the admin console's page ships these rules SOMEWHERE, which the
+  // inline SHELL_CSS copy alone satisfies. It deliberately does not say which stylesheet carries them -
+  // that is the row above, reading src/assets/admin.css.
+  const adminHtml = renderAdminPage({
+    nonce: "test-nonce",
+    publicBaseUrl: "https://example.com",
+    adminConfigured: true,
+  });
+  const delivered = shippedCss(adminHtml);
+  assert(delivered.includes(".tooltip"));
+  assert(delivered.includes("@supports (anchor-name: --tooltip-anchor)"));
+  assert(delivered.includes("position-anchor: --tooltip-anchor"));
+  assert(delivered.includes("position-area: bottom span-right"));
+  assert(delivered.includes("position-try-fallbacks: flip-block"));
+  assert(delivered.includes("flip-inline"));
 });
 
 Deno.test("anchor-positioning: shell stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", () => {
@@ -87,14 +133,10 @@ Deno.test("anchor-positioning: conservative position-try-fallbacks declaration p
   const conservative = "position-try-fallbacks: flip-block;";
   const full = "position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;";
   const homes: Record<string, string> = {
-    "listen.css": await getListenCss(),
-    "admin.css": shippedCss(
-      renderAdminPage({
-        nonce: "test-nonce",
-        publicBaseUrl: "https://example.com",
-        adminConfigured: true,
-      }),
-    ),
+    "listen.css": (await namedStylesheet("listen.css")).css,
+    // The stylesheet, not the rendered page: the page's inline SHELL_CSS carries the same two
+    // declarations, so reading the page could not tell these homes apart (audio-feed-97mfn).
+    "admin.css": (await namedStylesheet("admin.css")).css,
     "shell.ts": renderShell({ nonce: "test-nonce", title: "Shell", viewer: null, main: "" }),
   };
   for (const [home, css] of Object.entries(homes)) {
@@ -1186,5 +1228,265 @@ Deno.test({
         await Deno.remove(profileDir, { recursive: true }).catch(() => {});
       }
     }
+  },
+});
+
+/**
+ * Dump a harness page's #results JSON from a throwaway headless Chrome (audio-feed-97mfn).
+ *
+ * The two rows below each run the SAME page twice - as shipped, and with the flip tactics removed -
+ * so they share one launcher instead of a fifth and sixth copy of the launch/teardown boilerplate.
+ * A profile per launch, as everywhere in this file (audio-feed-e4udd).
+ */
+async function resultsOf<T>(html: string, windowSize = "1000,900"): Promise<T> {
+  const file = await Deno.makeTempFile({ suffix: ".html" });
+  const profileDir = await Deno.makeTempDir({ prefix: "anchor-positioning-chrome-" });
+  await Deno.writeTextFile(file, html);
+  try {
+    const output = await new Deno.Command("google-chrome-stable", {
+      args: [
+        "--headless=new",
+        "--disable-gpu",
+        `--user-data-dir=${profileDir}`,
+        "--allow-file-access-from-files",
+        `--window-size=${windowSize}`,
+        "--dump-dom",
+        `file://${file}`,
+      ],
+    }).output();
+    assertEquals(output.code, 0);
+    const dom = new TextDecoder().decode(output.stdout);
+    const match = dom.match(/<div id="results">(.*?)<\/div>/);
+    assert(match && match[1], "#results must be present");
+    return JSON.parse(match[1].replace(/&quot;/g, '"')) as T;
+  } finally {
+    await Deno.remove(file).catch(() => {});
+    await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+  }
+}
+
+interface PlacementReading {
+  tipTop: number;
+  tipBottom: number;
+  tipLeft: number;
+  tipRight: number;
+  below: boolean;
+  above: boolean;
+  alignStart: boolean;
+  alignEnd: boolean;
+  onScreen: boolean;
+  overflowRight: boolean;
+  overflowBottom: boolean;
+}
+
+interface FlipReading {
+  vw: number;
+  vh: number;
+  supports: boolean;
+  rec: { bottom: PlacementReading; corner: PlacementReading };
+}
+
+/**
+ * A page whose ONLY stylesheet is the one under test, plus the design tokens the shell supplies
+ * (audio-feed-97mfn). admin.css is served verbatim and resolves against the shell's tokens, so the
+ * tokens come along; no other stylesheet does, which is the point - a page-level concat could not tell
+ * these rows which rules came from where.
+ *
+ * The two triggers sit AT the viewport edges by measurement, not by guesswork: `#bottom` at
+ * 100vh - 33px and `#corner` at 100vw - 120px, so whatever the window size the tooltip has no room
+ * below and (for the corner) none to the right.
+ */
+const flipHarness = (css: string) =>
+  `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; font: 14px system-ui; }
+  .btn { position: absolute; width: 100px; height: 36px; }
+  #bottom { top: calc(100vh - 33px); left: 220px; }
+  #corner { top: calc(100vh - 33px); left: calc(100vw - 120px); }
+  ${DESIGN_TOKENS}
+  ${css}
+</style></head><body>
+  <button id="bottom" class="btn" data-tooltip="Bottom edge action">bottom</button>
+  <button id="corner" class="btn" data-tooltip="Revoke old URL and generate new feed token">corner</button>
+  <div id="results"></div>
+  ${TOOLTIP_HTML}
+  <script>
+    ${TOOLTIP_CLIENT}
+    const tip = document.getElementById("appTooltip");
+    const out = document.getElementById("results");
+    const rec = {};
+    for (const id of ["bottom", "corner"]) {
+      const btn = document.getElementById(id);
+      btn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+      const tr = tip.getBoundingClientRect();
+      const br = btn.getBoundingClientRect();
+      rec[id] = {
+        tipTop: tr.top, tipBottom: tr.bottom, tipLeft: tr.left, tipRight: tr.right,
+        below: Math.abs(tr.top - (br.bottom + 8)) <= 1,
+        above: Math.abs(tr.bottom - (br.top - 8)) <= 1,
+        alignStart: Math.abs(tr.left - br.left) <= 1,
+        alignEnd: Math.abs(tr.right - br.right) <= 1,
+        onScreen: tr.top >= 0 && tr.left >= 0 &&
+          tr.bottom <= window.innerHeight && tr.right <= window.innerWidth,
+        overflowRight: tr.right > window.innerWidth,
+        overflowBottom: tr.bottom > window.innerHeight
+      };
+      btn.dispatchEvent(new PointerEvent("pointerout", { bubbles: true }));
+    }
+    out.textContent = JSON.stringify({
+      vw: window.innerWidth, vh: window.innerHeight,
+      supports: CSS.supports("anchor-name", "--a"), rec
+    });
+  </script></body></html>`;
+
+Deno.test({
+  name:
+    "anchor-positioning: the flip tactics in admin.css are what keep a bottom-right tooltip on-screen (audio-feed-97mfn)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // GEOMETRY, not the declaration's text (audio-feed-97mfn). position-try-fallbacks is only worth
+    // its bytes because of where it puts the tooltip, so this row measures where the tooltip lands:
+    // a bottom-right trigger has no room below or to the right, so with the tactics shipped the
+    // tooltip must flip above its trigger, end-align, and stay inside the viewport.
+    //
+    // The second pass is the sensitivity check the first pass needs: the SAME file bytes with every
+    // position-try-fallbacks declaration deleted must lose that placement and leave the viewport.
+    // Without it, "the tooltip is on-screen" could be green for a reason other than the tactics -
+    // exactly the failure this row exists to close. Delete the declarations from src/assets/admin.css
+    // and the shipped pass measures the stripped pass: it clips, and this row reds.
+    const { css, source } = await namedStylesheet("admin.css");
+    const withoutTactics = css.replace(
+      /^[ \t]*position-try-fallbacks:[^;]*;[ \t]*$/gm,
+      "",
+    );
+
+    const shipped = await resultsOf<FlipReading>(flipHarness(css));
+    const stripped = await resultsOf<FlipReading>(flipHarness(withoutTactics));
+
+    assertEquals(shipped.supports, true, "this row needs an engine with anchor positioning");
+    assertEquals(
+      shipped.rec.corner.above,
+      true,
+      `${source}: the corner tooltip must flip ABOVE its trigger - it stayed below (top=${shipped.rec.corner.tipTop}, viewport ${shipped.vw}x${shipped.vh})`,
+    );
+    assertEquals(
+      shipped.rec.corner.alignEnd,
+      true,
+      `${source}: the corner tooltip must flip inline to end-align with its trigger - it ran past the right edge (right=${shipped.rec.corner.tipRight})`,
+    );
+    assert(
+      shipped.rec.corner.onScreen,
+      `${source}: the corner tooltip must stay inside the viewport (top=${shipped.rec.corner.tipTop}, right=${shipped.rec.corner.tipRight}, viewport ${shipped.vw}x${shipped.vh})`,
+    );
+    assertEquals(
+      shipped.rec.bottom.above,
+      true,
+      `${source}: the bottom-edge tooltip must flip above its trigger`,
+    );
+    assert(
+      shipped.rec.bottom.onScreen,
+      `${source}: the bottom-edge tooltip must stay inside the viewport`,
+    );
+
+    // The removed-tactics pass: same bytes, no fallbacks, off the relation AND off the screen.
+    assert(
+      withoutTactics !== css,
+      `${source} carries no position-try-fallbacks declaration to remove, so the second pass here would re-measure the first and prove nothing`,
+    );
+    assertEquals(
+      stripped.rec.corner.overflowRight || stripped.rec.corner.overflowBottom,
+      true,
+      `${source}: with the flip tactics removed the corner tooltip is expected to leave the viewport - if it does not, this row no longer pins what the declarations do`,
+    );
+    assertEquals(
+      stripped.rec.corner.onScreen,
+      false,
+      `${source}: with the flip tactics removed the corner tooltip is expected to clip`,
+    );
+  },
+});
+
+interface GuardReading {
+  inlineLeft: string;
+  inlineTop: string;
+  below: boolean;
+  alignStart: boolean;
+}
+
+/**
+ * The shared shell client on a page that lies about engine support (audio-feed-97mfn).
+ *
+ * `CSS.supports` is read once, at load, so the stub is installed in its own script BEFORE the client.
+ */
+const guardHarness = (supports: boolean, css: string) =>
+  `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  body { margin: 0; font: 14px system-ui; }
+  #mid { position: absolute; top: 200px; left: 220px; width: 120px; height: 36px; }
+  ${DESIGN_TOKENS}
+  ${css}
+</style></head><body>
+  <button id="mid" data-tooltip="Download episode">mid</button>
+  <div id="results"></div>
+  ${TOOLTIP_HTML}
+  <script>CSS.supports = () => ${supports};</script>
+  <script>
+    ${TOOLTIP_CLIENT}
+    const tip = document.getElementById("appTooltip");
+    const btn = document.getElementById("mid");
+    btn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    const tr = tip.getBoundingClientRect();
+    const br = btn.getBoundingClientRect();
+    document.getElementById("results").textContent = JSON.stringify({
+      inlineLeft: tip.style.left,
+      inlineTop: tip.style.top,
+      below: Math.abs(tr.top - (br.bottom + 8)) <= 1,
+      alignStart: Math.abs(tr.left - br.left) <= 1
+    });
+  </script></body></html>`;
+
+Deno.test({
+  name:
+    "anchor-positioning: on an engine that reports anchor positioning the tooltip client writes no inline left/top (audio-feed-97mfn)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // The guard's PRESENCE in source text was all that was pinned before this row: replacing
+    // `if (!supportsAnchorPositioning)` with `if (true)` left every row green, even though it makes
+    // the getBoundingClientRect fallback overwrite the anchor rules on every engine (audio-feed-97mfn).
+    // So this row observes the guard's EFFECT - whether the fallback ran - by reading the inline
+    // styles it is the only thing that writes, on the same page with the engine reporting either way.
+    const { css } = await namedStylesheet("admin.css");
+
+    const fallback = await resultsOf<GuardReading>(guardHarness(false, css));
+    const anchor = await resultsOf<GuardReading>(guardHarness(true, css));
+
+    // The negative control comes first: unless the stub reaches the client, the assertion below
+    // would pass because nothing ran at all - a row green for the wrong reason.
+    assert(
+      fallback.inlineLeft !== "" && fallback.inlineTop !== "",
+      `forcing CSS.supports to false must make the client write inline left/top; it wrote left="${fallback.inlineLeft}" top="${fallback.inlineTop}", so this harness never reached the fallback`,
+    );
+
+    assertEquals(
+      anchor.inlineLeft,
+      "",
+      `an engine reporting anchor positioning must not take the fallback path, but the client wrote inline left="${anchor.inlineLeft}" - the fallback guard no longer governs the fallback`,
+    );
+    assertEquals(
+      anchor.inlineTop,
+      "",
+      `an engine reporting anchor positioning must not take the fallback path, but the client wrote inline top="${anchor.inlineTop}"`,
+    );
+    // "No inline style" must not be "no tooltip": the anchor rules still have to place it.
+    assertEquals(
+      anchor.below,
+      true,
+      "on the anchor path the tooltip must sit 8px below its trigger",
+    );
+    assertEquals(
+      anchor.alignStart,
+      true,
+      "on the anchor path the tooltip must align with its trigger's start edge",
+    );
   },
 });
