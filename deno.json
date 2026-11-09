@@ -45,6 +45,7 @@
     "inventory": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/legacy-audio-inventory.ts",
     "migrate-legacy-audio": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
     "migrate:audio-keys": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
+    "threat-model:history": "deno run --allow-read --allow-run=git,bd --allow-env scripts/threat-model-history.ts",
     // audio-feed-pnw73: `deno test --no-check` is deliberate and sound ONLY here, because the
     // `deno check main.ts src tests scripts` immediately to its left type-checks the same tree over
     // the same roots first. Doing it twice cost ~5-7% of the whole gate (measured: 201.4s/259.8s
