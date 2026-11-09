@@ -48,7 +48,7 @@ import {
   withChrome,
   writeScratchFile,
 } from "./proof-helper.ts";
-import { withHangBound } from "./proof-cdp.ts";
+import { connectCdp, MEASURED_STARVED_POLL_MS, withHangBound } from "./proof-cdp.ts";
 
 const ADMIN_TOKEN = "harness-admin";
 const PER_TYPE_DEADLINE_MS = 240_000; // synthesis of a small document, generously bounded
@@ -249,68 +249,28 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       chromeProcess = chrome.process;
       profileDir = chrome.profileDir;
 
-      let nextId = 0;
-      const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
-      const page = targets.find((t: { type: string }) => t.type === "page");
-      const ws = new WebSocket(page.webSocketDebuggerUrl);
-      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-      ws.addEventListener("message", (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)!(msg);
-          pending.delete(msg.id);
-        }
-      });
-
-      // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
-        const id = ++nextId;
-        ws.send(JSON.stringify({ id, method, params }));
-        // EVERY CDP call is bounded and named. A call issued while the page navigates (the sign-in
-        // redirect destroys the execution context) can be dropped by the browser, and an unbounded
-        // wait for its reply hangs the whole proof until the outer bound kills it - which reports
-        // nothing. Bounding per call turns that into "ProofTimeout: Runtime.evaluate".
-        const msg = await withDeadline(
-          method,
-          20_000,
-          () => new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r)),
-        );
-        if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-        return msg.result;
-      }
-      // deno-lint-ignore no-explicit-any
-      async function js(expression: string): Promise<any> {
-        const r = await cdp("Runtime.evaluate", {
-          expression,
-          awaitPromise: true,
-          returnByValue: true,
-          userGesture: true,
-        });
-        if (r.exceptionDetails) {
-          throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
-        }
-        return r.result?.value;
-      }
       /**
-       * This host has MEASURED a bare `readyState === "complete"` evaluate legitimately exceeding 8s under
-       * eight-way CPU saturation (audio-feed-6gst1). That measured starved floor is the unit.
-       *
-       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
-       * bound: a page whose main thread never answers still fails, in two minutes rather
-       * than hanging until something outside the proof kills the lane - and it fails with a
-       * message naming what was asked and the budget it had.
+       * audio-feed-7xlrw: this proof no longer carries a private CDP client or a private
+       * `until()`. The deleted copy's reply wait was a bare `await new Promise` on its own
+       * pending map, bounded per call by this file's 20s `withDeadline`; its poll armed a
+       * FRESH full hang bound on every iteration rather than the budget left in the wait it
+       * was serving. connectCdp() races every evaluate against the derived HANG_BOUND_MS and
+       * bounds each poll by what is LEFT of that wait; each raw command here keeps this
+       * file's own 20s per-reply deadline explicitly, because that number is what turns a
+       * reply the browser drops mid-navigation (the sign-in redirect destroys the execution
+       * context) into a named "ProofTimeout", and this sweep moves the bound's SOURCE, not
+       * the budget. Evaluates inherit the shared `js()` bound instead of the 20s reply
+       * deadline: outside a poll that is a wider ceiling before the same named failure, and
+       * inside a poll the until() budget is what binds.
        */
-      const MEASURED_STARVED_POLL_MS = 8_000;
+      const CDP_REPLY_HANG_BOUND_MS = 20_000;
+      const { cdp: rawCdp, js, until } = await connectCdp({ port: chrome.port });
+      // deno-lint-ignore no-explicit-any
+      const cdp = (method: string, params: Record<string, unknown> = {}): Promise<any> =>
+        withHangBound(method, rawCdp(method, params), CDP_REPLY_HANG_BOUND_MS);
+
+      /** 120s = 15 x the 8s starved-poll floor MEASURED on this host (audio-feed-6gst1). */
       const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
-      async function until(expr: string, desc: string, timeoutMs = 15_000) {
-        const t0 = Date.now();
-        while (Date.now() - t0 < timeoutMs) {
-          if (await withHangBound(js(expr), desc)) return;
-          await sleep(100);
-        }
-        throw new Error(`ProofTimeout: ${desc}`);
-      }
       async function go(path: string) {
         await cdp("Page.navigate", { url: `${BASE}${path}` });
         await until(
