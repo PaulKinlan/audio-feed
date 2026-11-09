@@ -12,9 +12,16 @@
  * the host station's contract (agents/threat-model/SKILL.md, scripts/mine_history.py:987-1005):
  * 1. Mines recent git commits touching `src/`, identifying security-relevant, auth, and bug-fix commits.
  * 2. Mines beads records from `bd export --all`, extracting closed bugs and security issues.
- * 3. Emits structured JSON strictly following the host's snake_case schema (`git_fixes_count`,
- *    `git_security_fixes` capped at 25, `beads_bugs_count`, `beads_bugs` capped at 25)
- *    or formatted markdown ready for LLM context or operator verification.
+ * 3. Sanitizes untrusted text and wraps vulnerable fields in unpredictable random-nonce delimiter fences
+ *    via wrapUntrusted (matching host wrap_untrusted in mine_history.py:268-271):
+ *      - subject: max 100
+ *      - title: max 100
+ *      - close_reason: max 80 (or null if absent)
+ *      - summary_snippet: max 150
+ *    Sanitizes non-wrapped fields (files max 100, id max 40, issue_type max 30, status max 30).
+ * 4. Emits structured JSON strictly following the host's snake_case schema (`evidence_nonce` matching
+ *    host mine_history.py:992, `git_fixes_count`, `git_security_fixes` capped at 25,
+ *    `beads_bugs_count`, `beads_bugs` capped at 25) or formatted markdown ready for LLM context.
  */
 
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
@@ -68,10 +75,101 @@ export interface BeadsBugRecord {
 
 export interface ThreatModelHistoryChannel {
   target: string;
+  evidence_nonce: string;
   git_fixes_count: number;
   git_security_fixes: GitCommitRecord[];
   beads_bugs_count: number;
   beads_bugs: BeadsBugRecord[];
+}
+
+// Chat-template markers, instruction injection tags, and role headers (including tool-call tokens)
+// Replicates CHAT_TEMPLATE_PATTERN from agents/threat-model/scripts/mine_history.py:175-186
+export const CHAT_TEMPLATE_PATTERN = new RegExp(
+  "<\\|(?:im_start|im_end|system|user|assistant|endoftext|end|begin_of_text|eot_id|start_of_turn|end_of_turn|tool_call|tool_calls|tool_response)[^|>]*\\|>" +
+    "|</?(?:start_of_turn|end_of_turn|tool_call|tool_calls)>" +
+    "|\\[/?(?:INST|AVAILABLE_TOOLS|TOOL_CALLS)\\]" +
+    "|<<?/?SYS>>?" +
+    "|</?s>" +
+    "|\\b(?:system|user|assistant|human|ai)\\s*:" +
+    "|###\\s*(?:system|instruction|human|assistant)\\s*:?",
+  "gim",
+);
+
+// Control characters: ANSI escapes and C0/C1 control codes.
+// Replicates CONTROL_CHARS_PATTERN from agents/threat-model/scripts/mine_history.py:195-198
+// deno-lint-ignore no-control-regex
+export const CONTROL_CHARS_PATTERN = new RegExp(
+  "\\x1b\\[[0-9;]*[a-zA-Z]|\\x1b\\].*?\\x07|[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\x9f]",
+  "g",
+);
+
+/** Generates an unpredictable, cryptographically secure 128-bit hex nonce (mine_history.py:217-219). */
+export function generateNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Sanitizes untrusted text matching host sanitize_untrusted_text in mine_history.py:222-265:
+ * 1. Strips ANSI escapes and C0/C1 controls.
+ * 2. Strips all Unicode category Cf (format) characters across Unicode space.
+ * 3. Applies Unicode NFKC normalization.
+ * 4. Neutralizes chat-template sequences and instruction framing markers.
+ * 5. Strips backticks (` -> ').
+ * 6. Redacts active nonce to prevent delimiter spoofing.
+ * 7. Flattens whitespace and newlines.
+ * 8. Enforces per-field length cap.
+ */
+export function sanitizeUntrustedText(
+  text: unknown,
+  maxLength = 120,
+  nonce?: string | null,
+): string {
+  if (text == null) {
+    return "";
+  }
+  let str = typeof text === "string" ? text : String(text);
+
+  // 1. Strip ANSI escapes and C0/C1 control codes
+  str = str.replace(CONTROL_CHARS_PATTERN, "");
+
+  // 2. Strip all Unicode category Cf (format) characters across the entire Unicode space
+  str = str.replace(/\p{Cf}/gu, "");
+
+  // 3. Unicode NFKC normalization to fold fullwidth/homoglyph characters
+  str = str.normalize("NFKC");
+
+  // 4. Neutralize chat-template sequences and instruction framing markers
+  str = str.replace(CHAT_TEMPLATE_PATTERN, "[neutralized]");
+
+  // 5. Strip backticks and fence markers so content cannot break out of fenced blocks
+  str = str.replaceAll("`", "'");
+
+  // 6. If a nonce is active, neutralize any occurrence to prevent delimiter spoofing
+  if (nonce) {
+    str = str.replaceAll(nonce, "[nonce-redacted]");
+  }
+
+  // 7. Flatten excessive whitespace and newlines
+  str = str.replace(/\s+/g, " ").trim();
+
+  // 8. Enforce per-field length cap so no field can carry a coherent instruction
+  return str.slice(0, maxLength).trim();
+}
+
+/**
+ * Wraps untrusted target text in unpredictable nonce-fenced delimiters after sanitization.
+ * EXACT replica of wrap_untrusted from agents/threat-model/scripts/mine_history.py:268-271:
+ * ```{nonce}-untrusted-evidence\n{cleaned}\n```{nonce}
+ */
+export function wrapUntrusted(
+  text: unknown,
+  nonce: string,
+  maxLength = 120,
+): string {
+  const cleaned = sanitizeUntrustedText(text, maxLength, nonce);
+  return `\`\`\`${nonce}-untrusted-evidence\n${cleaned}\n\`\`\`${nonce}`;
 }
 
 export function isSecurityText(text: string): boolean {
@@ -83,9 +181,11 @@ export function isSecurityText(text: string): boolean {
 export async function mineGitCommits(options?: {
   repoRoot?: string;
   limit?: number;
+  nonce?: string;
 }): Promise<GitCommitRecord[]> {
   const root = options?.repoRoot ?? Deno.cwd();
   const limit = options?.limit ?? 40;
+  const activeNonce = options?.nonce ?? generateNonce();
 
   try {
     const gitLogCmd = new Deno.Command("git", {
@@ -145,7 +245,7 @@ export async function mineGitCommits(options?: {
         stderr: "piped",
       });
       const filesOut = await filesCmd.output();
-      const files = filesOut.success
+      const rawFiles = filesOut.success
         ? new TextDecoder()
           .decode(filesOut.stdout)
           .trim()
@@ -153,12 +253,13 @@ export async function mineGitCommits(options?: {
           .filter(Boolean)
           .slice(0, 8)
         : [];
+      const files = rawFiles.map((f) => sanitizeUntrustedText(f, 100, activeNonce));
 
       records.push({
         id: `commit-${shortHash}`,
         hash: shortHash,
         date: date.slice(0, 10),
-        subject,
+        subject: wrapUntrusted(subject, activeNonce, 100),
         files,
       });
 
@@ -176,9 +277,11 @@ export async function mineGitCommits(options?: {
 export async function mineBeadsRecords(options?: {
   repoRoot?: string;
   limit?: number;
+  nonce?: string;
 }): Promise<BeadsBugRecord[]> {
   const root = options?.repoRoot ?? Deno.cwd();
   const limit = options?.limit ?? 30;
+  const activeNonce = options?.nonce ?? generateNonce();
 
   try {
     const bdCmd = new Deno.Command("bd", {
@@ -232,12 +335,18 @@ export async function mineBeadsRecords(options?: {
       if (!isBug && !isSec) continue;
 
       matched.push({
-        id: issue.id,
-        title,
-        issue_type: issueType,
-        status,
-        close_reason: issue.close_reason ?? null,
-        summary_snippet: description.slice(0, 150).trim(),
+        id: sanitizeUntrustedText(issue.id, 40, activeNonce),
+        title: wrapUntrusted(title, activeNonce, 100),
+        issue_type: sanitizeUntrustedText(issueType, 30, activeNonce),
+        status: sanitizeUntrustedText(status, 30, activeNonce),
+        close_reason: issue.close_reason
+          ? wrapUntrusted(issue.close_reason, activeNonce, 80)
+          : null,
+        summary_snippet: wrapUntrusted(
+          description.slice(0, 150),
+          activeNonce,
+          150,
+        ),
       });
 
       if (matched.length >= limit) break;
@@ -254,17 +363,20 @@ export async function mineBeadsRecords(options?: {
 export async function generateHistoryChannel(options?: {
   repoRoot?: string;
   limit?: number;
+  nonce?: string;
 }): Promise<ThreatModelHistoryChannel> {
   const root = options?.repoRoot ?? Deno.cwd();
   const limit = options?.limit ?? 40;
+  const nonce = options?.nonce ?? generateNonce();
 
   const [gitCommits, beadsRecords] = await Promise.all([
-    mineGitCommits({ repoRoot: root, limit }),
-    mineBeadsRecords({ repoRoot: root, limit }),
+    mineGitCommits({ repoRoot: root, limit, nonce }),
+    mineBeadsRecords({ repoRoot: root, limit, nonce }),
   ]);
 
   return {
     target: "audio-feed",
+    evidence_nonce: nonce,
     git_fixes_count: gitCommits.length,
     git_security_fixes: gitCommits.slice(0, 25),
     beads_bugs_count: beadsRecords.length,
@@ -277,6 +389,7 @@ export function formatMarkdown(channel: ThreatModelHistoryChannel): string {
   const lines: string[] = [];
 
   lines.push(`# Threat Model History Channel: ${channel.target}`);
+  lines.push(`Evidence Nonce: ${channel.evidence_nonce}`);
   lines.push(`Git security/bug-fix commits touching src/: ${channel.git_fixes_count}`);
   lines.push(`Beads closed bug/security records: ${channel.beads_bugs_count}`);
   lines.push("");
@@ -323,7 +436,7 @@ export function formatJson(channel: ThreatModelHistoryChannel): string {
 if (import.meta.main) {
   const flags = parseArgs(Deno.args, {
     boolean: ["json", "help"],
-    string: ["limit", "export-beads-jsonl", "dir"],
+    string: ["limit", "export-beads-jsonl", "dir", "nonce"],
     alias: { h: "help", j: "json", l: "limit" },
   });
 
@@ -336,6 +449,7 @@ Usage:
 Flags:
   --json, -j                  Output structured JSON matching factory threat-model contract
   --limit <n>, -l <n>         Maximum records per category (default: 40 git, 30 beads, capped at 25)
+  --nonce <hex>               Explicit 128-bit hex nonce for untrusted evidence delimiters
   --export-beads-jsonl <path> Export issues.jsonl to specified path for host miner consumption
   --dir <path>                Target directory root (default: current working directory)
   --help, -h                  Show this help message
@@ -346,7 +460,11 @@ Flags:
   const root = resolve(flags.dir ?? Deno.cwd());
   const limit = flags.limit ? parseInt(flags.limit, 10) : undefined;
 
-  const channel = await generateHistoryChannel({ repoRoot: root, limit });
+  const channel = await generateHistoryChannel({
+    repoRoot: root,
+    limit,
+    nonce: flags.nonce,
+  });
 
   if (flags["export-beads-jsonl"]) {
     const exportPath = resolve(flags["export-beads-jsonl"]);
