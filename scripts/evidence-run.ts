@@ -104,9 +104,10 @@
  *    attest reproducibility: a re-capture whose non-volatile content changed is a named incident
  *    (`RECORD DERIVED CHANGED`). A missing field still changes it (the sentinel is a value, not a
  *    deletion), and the list is versioned so widening it is a visible format change, never a silent
- *    loosening. `canonicalVersion: 1` accompanies the map; records written before it (every
- *    committed record today) carry no canonical map and get no canonical rule, which is why this
- *    addition cannot red an existing record.
+ *    loosening. `canonicalVersion` accompanies the map and names the list that produced it (2 at
+ *    this commit: the first list plus `measuredAt`/`timestamp`); records written before the field
+ *    existed carry no canonical map and get no canonical rule, which is why this addition cannot
+ *    red an existing record.
  *
  * The wall clock stays IN the artefact - an artefact that says when it was captured is useful - it is
  * simply outside the hashed region's volatile-free projection, and run.json's own startedAt/endedAt
@@ -620,6 +621,14 @@ const RECORD_EXCLUDED = new Set(["README.md", RECORD_FILE]);
  *  - `finishedAtMs` - the same wall clock as `finishedAt`, in epoch milliseconds (0cmu).
  *  - `elapsedMs` - how long the recorded run took, which moves with machine load and is a timing
  *    fact about the run, never an assertion about the system under test.
+ *  - `measuredAt` - the same wall clock under the name six committed artefacts use (b6nr and m182
+ *    before.json + repro.json, 8u4x1 attempts.json, 0rmn repro.json). Matching is by KEY NAME, not
+ *    by path, and 0rmn's `beforeFix.measuredAt` happens to hold a commit marker instead of a clock:
+ *    that ONE nested value loses its derived rule (the raw digest still covers it). That is the
+ *    standing cost of a name-based list and it is stated here rather than discovered later.
+ *  - `timestamp` - the same wall clock under the third name in use (9vns live-e2e-validation.json).
+ *    A generic name, deliberately: any field a proof names for the moment it was written is a fact
+ *    about the recording, never an assertion about what was recorded.
  *
  * The list is only ever allowed to make the canonical digest LESS sensitive to the clock, never to
  * content, because the raw `artefacts` digest is unchanged and stays the tamper rule. A field that
@@ -635,15 +644,25 @@ export const VOLATILE_ARTEFACT_FIELDS: Record<string, string> = {
   finishedAt: "wall clock stamp of the recorded run's finish; a timing fact, not an assertion",
   finishedAtMs: "the same wall clock as finishedAt, in epoch milliseconds",
   elapsedMs: "how long the recorded run took; moves with machine load, asserts nothing",
+  measuredAt:
+    "the wall clock under the name six committed artefacts already use; a re-run cannot reproduce it (0rmn's beforeFix.measuredAt holds a commit marker, not a clock: that one nested value loses its derived rule, the raw digest still covers it)",
+  timestamp:
+    "the same wall clock under the third name in use (9vns); any field a proof names for the moment it was written is a fact about the recording, not an assertion",
 };
 
 /** Stands in for every volatile value; substituting (not deleting) keeps key presence significant. */
 export const VOLATILE_SENTINEL = "<volatile>";
 
-/** Bump when VOLATILE_ARTEFACT_FIELDS changes, so a widening is a visible format change. */
-export const CANONICAL_PROJECTION_VERSION = 1;
+/**
+ * Bump when VOLATILE_ARTEFACT_FIELDS changes, so a widening is a visible format change.
+ *
+ * 1: capturedAt, ranAt, startedAt, endedAt, finishedAt, finishedAtMs, elapsedMs.
+ * 2: + measuredAt, timestamp (the two wall-clock names the review found in committed artefacts).
+ */
+export const CANONICAL_PROJECTION_VERSION = 2;
 
-function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+/** sha256 with the `sha256:` prefix every digest in a record uses. Shared with the determinism row. */
+export function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   return crypto.subtle.digest("SHA-256", bytes).then(
     (digest) =>
       `sha256:${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")}`,
@@ -708,8 +727,10 @@ function canonicalise(value: unknown): unknown {
  * sha256 of a JSON artefact's canonical projection (audio-feed-fufd0), or null for a file that is not
  * JSON or does not parse - a non-JSON artefact keeps its raw digest only rather than gaining a rule
  * that cannot be reasoned about. Stable across runs that differ only in VOLATILE_ARTEFACT_FIELDS.
+ * Exported so the determinism row compares a fresh artefact against the committed one by exactly the
+ * same projection the record uses, rather than a second copy of the rule that could drift from it.
  */
-async function canonicalDigest(
+export async function canonicalDigest(
   name: string,
   bytes: Uint8Array<ArrayBuffer>,
 ): Promise<string | null> {
