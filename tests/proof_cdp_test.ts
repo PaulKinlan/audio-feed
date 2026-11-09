@@ -558,10 +558,25 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       // `Runtime.evaluate` with no timeout and no race, so a main thread that never answered had
       // no ceiling. Source-pinned, because the wiring is the property - the behaviour it buys is
       // rows 10, 11 and 13 above, and those test the shared helper the swept files now call.
-      for (const swept of ["bootstrap-browser-proof.ts", "bootstrap-refusal-browser-proof.ts"]) {
-        const sweptSource = await Deno.readTextFile(
-          new URL(`../scripts/${swept}`, import.meta.url),
-        );
+      // The paths are LITERAL, one read per swept file: a template-built path here derived a
+      // directory relation on `scripts/`, which widened the fast gate's selection for every script
+      // change (pinned by tests/fast_gate_subset_test.ts, and it said so by name on the first run
+      // of this gate). Two literal reads name exactly the two files this row is about.
+      const sweptProofs: [string, string][] = [
+        [
+          "bootstrap-browser-proof.ts",
+          await Deno.readTextFile(
+            new URL("../scripts/bootstrap-browser-proof.ts", import.meta.url),
+          ),
+        ],
+        [
+          "bootstrap-refusal-browser-proof.ts",
+          await Deno.readTextFile(
+            new URL("../scripts/bootstrap-refusal-browser-proof.ts", import.meta.url),
+          ),
+        ],
+      ];
+      for (const [swept, sweptSource] of sweptProofs) {
         assertStringIncludes(sweptSource, "connectCdp(chrome.port)");
         assert(
           !sweptSource.includes("async function js(") &&
