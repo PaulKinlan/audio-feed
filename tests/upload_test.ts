@@ -748,6 +748,28 @@ Deno.test("POST /api/upload rejects extracted text > 192,000 bytes with 413 nami
   assertEquals(data.file, "encyclopedia.txt");
 });
 
+Deno.test("POST /api/upload accepts extracted text > 72,000 bytes but <= 192,000 bytes (audio-feed-cco6g, audio-feed-gw36t)", async () => {
+  const { app, user } = await setupTestApp();
+  // 73,000 bytes exceeded the legacy 72,000-byte cap, but is accepted under the 192,000 ceiling
+  const text = "y".repeat(73_000);
+  const formData = new FormData();
+  formData.append("file", new File([text], "long-article.txt", { type: "text/plain" }));
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: { "x-feed-token": user.feedToken },
+      body: formData,
+    }),
+  );
+
+  assertEquals(res.status, 202);
+  const data = await res.json();
+  assertEquals(data.status, "queued");
+  assert(data.episodeId);
+  assertEquals(data.article?.title, "long article");
+});
+
 Deno.test("POST /api/upload with no-text PDF surfaces the existing scanned/password message", async () => {
   const { app, user } = await setupTestApp();
   const emptyPdf = makeSyntheticPdf({ lines: [] });

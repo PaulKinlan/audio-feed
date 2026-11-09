@@ -49,6 +49,7 @@ import {
   writeScratchFile,
 } from "./proof-helper.ts";
 import { connectCdp, MEASURED_STARVED_POLL_MS, withHangBound } from "./proof-cdp.ts";
+import { MAX_NARRATION_BYTES } from "../src/ingest/upload.ts";
 
 const ADMIN_TOKEN = "harness-admin";
 const PER_TYPE_DEADLINE_MS = 240_000; // synthesis of a small document, generously bounded
@@ -77,7 +78,9 @@ const _ASSERTS = [
   "legacy .doc rejection names the replacement (.docx)",
   "over-limit document is rejected or truncated explicitly, not silently",
   "text-less PDF is rejected in the UI naming the reason, with no episode created",
-  "document over the 72,000-byte narration ceiling is rejected naming the limit, with no episode created",
+  `document over the ${
+    MAX_NARRATION_BYTES.toLocaleString("en-US")
+  }-byte narration ceiling is rejected naming the limit, with no episode created`,
   "teardown: nothing still references the Chrome profile (directory removed and no process carries it)",
 ];
 
@@ -575,7 +578,7 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       const tooLongPath = await writeScratchFile(
         SCRATCH,
         "too-long.txt",
-        new TextEncoder().encode("y".repeat(73_000)),
+        new TextEncoder().encode("y".repeat(MAX_NARRATION_BYTES + 1_000)),
       );
 
       /** Upload, wait for a TERMINAL feedback state, then count fresh episodes. */
@@ -616,9 +619,14 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       const tooLong = await rejectedUpload(tooLongPath, "narration ceiling rejection");
       const tooLongMsg = String(tooLong.fb?.text ?? "");
       record.narrationCeiling = { ...tooLong.fb, freshEpisodes: tooLong.freshEpisodes };
+      const limitPattern = new RegExp(
+        MAX_NARRATION_BYTES.toLocaleString("en-US").replace(/,/g, ",?"),
+      );
       checker.check(
-        "document over the 72,000-byte narration ceiling is rejected naming the limit, with no episode created",
-        tooLong.fb?.tone === "error" && /72,?000/.test(tooLongMsg) &&
+        `document over the ${
+          MAX_NARRATION_BYTES.toLocaleString("en-US")
+        }-byte narration ceiling is rejected naming the limit, with no episode created`,
+        tooLong.fb?.tone === "error" && limitPattern.test(tooLongMsg) &&
           tooLong.freshEpisodes === 0,
         `tone: '${tooLong.fb?.tone}' text: '${
           tooLongMsg.slice(0, 160)
