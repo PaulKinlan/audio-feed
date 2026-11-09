@@ -39,10 +39,10 @@ import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 import { runProof, withChrome } from "./proof-helper.ts";
-import { withHangBound } from "./proof-cdp.ts";
+import { connectCdp, MEASURED_STARVED_POLL_MS, withHangBound } from "./proof-cdp.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-qz3x/", import.meta.url).pathname;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 await Deno.mkdir(OUT, { recursive: true });
 
 await runProof("qz3x-confirm-dismiss", async (checker) => {
@@ -66,59 +66,22 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
 
   try {
     await withChrome(async (chrome) => {
-      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
-      const page = targets.find((t: { type: string }) => t.type === "page");
-      const ws = new WebSocket(page.webSocketDebuggerUrl);
-      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-      let nextId = 0;
-      // deno-lint-ignore no-explicit-any
-      const pending = new Map<number, (v: any) => void>();
-      ws.addEventListener("message", (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)!(msg);
-          pending.delete(msg.id);
-        }
-      });
-      // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
-        const id = ++nextId;
-        ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
-        );
-        if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-        return msg.result;
-      }
-      // deno-lint-ignore no-explicit-any
-      async function js(expression: string): Promise<any> {
-        const r = await cdp("Runtime.evaluate", { expression, returnByValue: true });
-        if (r?.exceptionDetails) {
-          throw new Error(`evaluate failed: ${JSON.stringify(r.exceptionDetails)}`);
-        }
-        return r?.result?.value;
-      }
       /**
-       * This host has MEASURED a bare `readyState === "complete"` evaluate
-       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
-       * measured starved floor is the unit.
-       *
-       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
-       * bound: a page whose main thread never answers still fails, in two minutes rather
-       * than hanging until something outside the proof kills the lane - and it fails with a
-       * message naming what was asked and the budget it had.
+       * audio-feed-teflq: this proof no longer carries a private CDP client or a private
+       * `until()`. The deleted copy's reply wait was a bare `await new Promise` on its own
+       * pending map, so ONE reply that never arrived (an evaluate, a screenshot) parked the
+       * proof past its last PASS with no error printed. connectCdp() races every evaluate
+       * against the derived HANG_BOUND_MS, and each raw command here keeps the same bound
+       * through withHangBound. What each wait waits FOR is untouched: same expression, same
+       * description, same explicit budget at every call site. Only the bound's source moved.
        */
-      const MEASURED_STARVED_POLL_MS = 8_000;
+      const { cdp: rawCdp, js, until, ws } = await connectCdp({ port: chrome.port });
+      // deno-lint-ignore no-explicit-any
+      const cdp = (method: string, params: Record<string, unknown> = {}): Promise<any> =>
+        withHangBound(method, rawCdp(method, params));
+
+      /** 120s = 15 x the 8s starved-poll floor MEASURED on this host (audio-feed-6gst1). */
       const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
-      async function until(expr: string, desc: string, timeoutMs = 8000): Promise<void> {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-          if (await withHangBound(js(`Boolean(${expr})`), desc)) return;
-          await sleep(50);
-        }
-        throw new Error(`Timeout waiting for: ${desc}`);
-      }
 
       try {
         await cdp("Page.enable");
