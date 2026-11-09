@@ -39,6 +39,13 @@ import {
   survivePutStartWaitMs,
 } from "./fixtures/invocation_death_window.ts";
 import { MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
+import {
+  boundedRow,
+  ROW_HANG_BOUND_MS,
+  ROW_HANG_HEADROOM,
+  rowHangBoundMs,
+  withRowBound,
+} from "./fixtures/row_watchdog.ts";
 
 const CHILD = new URL("./fixtures/invocation_death_child.ts", import.meta.url).pathname;
 
@@ -99,6 +106,49 @@ function childStopOwner(code: number | null, signal: string | null): string {
       return "exit code 0 means the invocation RETURNED without ever starting the upload stage - a mechanism break, not a slow host";
     default:
       return `unrecognised exit code ${code} - read the stderr tail`;
+  }
+}
+
+/**
+ * Wait for a child to EXIT and be drained, under a bound that names the row (audio-feed-g7vfw).
+ *
+ * `child.output()` resolves when the child exits AND its pipes are drained - and nothing else
+ * wakes it. The survive child ends on `await batchPromise`, which settles only when the budget
+ * deadline (armed on the CONTROLLED clock) fires and its abort reaches the hanging put. If the
+ * deadline is armed after the row's only `advance()`, or the abort never reaches that put, the
+ * child waits forever and so does this row: that is the shape of the 50-minute union-gate park,
+ * and it is why this await is bounded rather than left to the gate's two-hour wall.
+ *
+ * On the bound the child is killed (so a bound does not leak the process it gave up on) and the
+ * red names BOTH the row and the await that hung.
+ */
+async function childOutputWithin(
+  child: Deno.ChildProcess,
+  rowName: string,
+  boundMs: number = ROW_HANG_BOUND_MS,
+): Promise<Deno.CommandOutput> {
+  const output = child.output();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(
+        new Error(
+          `${rowName}: the child did not exit within ${boundMs}ms, so this row's unbounded ` +
+            `await was child.output() - it resolves only on the child's EXIT, and the child ends ` +
+            `on \`await batchPromise\`, which settles only if the invocation-budget deadline ` +
+            `fires on the controlled clock and its abort reaches the hanging put. One of those ` +
+            `never happened, so nothing waked either side (audio-feed-g7vfw).`,
+        ),
+      );
+    }, boundMs);
+  });
+  // The kill above settles this; nobody else awaits it, so a rejection here must not be unhandled.
+  output.catch(() => {});
+  try {
+    return await Promise.race([output, bound]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -189,60 +239,66 @@ function childStopOwner(code: number | null, signal: string | null): string {
   assertEquals(status.signal, "SIGKILL", `round ${round} child must have been SIGKILLed`);
 }
 
-Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget mid-await when the isolate SURVIVES", async () => {
-  const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-survive-", suffix: ".kv" });
-  try {
-    const child = spawnChild(kvPath, "survive", 1);
-    const output = await child.output();
-    const out = new TextDecoder().decode(output.stdout);
-    const err = new TextDecoder().decode(output.stderr);
-    const status = await child.status;
-    assertEquals(
-      status.success,
-      true,
-      // audio-feed-ga3jd: the child's SURVIVE-FATAL stderr line names the order break
-      // (e.g. the deadline fired before the put started), so the red carries the mechanism.
-      `survive child failed: ${out}${err}`,
-    );
+boundedRow(
+  "audio-feed-aqms control: the same put outlasts the invocation budget mid-await when the isolate SURVIVES",
+  async () => {
+    const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-survive-", suffix: ".kv" });
+    try {
+      const child = spawnChild(kvPath, "survive", 1);
+      const output = await childOutputWithin(
+        child,
+        "audio-feed-aqms control: the same put outlasts the invocation budget mid-await when the isolate SURVIVES",
+      );
+      const out = new TextDecoder().decode(output.stdout);
+      const err = new TextDecoder().decode(output.stderr);
+      const status = await child.status;
+      assertEquals(
+        status.success,
+        true,
+        // audio-feed-ga3jd: the child's SURVIVE-FATAL stderr line names the order break
+        // (e.g. the deadline fired before the put started), so the red carries the mechanism.
+        `survive child failed: ${out}${err}`,
+      );
 
-    const line = out.split("\n").find((l) => l.startsWith("SURVIVE:"));
-    assert(line, `survive child printed no SURVIVE line: ${out}`);
-    const r = JSON.parse(line.slice("SURVIVE:".length)) as {
-      yielded: unknown[];
-      failed: string[];
-      putStarted: number;
-      putSettled: number;
-      putAborted: number;
-      putStartedBeforeDeadline: boolean;
-      episode?: { status: string; phase?: string; attempts?: number };
-    };
+      const line = out.split("\n").find((l) => l.startsWith("SURVIVE:"));
+      assert(line, `survive child printed no SURVIVE line: ${out}`);
+      const r = JSON.parse(line.slice("SURVIVE:".length)) as {
+        yielded: unknown[];
+        failed: string[];
+        putStarted: number;
+        putSettled: number;
+        putAborted: number;
+        putStartedBeforeDeadline: boolean;
+        episode?: { status: string; phase?: string; attempts?: number };
+      };
 
-    // The invocation awaited the put past its own budget-derived deadline: the
-    // wrapper cannot yield before maxInvocationDurationMs (4000) minus flushMargin
-    // (500) = 3500ms after batch start, and the put had already started by then.
-    // audio-feed-ga3jd: the deadline now fires on the child's controlled clock
-    // ONLY AFTER the put is observably started (an ORDER fact), so these counter
-    // assertions carry the whole property on any host speed; the old
-    // `awaitedMs >= 3_000` wall-clock assert measured the very race that starved
-    // the put under load and is gone with the injected clock that replaced it.
-    assertEquals(r.putStarted, 1, "the put must have been started");
-    assertEquals(
-      r.putStartedBeforeDeadline,
-      true,
-      "the put must start BEFORE the deadline fires - the abort lands mid-put by construction, not on an already-dead signal",
-    );
-    assertEquals(r.putSettled, 0, "the put must never complete: it outlasts the budget");
-    assertEquals(r.putAborted, 1, "the budget deadline must ABORT the put by construction");
-    assertEquals(r.yielded.length, 1, "surviving invocation converts it to a clean yield");
-    assertEquals(r.failed.length, 0);
-    assertEquals(r.episode?.status, "pending", "claim released non-terminally");
-    assertEquals(r.episode?.phase, "upload_retry", "phase records the upload retry");
-  } finally {
-    await Deno.remove(kvPath).catch(() => {});
-  }
-});
+      // The invocation awaited the put past its own budget-derived deadline: the
+      // wrapper cannot yield before maxInvocationDurationMs (4000) minus flushMargin
+      // (500) = 3500ms after batch start, and the put had already started by then.
+      // audio-feed-ga3jd: the deadline now fires on the child's controlled clock
+      // ONLY AFTER the put is observably started (an ORDER fact), so these counter
+      // assertions carry the whole property on any host speed; the old
+      // `awaitedMs >= 3_000` wall-clock assert measured the very race that starved
+      // the put under load and is gone with the injected clock that replaced it.
+      assertEquals(r.putStarted, 1, "the put must have been started");
+      assertEquals(
+        r.putStartedBeforeDeadline,
+        true,
+        "the put must start BEFORE the deadline fires - the abort lands mid-put by construction, not on an already-dead signal",
+      );
+      assertEquals(r.putSettled, 0, "the put must never complete: it outlasts the budget");
+      assertEquals(r.putAborted, 1, "the budget deadline must ABORT the put by construction");
+      assertEquals(r.yielded.length, 1, "surviving invocation converts it to a clean yield");
+      assertEquals(r.failed.length, 0);
+      assertEquals(r.episode?.status, "pending", "claim released non-terminally");
+      assertEquals(r.episode?.phase, "upload_retry", "phase records the upload retry");
+    } finally {
+      await Deno.remove(kvPath).catch(() => {});
+    }
+  },
+);
 
-Deno.test(
+boundedRow(
   "audio-feed-wjtpb: survive control passes when child is artificially delayed before the put",
   async () => {
     // With an artificial delay introduced before the put (sleep before the put),
@@ -256,7 +312,10 @@ Deno.test(
       const child = spawnChild(kvPath, "survive", 1, {
         [STAGE_DELAY_MS_ENV]: "50",
       });
-      const output = await child.output();
+      const output = await childOutputWithin(
+        child,
+        "audio-feed-wjtpb: survive control passes when child is artificially delayed before the put",
+      );
       const out = new TextDecoder().decode(output.stdout);
       const err = new TextDecoder().decode(output.stderr);
       const status = await child.status;
@@ -291,7 +350,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+boundedRow(
   "audio-feed-wjtpb: survive control fails within bound when child is genuinely wedged",
   async () => {
     // When the child genuinely wedges before starting the put, the put never starts.
@@ -307,7 +366,10 @@ Deno.test(
         [STAGE_WEDGE_ENV]: "1",
         [SURVIVE_PUT_START_WAIT_MS_ENV]: String(boundMs),
       });
-      const output = await child.output();
+      const output = await childOutputWithin(
+        child,
+        "audio-feed-wjtpb: survive control fails within bound when child is genuinely wedged",
+      );
       const elapsed = Date.now() - startedAt;
       const err = new TextDecoder().decode(output.stderr);
       const status = await child.status;
@@ -324,48 +386,51 @@ Deno.test(
   },
 );
 
-Deno.test("audio-feed-wjtpb: survive put-start wait is derived from MEASURED_STARVED_POLL_MS", () => {
-  assert(
-    DEFAULT_SURVIVE_PUT_START_WAIT_MS > 20_000,
-    "the survive put-start ceiling must exceed the old fixed 20000ms that failed under gate load",
-  );
-  // A VALUE assertion cannot answer "is this derived?" - a literal equal to the product
-  // satisfies it (audio-feed-p3hmf: 15 * 8_000 stayed green through mutants). So ask the
-  // RULE instead: a synthetic floor a literal could not have anticipated.
-  assertEquals(
-    survivePutStartWaitMs(16_000),
-    240_000,
-    "the ceiling must track the floor, not today's value",
-  );
-  assertEquals(
-    survivePutStartWaitMs(1),
-    SURVIVE_PUT_START_HEADROOM,
-    "headroom factor must scale the floor",
-  );
-  assertEquals(
-    survivePutStartWaitMs(MEASURED_STARVED_POLL_MS),
-    DEFAULT_SURVIVE_PUT_START_WAIT_MS,
-  );
-  assertEquals(
-    DEFAULT_SURVIVE_PUT_START_WAIT_MS,
-    15 * MEASURED_STARVED_POLL_MS,
-    "15x the measured floor, on the nose",
-  );
+boundedRow(
+  "audio-feed-wjtpb: survive put-start wait is derived from MEASURED_STARVED_POLL_MS",
+  () => {
+    assert(
+      DEFAULT_SURVIVE_PUT_START_WAIT_MS > 20_000,
+      "the survive put-start ceiling must exceed the old fixed 20000ms that failed under gate load",
+    );
+    // A VALUE assertion cannot answer "is this derived?" - a literal equal to the product
+    // satisfies it (audio-feed-p3hmf: 15 * 8_000 stayed green through mutants). So ask the
+    // RULE instead: a synthetic floor a literal could not have anticipated.
+    assertEquals(
+      survivePutStartWaitMs(16_000),
+      240_000,
+      "the ceiling must track the floor, not today's value",
+    );
+    assertEquals(
+      survivePutStartWaitMs(1),
+      SURVIVE_PUT_START_HEADROOM,
+      "headroom factor must scale the floor",
+    );
+    assertEquals(
+      survivePutStartWaitMs(MEASURED_STARVED_POLL_MS),
+      DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+    );
+    assertEquals(
+      DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+      15 * MEASURED_STARVED_POLL_MS,
+      "15x the measured floor, on the nose",
+    );
 
-  // Pin the definition line in fixtures/invocation_death_window.ts with comments stripped (p3hmf shape).
-  const rawSource = Deno.readTextFileSync(
-    new URL("fixtures/invocation_death_window.ts", import.meta.url),
-  );
-  const stripped = codeOnly(rawSource);
-  const definition = stripped
-    .split("\n")
-    .find((line) => line.startsWith("export const DEFAULT_SURVIVE_PUT_START_WAIT_MS ="));
-  assertEquals(
-    definition,
-    "export const DEFAULT_SURVIVE_PUT_START_WAIT_MS = survivePutStartWaitMs(MEASURED_STARVED_POLL_MS);",
-    "DEFAULT_SURVIVE_PUT_START_WAIT_MS must be the RULE applied to the measured floor, not a literal",
-  );
-});
+    // Pin the definition line in fixtures/invocation_death_window.ts with comments stripped (p3hmf shape).
+    const rawSource = Deno.readTextFileSync(
+      new URL("fixtures/invocation_death_window.ts", import.meta.url),
+    );
+    const stripped = codeOnly(rawSource);
+    const definition = stripped
+      .split("\n")
+      .find((line) => line.startsWith("export const DEFAULT_SURVIVE_PUT_START_WAIT_MS ="));
+    assertEquals(
+      definition,
+      "export const DEFAULT_SURVIVE_PUT_START_WAIT_MS = survivePutStartWaitMs(MEASURED_STARVED_POLL_MS);",
+      "DEFAULT_SURVIVE_PUT_START_WAIT_MS must be the RULE applied to the measured floor, not a literal",
+    );
+  },
+);
 
 function codeOnly(source: string): string {
   return source
@@ -373,55 +438,62 @@ function codeOnly(source: string): string {
     .replace(/(^|\s)\/\/.*$/gm, "$1");
 }
 
-Deno.test("audio-feed-aqms: invocation killed mid-upload leaves claim non-terminal, then abandonment after 3 leases", async () => {
-  const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-", suffix: ".kv" });
-  try {
-    // Three invocations, each dying inside the terminal put.
-    for (let round = 1; round <= 3; round++) {
-      await killDuringUpload(kvPath, round);
+boundedRow(
+  "audio-feed-aqms: invocation killed mid-upload leaves claim non-terminal, then abandonment after 3 leases",
+  async () => {
+    const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-", suffix: ".kv" });
+    try {
+      // Three invocations, each dying inside the terminal put.
+      for (let round = 1; round <= 3; round++) {
+        await killDuringUpload(kvPath, round);
 
-      // The child is dead, so the KV file is ours again: assert the mid-incident
-      // state — the claim is held in uploading_audio with NO terminal write.
-      const store = await KvMetadataStore.open(kvPath);
-      try {
-        const episode = await store.getEpisode("user-1", "episode-1");
-        assertEquals(episode?.status, "synthesizing", "no terminal write after death");
-        assertEquals(episode?.phase, "uploading_audio");
-        assertEquals(episode?.claimedBy, `invocation-death-${round}`);
-        assertEquals(episode?.attempts, round, "each lease expiry burns one attempt");
-      } finally {
-        await store.close();
+        // The child is dead, so the KV file is ours again: assert the mid-incident
+        // state — the claim is held in uploading_audio with NO terminal write.
+        const store = await KvMetadataStore.open(kvPath);
+        try {
+          const episode = await store.getEpisode("user-1", "episode-1");
+          assertEquals(episode?.status, "synthesizing", "no terminal write after death");
+          assertEquals(episode?.phase, "uploading_audio");
+          assertEquals(episode?.claimedBy, `invocation-death-${round}`);
+          assertEquals(episode?.attempts, round, "each lease expiry burns one attempt");
+        } finally {
+          await store.close();
+        }
+
+        // Let the 1500ms lease expire before the next invocation reclaims.
+        await new Promise((r) => setTimeout(r, 1_800));
       }
 
-      // Let the 1500ms lease expire before the next invocation reclaims.
-      await new Promise((r) => setTimeout(r, 1_800));
+      // Fourth invocation: out of claims — the store abandons the episode.
+      const drain = spawnChild(kvPath, "drain", 4);
+      const drainOut = new TextDecoder().decode(await drain.output().then((o) => o.stdout));
+      const drainStatus = await drain.status;
+      assertEquals(drainStatus.success, true, `drain child failed: ${drainOut}`);
+
+      const resultLine = drainOut.split("\n").find((l) => l.startsWith("RESULT:"));
+      assert(resultLine, `drain child printed no RESULT line: ${drainOut}`);
+      const outcome = JSON.parse(resultLine.slice("RESULT:".length)) as ChildOutcome;
+
+      assertEquals(outcome.skipped.length, 1, "episode is skipped by the batch: no claim granted");
+      assertStringIncludes(outcome.skipped[0]?.reason ?? "", "claimed elsewhere or exhausted");
+      assertEquals(outcome.episode?.status, "failed");
+      assertEquals(
+        outcome.episode?.phase,
+        "uploading_audio",
+        "phase preserved through abandonment",
+      );
+      assertEquals(outcome.episode?.attempts, 3);
+      assertStringIncludes(
+        outcome.episode?.error ?? "",
+        'abandoned after 3 attempts; reason: claim lease expired without terminal write in phase "uploading_audio"',
+      );
+    } finally {
+      await Deno.remove(kvPath).catch(() => {});
     }
+  },
+);
 
-    // Fourth invocation: out of claims — the store abandons the episode.
-    const drain = spawnChild(kvPath, "drain", 4);
-    const drainOut = new TextDecoder().decode(await drain.output().then((o) => o.stdout));
-    const drainStatus = await drain.status;
-    assertEquals(drainStatus.success, true, `drain child failed: ${drainOut}`);
-
-    const resultLine = drainOut.split("\n").find((l) => l.startsWith("RESULT:"));
-    assert(resultLine, `drain child printed no RESULT line: ${drainOut}`);
-    const outcome = JSON.parse(resultLine.slice("RESULT:".length)) as ChildOutcome;
-
-    assertEquals(outcome.skipped.length, 1, "episode is skipped by the batch: no claim granted");
-    assertStringIncludes(outcome.skipped[0]?.reason ?? "", "claimed elsewhere or exhausted");
-    assertEquals(outcome.episode?.status, "failed");
-    assertEquals(outcome.episode?.phase, "uploading_audio", "phase preserved through abandonment");
-    assertEquals(outcome.episode?.attempts, 3);
-    assertStringIncludes(
-      outcome.episode?.error ?? "",
-      'abandoned after 3 attempts; reason: claim lease expired without terminal write in phase "uploading_audio"',
-    );
-  } finally {
-    await Deno.remove(kvPath).catch(() => {});
-  }
-});
-
-Deno.test(
+boundedRow(
   "audio-feed-aqms red path: a zero marker window stops the child WITHOUT the marker and the parent reports it",
   async () => {
     // audio-feed-aqms-window: the fixture's give-up must stay a CONTROLLED EVENT, not
@@ -482,3 +554,42 @@ Deno.test(
     }
   },
 );
+
+boundedRow(
+  "audio-feed-g7vfw: a row that PARKS reds by name within the bound instead of holding the suite",
+  async () => {
+    // THE MUTANT IS THIS BODY: it awaits a promise nothing ever settles - the exact shape of
+    // the union gate's 50-minute park (a promise whose only waker is a callback that never
+    // runs). The bound is injected so the proof costs 50ms rather than the derived 120s; the
+    // derived default is pinned by the row below, so an injected bound here cannot hide a
+    // weakened default.
+    const rowName = "audio-feed-g7vfw parked-mutant";
+    const boundMs = 50;
+    const startedAt = Date.now();
+    let red: unknown;
+    try {
+      await withRowBound(rowName, () => new Promise<never>(() => {}), boundMs);
+    } catch (err) {
+      red = err;
+    }
+    const elapsed = Date.now() - startedAt;
+    assert(red instanceof Error, "a parked row MUST red; returning would be the silent pass");
+    assertStringIncludes(red.message, `row "${rowName}"`);
+    assertStringIncludes(red.message, `bound of ${boundMs}ms`);
+    assertStringIncludes(red.message, "audio-feed-g7vfw");
+    assert(elapsed < 5_000, `the bound must fire near ${boundMs}ms, took ${elapsed}ms`);
+  },
+);
+
+boundedRow("audio-feed-g7vfw: the row hang bound is DERIVED from the starved floor", () => {
+  // A VALUE assertion cannot answer "is this derived?" - a literal equal to the product
+  // satisfies it (the same trap audio-feed-p3hmf found in the survive put-start bound). Ask
+  // the RULE instead: a synthetic floor a literal could not have anticipated.
+  assertEquals(rowHangBoundMs(16_000), 240_000, "the bound must track the floor");
+  assertEquals(ROW_HANG_BOUND_MS, rowHangBoundMs(MEASURED_STARVED_POLL_MS));
+  assertEquals(ROW_HANG_HEADROOM, 15, "the stated multiple is the repo's standard 15x");
+  assert(
+    ROW_HANG_BOUND_MS > 60_000,
+    "the row bound must sit well above any row's real cost while still being minutes",
+  );
+});

@@ -302,13 +302,19 @@ if (mode === "survive") {
   let settled: string | undefined;
 
   let deadline = lastProgressAt + putStartWaitMs;
+  // The re-arm below is only safe with a CEILING (audio-feed-g7vfw): a phase that flips on every
+  // poll would re-arm forever, and a bound that can be renewed without limit is not a bound. One
+  // extra window of real time covers any honest stage sequence; past it, the row reds by name.
+  const hardCeiling = Date.now() + 2 * putStartWaitMs;
   let lastPhase: string | undefined;
   let lastStatus: string | undefined;
 
   while (hangingBlobs.started === 0) {
-    if (Date.now() > deadline) {
+    if (Date.now() > deadline || Date.now() > hardCeiling) {
       console.error(
-        `SURVIVE-FATAL: the put never started within ${putStartWaitMs}ms (stages starved or hung) - aborting so the parent asserts red`,
+        `SURVIVE-FATAL: the put never started within ${putStartWaitMs}ms (stages starved or hung, and the re-arming watchdog's ${
+          2 * putStartWaitMs
+        }ms hard ceiling was reached) - aborting so the parent asserts red`,
       );
       Deno.exit(1);
     }
@@ -337,7 +343,46 @@ if (mode === "survive") {
   }
 
   await surviveTime.advance(4_000);
-  const result = await batchPromise;
+  // audio-feed-g7vfw: `await batchPromise` was UNBOUNDED here, and it is the child-side half of
+  // the 50-minute union-gate park. It settles only when the budget deadline this test advances
+  // fires AND the abort reaches the hanging put's own promise; if the deadline timer was armed
+  // after `advance()` ran, or the signal never reaches that put, nothing waker exists and the
+  // child outlives the parent's `child.output()`. Bound it on the REAL clock - the controlled one
+  // is exactly what failed to fire - and name the mechanism, so the parent's red is a cause
+  // rather than a timeout wearing a timeout's clothes.
+  const settleWithin = async <T>(
+    promise: Promise<T>,
+    boundMs: number,
+  ): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `the batch never settled within ${boundMs}ms of the controlled clock advancing 4000ms past its deadline: the deadline timer did not fire, or its abort never reached the hanging put`,
+            ),
+          ),
+        boundMs,
+      );
+    });
+    try {
+      return await Promise.race([promise, bound]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
+  const result = await settleWithin(batchPromise, putStartWaitMs).catch(
+    (err: unknown) => {
+      console.error(
+        `SURVIVE-FATAL: ${
+          err instanceof Error ? err.message : String(err)
+        } - aborting so the parent asserts red instead of parking`,
+      );
+      Deno.exit(1);
+    },
+  );
   const episode = await metadata.getEpisode("user-1", "episode-1");
   console.log(
     "SURVIVE:" + JSON.stringify({
