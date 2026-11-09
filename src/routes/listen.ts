@@ -110,7 +110,11 @@ import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { getUserByFeedToken } from "../auth/users.ts";
 import { sameOrigin } from "../auth/sessions.ts";
-import { extractClientIp, SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
+import {
+  extractClientIp,
+  type RateLimitStore,
+  SlidingWindowRateLimiter,
+} from "../auth/rate_limit.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { problem } from "../http.ts";
 import { assetUrl } from "./assets.ts";
@@ -674,6 +678,35 @@ async function refuseListenRead(
   });
   refused.headers.set("retry-after", String(Math.max(1, Math.ceil(limit.resetMs / 1000))));
   return refused;
+}
+
+/**
+ * Clear the recorded history of BOTH listen read windows for one client key (audio-feed-chpka).
+ *
+ * The page and status bounds live in the shared store keyed by client address, which means a
+ * process that drives the real routes many times — a row drilling the page, or a suite sharing
+ * one store across rows — can arrive at the bound out of NOTHING BUT ITS OWN earlier requests
+ * and read the resulting 429 as a limiter defect. Measured on 2026-11-03: an addressed client
+ * gets exactly 60 page loads then 429, so the sixty-first load of a run is the line between a
+ * row that is testing the player and a row that is testing the bound by accident.
+ *
+ * This clears the two rows and nothing else. The BOUNDS ARE UNTOUCHED (`LISTEN_PAGE_RATE` and
+ * `LISTEN_STATUS_RATE` above are what the handlers enforce, and the proof rows beside this call
+ * show the bound still holds inside each row-group and still holds when this is NOT called) —
+ * only the recorded window is emptied, which is exactly what `SlidingWindowRateLimiter.reset`
+ * already does for a successful admin auth and for the retry bucket in `listen_activity_test`.
+ *
+ * `clientKey` is required: an addressed client's key is its address and an unaddressed one's is
+ * `UNADDRESSED_CLIENT_KEY`, so a default here would silently clear the row nobody is reading.
+ */
+export async function resetListenReadWindows(
+  store: RateLimitStore,
+  clientKey: string,
+): Promise<void> {
+  await Promise.all([
+    new SlidingWindowRateLimiter(LISTEN_PAGE_RATE, store, LISTEN_PAGE_WINDOW).reset(clientKey),
+    new SlidingWindowRateLimiter(LISTEN_STATUS_RATE, store, LISTEN_STATUS_WINDOW).reset(clientKey),
+  ]);
 }
 
 /** The activity panel for the status poll: the same one-window derivation (audio-feed-3jb). */
