@@ -525,12 +525,35 @@ recount, and it names its command so the next recount is a command rather than a
   forked literal): **10 default to 8 s** (tokens-, bookmarklet-, account-, request-access-,
   playback-position-, spend-visibility- and voice-audition-browser-proof.ts,
   verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts and the arrow-function copy at
-  `verify_main_l7m1_e2e.ts:261`), 7 default to 15s and 4 to 10s. Recount it with
-  `grep -rn "function until(\|const until = " scripts | grep -v -e proof-cdp.ts -e call-arity.ts |
-  wc -l` (21 today) plus the same grep grouped by its trailing `= <n>ms` literal
-  (10 / 7 / 4) — deleting a copy is now the preferred fix over editing its literal: a file that has
-  a private copy also has a private `cdp()` whose reply wait is a bare `await new Promise`, which is
-  the hang `withHangBound` exists to bound.
+  `verify_main_l7m1_e2e.ts:261`), 7 default to 15s and 4 to 10s.
+- **The 10 / 7 / 4 split buckets those copies by the DEFAULT LITERAL on their third parameter and
+  nothing else** (audio-feed-bgje1). It is not a bucketing by file kind: grouping the same 21 copies
+  by file name instead gives 16 `*-browser-proof.ts` / 2 `verify_*_browser.ts` / 2 `verify_*` / 1
+  other, which reproduces just as well and answers a different question — the review that filed
+  audio-feed-bgje1 bucketed by kind and read the mismatch as a stale figure. Re-derive both, with two
+  commands and no interpretation:
+
+  ```sh
+  grep -rn "function until(\|const until = " scripts | grep -v -e proof-cdp.ts -e call-arity.ts | wc -l
+  grep -rn "function until(\|const until = " scripts | grep -v -e proof-cdp.ts -e call-arity.ts |
+    grep -oE "= [0-9_]+" | sort | uniq -c
+  ```
+
+  At `4c92f6ce` they print `21` and `10 x = 8000 / 7 x = 15_000 / 4 x = 10_000`. **After
+  `fleet/until-6` (`audio-feed-7xlrw`) they print `16` and `8 / 5 / 3`**: five copies were deleted
+  rather than edited, in call-count order — `bookmarklet-browser-proof.ts` (10 call sites),
+  `uploads-six-type-browser-proof.ts` (9), `admin-module-browser-proof.ts` (9),
+  `voice-audition-browser-proof.ts` (8) and `admin-retry-browser-proof.ts` (7), 43 sites in total —
+  and each now takes `until`, `js` and `ws` from `connectCdp()` and wraps its raw commands in
+  `withHangBound`, so the 181-call population in 29 files is unchanged while the private-copy
+  population is not. Deleting a copy is now the preferred fix over editing its literal: a file that
+  has a private copy also has a private `cdp()` whose reply wait is a bare `await new Promise`, which
+  is the hang `withHangBound` exists to bound. `scripts/account-browser-proof.ts`,
+  `scripts/account-mobile-layout-proof.ts` and — found by the same sweep, not on its list —
+  `scripts/landing-tooltip-browser-proof.ts` keep their copy ON PURPOSE: each has a mid-navigation
+  catch-all its `until()` needs and the shared helper does not express (it re-throws everything but
+  `CdpHangBoundExceeded`), so the tolerance stays in ONE documented wrapper instead of being
+  replicated at every call site.
 - **`scripts/account-mobile-layout-proof.ts` evaluates with no bound at all.** Four `measure()`
   layout reads (call sites at lines 390, 401, 422, 483) and seven `await js(...)` call sites (five
   inline asserts/reads at 398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all

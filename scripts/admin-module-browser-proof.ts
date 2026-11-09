@@ -30,7 +30,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
-import { withHangBound } from "./proof-cdp.ts";
+import { connectCdp, MEASURED_STARVED_POLL_MS, withHangBound } from "./proof-cdp.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -97,13 +97,6 @@ await runProof("audio-feed-3xq", async (checker) => {
 
   try {
     await withChrome(async (chrome) => {
-      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
-      const page = targets.find((t: { type: string }) => t.type === "page");
-      const ws = new WebSocket(page.webSocketDebuggerUrl);
-      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-      let nextId = 0;
-      const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
       // CDP events, collected rather than dropped: the network and console checks below
       // read what the browser actually saw. Typed to the few fields this proof reads.
       interface CdpEvent {
@@ -116,56 +109,32 @@ await runProof("audio-feed-3xq", async (checker) => {
         };
       }
       const events: CdpEvent[] = [];
-      ws.addEventListener("message", (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)!(msg);
-          pending.delete(msg.id);
-        } else if (msg.method) {
-          events.push({ method: msg.method, params: msg.params });
-        }
-      });
-
-      function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-        const id = ++nextId;
-        return new Promise((resolve, reject) => {
-          pending.set(id, (res) => {
-            if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
-            else resolve(res.result);
-          });
-          ws.send(JSON.stringify({ id, method, params }));
-        });
-      }
-
-      async function js(expr: string): Promise<unknown> {
-        const res = await cdp("Runtime.evaluate", {
-          expression: expr,
-          returnByValue: true,
-          awaitPromise: true,
-        }) as { result?: { value?: unknown } };
-        return res.result?.value;
-      }
 
       /**
-       * This host has MEASURED a bare `readyState === "complete"` evaluate
-       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
-       * measured starved floor is the unit.
-       *
-       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
-       * bound: a page whose main thread never answers still fails, in two minutes rather
-       * than hanging until something outside the proof kills the lane - and it fails with a
-       * message naming what was asked and the budget it had.
+       * audio-feed-7xlrw: this proof no longer carries a private CDP client or a private
+       * `until()`. The deleted copy's reply wait was a bare `await new Promise` on its own
+       * pending map - ONE reply the browser never sent parked the proof past its last PASS
+       * with no error printed - and its `js()` swallowed `exceptionDetails`, so a poll whose
+       * expression threw was indistinguishable from one that was merely not true yet.
+       * connectCdp() races every evaluate against the derived HANG_BOUND_MS and bounds each
+       * poll by what is LEFT of that wait; its `js()` re-throws `exceptionDetails` instead.
+       * No poll here changes value under that rule: every one of the nine expressions is
+       * `?.`-safe, so a mid-navigation DOM throws nowhere. What each wait waits FOR is
+       * untouched: same expression, same description, same UNTIL_HANG_BOUND_MS budget. The
+       * raw commands keep the same bound through withHangBound.
        */
-      const MEASURED_STARVED_POLL_MS = 8_000;
+      const { cdp: rawCdp, js, until, ws } = await connectCdp({ port: chrome.port });
+      // deno-lint-ignore no-explicit-any
+      const cdp = (method: string, params: Record<string, unknown> = {}): Promise<any> =>
+        withHangBound(method, rawCdp(method, params));
+
+      /** 120s = 15 x the 8s starved-poll floor MEASURED on this host (audio-feed-6gst1). */
       const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
-      async function until(expr: string, desc = expr, timeout = 15_000) {
-        const start = Date.now();
-        while (Date.now() - start < timeout) {
-          if (await withHangBound(js(`Boolean(${expr})`), desc)) return;
-          await sleep(50);
-        }
-        throw new Error(`Timeout waiting for: ${desc}`);
-      }
+
+      ws.addEventListener("message", (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.method) events.push({ method: msg.method, params: msg.params });
+      });
 
       try {
         await cdp("Page.enable");
