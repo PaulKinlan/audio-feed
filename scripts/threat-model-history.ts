@@ -8,11 +8,12 @@
  * worktrees or without an active Dolt issues.jsonl export, the miner finds 0 git security fixes
  * and 0 tracker bugs, causing the station to re-fire `tm-history-channel-empty` on every audit.
  *
- * This script provides the supply-side history channel from within the repository:
+ * This script provides the supply-side history channel from within the repository matching
+ * the host station's contract (agents/threat-model/SKILL.md, scripts/mine_history.py:987-1005):
  * 1. Mines recent git commits touching `src/`, identifying security-relevant, auth, and bug-fix commits.
- * 2. Mines beads records from `bd export --all`, extracting closed bugs, security issues, and their
- *    accompanying review/resolution comments.
- * 3. Emits either structured JSON (compatible with the threat-model station's input contract)
+ * 2. Mines beads records from `bd export --all`, extracting closed bugs and security issues.
+ * 3. Emits structured JSON strictly following the host's snake_case schema (`git_fixes_count`,
+ *    `git_security_fixes` capped at 25, `beads_bugs_count`, `beads_bugs` capped at 25)
  *    or formatted markdown ready for LLM context or operator verification.
  */
 
@@ -51,41 +52,26 @@ export const SECURITY_KEYWORDS = [
 export interface GitCommitRecord {
   id: string;
   hash: string;
-  fullHash: string;
   date: string;
-  author: string;
   subject: string;
   files: string[];
-  isSecurityRelated: boolean;
-}
-
-export interface BeadCommentRecord {
-  id?: string;
-  author?: string;
-  text: string;
-  createdAt?: string;
 }
 
 export interface BeadsBugRecord {
   id: string;
   title: string;
-  issueType: string;
+  issue_type: string;
   status: string;
-  closeReason?: string | null;
-  summarySnippet: string;
-  labels: string[];
-  updatedAt: string;
-  closedAt?: string | null;
-  comments: BeadCommentRecord[];
+  close_reason: string | null;
+  summary_snippet: string;
 }
 
 export interface ThreatModelHistoryChannel {
   target: string;
-  generatedAt: string;
-  gitFixesCount: number;
-  gitSecurityFixes: GitCommitRecord[];
-  beadsBugsCount: number;
-  beadsBugs: BeadsBugRecord[];
+  git_fixes_count: number;
+  git_security_fixes: GitCommitRecord[];
+  beads_bugs_count: number;
+  beads_bugs: BeadsBugRecord[];
 }
 
 export function isSecurityText(text: string): boolean {
@@ -93,7 +79,7 @@ export function isSecurityText(text: string): boolean {
   return SECURITY_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
-/** Mines recent git commits touching src/ and categorizes them by security relevance. */
+/** Mines recent git commits touching src/ and formats them to the host record schema. */
 export async function mineGitCommits(options?: {
   repoRoot?: string;
   limit?: number;
@@ -109,7 +95,7 @@ export async function mineGitCommits(options?: {
         "log",
         "-n",
         String(limit * 2),
-        "--format=%H|%ad|%an|%s",
+        "--format=%H|%ad|%s",
         "--date=short",
         "--",
         "src/",
@@ -131,14 +117,16 @@ export async function mineGitCommits(options?: {
 
     for (const line of lines) {
       if (!line.trim()) continue;
-      const [fullHash, date, author, subject] = line.split("|", 4);
+      const firstPipe = line.indexOf("|");
+      const secondPipe = line.indexOf("|", firstPipe + 1);
+      if (firstPipe === -1 || secondPipe === -1) continue;
+
+      const fullHash = line.slice(0, firstPipe);
+      const date = line.slice(firstPipe + 1, secondPipe);
+      const subject = line.slice(secondPipe + 1);
       if (!fullHash || !date || !subject) continue;
 
       const shortHash = fullHash.slice(0, 10);
-      const isSec = isSecurityText(subject) ||
-        /^fix(\([^)]+\))?:/i.test(subject) ||
-        /^sec(\([^)]+\))?:/i.test(subject) ||
-        /\baudio-feed-[a-z0-9]+/i.test(subject);
 
       // Query touched files under src/
       const filesCmd = new Deno.Command("git", {
@@ -169,12 +157,9 @@ export async function mineGitCommits(options?: {
       records.push({
         id: `commit-${shortHash}`,
         hash: shortHash,
-        fullHash,
         date: date.slice(0, 10),
-        author: author ?? "unknown",
         subject,
         files,
-        isSecurityRelated: isSec,
       });
 
       if (records.length >= limit) break;
@@ -224,9 +209,6 @@ export async function mineBeadsRecords(options?: {
         status?: string;
         close_reason?: string | null;
         labels?: string[];
-        updated_at?: string;
-        closed_at?: string | null;
-        comments?: Array<{ id?: string; author?: string; text?: string; created_at?: string }>;
       };
 
       try {
@@ -249,26 +231,13 @@ export async function mineBeadsRecords(options?: {
 
       if (!isBug && !isSec) continue;
 
-      const comments: BeadCommentRecord[] = (issue.comments ?? [])
-        .filter((c) => typeof c?.text === "string" && c.text.trim().length > 0)
-        .map((c) => ({
-          id: c.id,
-          author: c.author,
-          text: c.text!.trim(),
-          createdAt: c.created_at,
-        }));
-
       matched.push({
         id: issue.id,
         title,
-        issueType,
+        issue_type: issueType,
         status,
-        closeReason: issue.close_reason ?? null,
-        summarySnippet: description.slice(0, 200).trim(),
-        labels,
-        updatedAt: issue.updated_at ?? "",
-        closedAt: issue.closed_at ?? null,
-        comments,
+        close_reason: issue.close_reason ?? null,
+        summary_snippet: description.slice(0, 150).trim(),
       });
 
       if (matched.length >= limit) break;
@@ -281,13 +250,13 @@ export async function mineBeadsRecords(options?: {
   }
 }
 
-/** Generates the complete ThreatModelHistoryChannel payload. */
+/** Generates the complete ThreatModelHistoryChannel payload matching host contract. */
 export async function generateHistoryChannel(options?: {
   repoRoot?: string;
   limit?: number;
 }): Promise<ThreatModelHistoryChannel> {
   const root = options?.repoRoot ?? Deno.cwd();
-  const limit = options?.limit ?? 30;
+  const limit = options?.limit ?? 40;
 
   const [gitCommits, beadsRecords] = await Promise.all([
     mineGitCommits({ repoRoot: root, limit }),
@@ -296,11 +265,10 @@ export async function generateHistoryChannel(options?: {
 
   return {
     target: "audio-feed",
-    generatedAt: new Date().toISOString(),
-    gitFixesCount: gitCommits.length,
-    gitSecurityFixes: gitCommits,
-    beadsBugsCount: beadsRecords.length,
-    beadsBugs: beadsRecords,
+    git_fixes_count: gitCommits.length,
+    git_security_fixes: gitCommits.slice(0, 25),
+    beads_bugs_count: beadsRecords.length,
+    beads_bugs: beadsRecords.slice(0, 25),
   };
 }
 
@@ -309,18 +277,16 @@ export function formatMarkdown(channel: ThreatModelHistoryChannel): string {
   const lines: string[] = [];
 
   lines.push(`# Threat Model History Channel: ${channel.target}`);
-  lines.push(`Generated: ${channel.generatedAt}`);
-  lines.push(`Git security/bug-fix commits touching src/: ${channel.gitFixesCount}`);
-  lines.push(`Beads closed bug/security records: ${channel.beadsBugsCount}`);
+  lines.push(`Git security/bug-fix commits touching src/: ${channel.git_fixes_count}`);
+  lines.push(`Beads closed bug/security records: ${channel.beads_bugs_count}`);
   lines.push("");
 
   lines.push("## 1. Recent Git Commits Touching src/");
-  if (channel.gitSecurityFixes.length === 0) {
+  if (channel.git_security_fixes.length === 0) {
     lines.push("(no git commits discovered)");
   } else {
-    for (const c of channel.gitSecurityFixes) {
-      const tag = c.isSecurityRelated ? " [SECURITY/FIX]" : "";
-      lines.push(`- **${c.hash}** (${c.date}) by ${c.author}${tag}: ${c.subject}`);
+    for (const c of channel.git_security_fixes) {
+      lines.push(`- **${c.hash}** (${c.date}): ${c.subject}`);
       if (c.files.length > 0) {
         lines.push(`  Files: ${c.files.join(", ")}`);
       }
@@ -329,30 +295,19 @@ export function formatMarkdown(channel: ThreatModelHistoryChannel): string {
   lines.push("");
 
   lines.push("## 2. Recent Beads Bugs & Security Incidents");
-  if (channel.beadsBugs.length === 0) {
+  if (channel.beads_bugs.length === 0) {
     lines.push("(no beads bug records discovered)");
   } else {
-    for (const b of channel.beadsBugs) {
+    for (const b of channel.beads_bugs) {
       lines.push(`### [${b.id}] ${b.title}`);
       lines.push(
-        `- **Type:** ${b.issueType} | **Status:** ${b.status}${
-          b.closedAt ? ` (closed ${b.closedAt.slice(0, 10)})` : ""
-        }`,
+        `- **Type:** ${b.issue_type} | **Status:** ${b.status}`,
       );
-      if (b.closeReason) {
-        lines.push(`- **Close Reason:** ${b.closeReason}`);
+      if (b.close_reason) {
+        lines.push(`- **Close Reason:** ${b.close_reason}`);
       }
-      if (b.summarySnippet) {
-        lines.push(`- **Summary:** ${b.summarySnippet}`);
-      }
-      if (b.comments.length > 0) {
-        lines.push("- **Comments & Post-Mortem Notes:**");
-        for (const comment of b.comments.slice(-3)) {
-          const author = comment.author ? `[${comment.author}]` : "[note]";
-          const date = comment.createdAt ? ` at ${comment.createdAt.slice(0, 16)}` : "";
-          const preview = comment.text.split("\n").slice(0, 4).join(" ").slice(0, 240);
-          lines.push(`  - ${author}${date}: ${preview}`);
-        }
+      if (b.summary_snippet) {
+        lines.push(`- **Summary:** ${b.summary_snippet}`);
       }
       lines.push("");
     }
@@ -380,7 +335,7 @@ Usage:
 
 Flags:
   --json, -j                  Output structured JSON matching factory threat-model contract
-  --limit <n>, -l <n>         Maximum records per category (default: 30)
+  --limit <n>, -l <n>         Maximum records per category (default: 40 git, 30 beads, capped at 25)
   --export-beads-jsonl <path> Export issues.jsonl to specified path for host miner consumption
   --dir <path>                Target directory root (default: current working directory)
   --help, -h                  Show this help message
@@ -389,20 +344,20 @@ Flags:
   }
 
   const root = resolve(flags.dir ?? Deno.cwd());
-  const limit = flags.limit ? parseInt(flags.limit, 10) : 30;
+  const limit = flags.limit ? parseInt(flags.limit, 10) : undefined;
 
   const channel = await generateHistoryChannel({ repoRoot: root, limit });
 
   if (flags["export-beads-jsonl"]) {
     const exportPath = resolve(flags["export-beads-jsonl"]);
-    const lines = channel.beadsBugs.map((b) =>
+    const lines = channel.beads_bugs.map((b) =>
       JSON.stringify({
         id: b.id,
         title: b.title,
-        issue_type: b.issueType,
+        issue_type: b.issue_type,
         status: b.status,
-        close_reason: b.closeReason,
-        description: b.summarySnippet,
+        close_reason: b.close_reason,
+        description: b.summary_snippet,
       })
     );
     await Deno.writeTextFile(exportPath, lines.join("\n") + "\n");
