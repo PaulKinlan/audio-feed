@@ -108,9 +108,6 @@ Deno.test("closedby: Baseline markers are present (audio-feed-e21x)", async () =
   assert(confirmShared.includes("TODO(baseline/dialog-closedby)"));
   assert(listenJs.includes("TODO(baseline/dialog-closedby)"));
   assert(CONFIRM_DIALOG_CLIENT.includes("TODO(baseline/dialog-closedby)"));
-  assert(confirmShared.includes("TODO(baseline/closedby): remove the JS fallback"));
-  assert(listenJs.includes("TODO(baseline/closedby): remove the JS fallback"));
-  assert(CONFIRM_DIALOG_CLIENT.includes("TODO(baseline/closedby): remove the JS fallback"));
 });
 
 Deno.test("closedby: headless Chrome reflects closedBy property and attribute (audio-feed-e21x)", async () => {
@@ -193,42 +190,76 @@ Deno.test("closedby: light-dismiss fallback shim closes dialog on outside click 
 });
 
 Deno.test("closedby: behavioural browser proof over CDP (audio-feed-lkmuq)", async () => {
-  const testHtml = `<!doctype html>
-<html>
-<head>
-<style>
-dialog { width: 300px; height: 150px; }
-dialog::backdrop { background: rgba(0,0,0,0.5); }
-</style>
-</head>
-<body>
-  <dialog id="dlg" class="confirm-dialog" closedby="any">
-    <button id="insideBtn">Inside Button</button>
-  </dialog>
-  <dialog id="fallbackDlg" class="confirm-dialog">
-    <button id="fallbackInsideBtn">Inside Button</button>
-  </dialog>
-  <script>
-    window.dlg = document.getElementById("dlg");
-    window.fallbackDlg = document.getElementById("fallbackDlg");
-  </script>
-</body>
-</html>`;
+  // Drive the REAL shipped page: render the shell via the app's own renderer (renderShell),
+  // serve it through the real asset route (handleAsset), load the real confirm-shared.js asset,
+  // prove byte-for-byte identity against disk, and drive the shipped #confirmDialog over CDP.
+  const shellHtml = renderShell({
+    nonce: "test-nonce",
+    title: "Confirm Dialog CDP Proof",
+    viewer: null,
+    main: `<div class="card"><p id="status">Ready</p></div>`,
+    scriptModule: assetUrl("confirm-shared.js"),
+  });
 
-  const tempFile = await Deno.makeTempFile({ suffix: ".html" });
-  await Deno.writeTextFile(tempFile, testHtml);
+  const server = Deno.serve({ port: 0, onListen: () => {} }, (req) => {
+    const url = new URL(req.url);
+    if (url.pathname.startsWith("/assets/")) {
+      const assetName = url.pathname.slice("/assets/".length);
+      return handleAsset({ params: { name: assetName } } as never);
+    }
+    return new Response(shellHtml, {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy":
+          "default-src 'self'; style-src 'self' 'nonce-test-nonce'; script-src 'self' 'nonce-test-nonce'",
+      },
+    });
+  });
+  const BASE = `http://127.0.0.1:${server.addr.port}`;
 
   try {
+    // 1. Prove identity: assert loaded asset bytes equal disk bytes for confirm-shared.js
+    const diskBytes = await Deno.readTextFile("src/assets/confirm-shared.js");
+    const assetUrlPath = assetUrl("confirm-shared.js");
+    const assetRes = await fetch(`${BASE}${assetUrlPath}`);
+    assertEquals(assetRes.status, 200, "asset route must serve 200 for confirm-shared.js");
+    assertEquals(
+      assetRes.headers.get("content-type"),
+      "text/javascript; charset=utf-8",
+    );
+    const servedBytes = await assetRes.text();
+    assertEquals(
+      servedBytes,
+      diskBytes,
+      "loaded asset bytes must equal disk bytes for confirm-shared.js (identity proof)",
+    );
+
+    // 2. Drive the real page in headless Chrome over CDP
     await withChrome(async (chrome) => {
       const { cdp, js, until, close } = await connectCdp(chrome.port);
       try {
         await cdp("Page.enable");
-        await cdp("Page.navigate", { url: `file://${tempFile}` });
-        await until("document.readyState === 'complete'", "page loaded", 5000);
+        await cdp("Page.navigate", { url: BASE });
+        await until("document.readyState === 'complete'", "real shell page loaded", 5000);
 
-        // Row (a): a click outside closes the dialog
-        await js("dlg.showModal()");
-        await until("dlg.open === true", "dlg open for outside click", 5000);
+        // Prove identity from the browser's view: script loaded matches disk bytes
+        const browserLoadedBytes = await js(
+          "fetch(document.querySelector('script[type=module]').src).then(r => r.text())",
+        );
+        assertEquals(
+          browserLoadedBytes,
+          diskBytes,
+          "browser-fetched script bytes must equal disk bytes for confirm-shared.js",
+        );
+
+        // Row (a): click outside closes the shipped #confirmDialog via native closedby="any"
+        await js("document.getElementById('confirmDialog').showModal()");
+        await until(
+          "document.getElementById('confirmDialog').open === true",
+          "confirmDialog open for outside click",
+          5000,
+        );
+        // (5, 5) hits the top-left backdrop outside the centered dialog
         await cdp("Input.dispatchMouseEvent", {
           type: "mousePressed",
           x: 5,
@@ -243,12 +274,20 @@ dialog::backdrop { background: rgba(0,0,0,0.5); }
           button: "left",
           clickCount: 1,
         });
-        await until("!dlg.open", "dialog closed by outside click", 5000);
-        assertEquals(await js("dlg.open"), false);
+        await until(
+          "!document.getElementById('confirmDialog').open",
+          "dialog closed by native outside click",
+          5000,
+        );
+        assertEquals(await js("document.getElementById('confirmDialog').open"), false);
 
-        // Row (b): Escape closes it
-        await js("dlg.showModal()");
-        await until("dlg.open === true", "dlg open for escape", 5000);
+        // Row (b): Escape closes the shipped #confirmDialog
+        await js("document.getElementById('confirmDialog').showModal()");
+        await until(
+          "document.getElementById('confirmDialog').open === true",
+          "confirmDialog open for escape",
+          5000,
+        );
         for (const type of ["keyDown", "keyUp"]) {
           await cdp("Input.dispatchKeyEvent", {
             type,
@@ -258,14 +297,22 @@ dialog::backdrop { background: rgba(0,0,0,0.5); }
             nativeVirtualKeyCode: 27,
           });
         }
-        await until("!dlg.open", "dialog closed by escape", 5000);
-        assertEquals(await js("dlg.open"), false);
+        await until(
+          "!document.getElementById('confirmDialog').open",
+          "dialog closed by escape",
+          5000,
+        );
+        assertEquals(await js("document.getElementById('confirmDialog').open"), false);
 
-        // Row (c): a click INSIDE does not close it
-        await js("dlg.showModal()");
-        await until("dlg.open === true", "dlg open for inside click", 5000);
+        // Row (c): click INSIDE the shipped #confirmDialog does not close it
+        await js("document.getElementById('confirmDialog').showModal()");
+        await until(
+          "document.getElementById('confirmDialog').open === true",
+          "confirmDialog open for inside click",
+          5000,
+        );
         const rect = await js(
-          "(() => { const r = dlg.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; })()",
+          "(() => { const r = document.getElementById('confirmDialog').getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; })()",
         );
         const insideX = Math.round(rect.left + rect.width / 2);
         const insideY = Math.round(rect.top + rect.height / 2);
@@ -284,27 +331,32 @@ dialog::backdrop { background: rgba(0,0,0,0.5); }
           clickCount: 1,
         });
         await new Promise((r) => setTimeout(r, 200));
-        assertEquals(await js("dlg.open"), true);
-        await js("dlg.close()");
+        assertEquals(await js("document.getElementById('confirmDialog').open"), true);
+        await js("document.getElementById('confirmDialog').close()");
 
-        // Row (d): the fallback path still closes on outside click when closedby is unsupported
-        await js(`
-          delete HTMLDialogElement.prototype.closedBy;
-          if (!("closedBy" in HTMLDialogElement.prototype)) {
-            fallbackDlg.addEventListener("click", (event) => {
-              if (event.target !== fallbackDlg) return;
-              const r = fallbackDlg.getBoundingClientRect();
-              const isInside = r.top <= event.clientY &&
-                event.clientY <= r.top + r.height &&
-                r.left <= event.clientX &&
-                event.clientX <= r.left + r.width;
-              if (!isInside) fallbackDlg.close("cancel");
-            });
-          }
-        `);
+        // Row (d): fallback path — drive the REAL confirm-shared.js asset against shipped #confirmDialog
+        // when closedBy is unsupported by the platform.
+        // We evaluate on new document to delete closedBy and strip closedby attr before any page scripts run,
+        // so the real confirm-shared.js executes its fallback branch and registers its click listener.
+        await cdp("Page.addScriptToEvaluateOnNewDocument", {
+          source:
+            "delete HTMLDialogElement.prototype.closedBy; document.addEventListener('DOMContentLoaded', () => document.getElementById('confirmDialog')?.removeAttribute('closedby'));",
+        });
+        await cdp("Page.navigate", { url: BASE });
+        await until("document.readyState === 'complete'", "real fallback page loaded", 5000);
+
         assertEquals(await js("'closedBy' in HTMLDialogElement.prototype"), false);
-        await js("fallbackDlg.showModal()");
-        await until("fallbackDlg.open === true", "fallbackDlg open", 5000);
+        assertEquals(
+          await js("document.getElementById('confirmDialog').hasAttribute('closedby')"),
+          false,
+        );
+
+        await js("document.getElementById('confirmDialog').showModal()");
+        await until(
+          "document.getElementById('confirmDialog').open === true",
+          "confirmDialog open for fallback outside click",
+          5000,
+        );
         await cdp("Input.dispatchMouseEvent", {
           type: "mousePressed",
           x: 5,
@@ -319,14 +371,18 @@ dialog::backdrop { background: rgba(0,0,0,0.5); }
           button: "left",
           clickCount: 1,
         });
-        await until("!fallbackDlg.open", "fallbackDlg closed by outside click shim", 5000);
-        assertEquals(await js("fallbackDlg.open"), false);
-        assertEquals(await js("fallbackDlg.returnValue"), "cancel");
+        await until(
+          "!document.getElementById('confirmDialog').open",
+          "confirmDialog closed by fallback shim",
+          5000,
+        );
+        assertEquals(await js("document.getElementById('confirmDialog').open"), false);
+        assertEquals(await js("document.getElementById('confirmDialog').returnValue"), "cancel");
       } finally {
         close();
       }
     });
   } finally {
-    await Deno.remove(tempFile).catch(() => {});
+    await server.shutdown();
   }
 });

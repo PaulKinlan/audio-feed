@@ -75,6 +75,12 @@ const ASSETS: Record<string, { body: string; contentType: string }> = {
     body: `${confirmSharedJs}\n${adminJs}`,
     contentType: "text/javascript; charset=utf-8",
   },
+  // audio-feed-lkmuq: the canonical confirm-dialog client served standalone so the
+  // behavioral CDP proof and any future modular consumer can load the real asset.
+  "confirm-shared.js": {
+    body: confirmSharedJs,
+    contentType: "text/javascript; charset=utf-8",
+  },
   // audio-feed-3xq part 4b: the homepage's stylesheet and client, extracted from home.ts's
   // template string. No DESIGN_TOKENS prepend, same reason as admin.css: the page's shell
   // already inlines the tokens these rules resolve against.
