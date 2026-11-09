@@ -991,3 +991,200 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name:
+    "anchor-positioning: tooltip is positioned adjacent to its trigger and stays on-screen at viewport edges (audio-feed-1pv50)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const rawListenCss = await getListenCss();
+
+    const makeTestHtml = (forceFallback = false) => {
+      const listenCss = forceFallback
+        ? rawListenCss.replace(/@supports\s*\(anchor-name:[^{]+\{[\s\S]*?\}\s*\}/g, "")
+        : rawListenCss;
+      return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { --space-1: .25rem; --space-2: .5rem; --surface-3: #e3e0ee; --text: #111; --border: #999; --radius-sm: 6px; --ease: ease; }
+    body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; font: 14px system-ui; }
+    .btn { position: absolute; width: 100px; height: 36px; }
+    #mid { top: 200px; left: 220px; }
+    #top { top: 10px; left: 220px; }
+    #bottom { top: 780px; left: 220px; }
+    #left { top: 200px; left: 10px; }
+    #right { top: 200px; left: 880px; }
+    #corner { top: 780px; left: 880px; }
+    ${listenCss}
+  </style>
+</head>
+<body>
+  <button id="mid" class="btn" data-tooltip="Middle Action">mid</button>
+  <button id="top" class="btn" data-tooltip="Top Edge Action">top</button>
+  <button id="bottom" class="btn" data-tooltip="Bottom Edge Action">bottom</button>
+  <button id="left" class="btn" data-tooltip="Left Edge Action">left</button>
+  <button id="right" class="btn" data-tooltip="Revoke old URL and generate new feed token">right</button>
+  <button id="corner" class="btn" data-tooltip="Revoke old URL and generate new feed token">corner</button>
+  <div id="results"></div>
+  ${TOOLTIP_HTML}
+
+  ${forceFallback ? `<script>CSS.supports = () => false;</script>` : ""}
+  <script>
+    ${TOOLTIP_CLIENT}
+
+    const tip = document.getElementById("appTooltip");
+    const out = document.getElementById("results");
+    const ids = ["mid", "top", "bottom", "left", "right", "corner"];
+    const records = {};
+
+    for (const id of ids) {
+      const btn = document.getElementById(id);
+      btn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+      const tr = tip.getBoundingClientRect();
+      const br = btn.getBoundingClientRect();
+      records[id] = {
+        tip: { top: tr.top, bottom: tr.bottom, left: tr.left, right: tr.right, width: tr.width, height: tr.height },
+        btn: { top: br.top, bottom: br.bottom, left: br.left, right: br.right, width: br.width, height: br.height },
+        adjacentBelow: Math.abs(tr.top - (br.bottom + 8)) <= 1,
+        adjacentAbove: Math.abs(tr.bottom - (br.top - 8)) <= 1,
+        alignedStart: Math.abs(tr.left - br.left) <= 1,
+        alignedEnd: Math.abs(tr.right - br.right) <= 1,
+        onScreen: tr.top >= 0 && tr.left >= 0 && tr.bottom <= window.innerHeight && tr.right <= window.innerWidth
+      };
+      btn.dispatchEvent(new PointerEvent("pointerout", { bubbles: true }));
+    }
+    out.textContent = JSON.stringify(records);
+  </script>
+</body>
+</html>`;
+    };
+
+    for (const forceFallback of [false, true]) {
+      const label = forceFallback ? "JS fallback" : "CSS Anchor Positioning";
+      const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
+      const profileDir = await Deno.makeTempDir({ prefix: "anchor-positioning-chrome-" });
+      await Deno.writeTextFile(tempHtmlFile, makeTestHtml(forceFallback));
+
+      try {
+        const command = new Deno.Command("google-chrome-stable", {
+          args: [
+            "--headless=new",
+            "--disable-gpu",
+            `--user-data-dir=${profileDir}`,
+            "--allow-file-access-from-files",
+            "--window-size=1000,900",
+            "--dump-dom",
+            `file://${tempHtmlFile}`,
+          ],
+        });
+
+        const output = await command.output();
+        assertEquals(output.code, 0);
+        const dom = new TextDecoder().decode(output.stdout);
+        const match = dom.match(/<div id="results">(.*?)<\/div>/);
+        assert(match && match[1], `results container must be present for ${label}`);
+        const res = JSON.parse(match[1].replace(/&quot;/g, '"'));
+
+        // Assertions verify the geometric relationship against the trigger, not constant pixel values:
+        // 1. Mid-viewport: adjacent below trigger, aligned to start, fully on-screen
+        assertEquals(
+          res.mid.adjacentBelow,
+          true,
+          `${label}: mid tooltip must sit directly adjacent below trigger with 8px margin`,
+        );
+        assertEquals(
+          res.mid.alignedStart,
+          true,
+          `${label}: mid tooltip must align with trigger start (left)`,
+        );
+        assertEquals(res.mid.onScreen, true, `${label}: mid tooltip must stay on-screen`);
+
+        // 2. Top-viewport: adjacent below trigger, aligned to start, fully on-screen
+        assertEquals(
+          res.top.adjacentBelow,
+          true,
+          `${label}: top-edge tooltip must sit directly adjacent below trigger`,
+        );
+        assertEquals(
+          res.top.alignedStart,
+          true,
+          `${label}: top-edge tooltip must align with trigger start`,
+        );
+        assertEquals(res.top.onScreen, true, `${label}: top-edge tooltip must stay on-screen`);
+
+        // 3. Bottom-viewport: flips above trigger (flip-block), adjacent above trigger, aligned to start, stays on-screen
+        assertEquals(
+          res.bottom.adjacentAbove,
+          true,
+          `${label}: bottom-edge tooltip must flip above trigger with 8px margin`,
+        );
+        assertEquals(
+          res.bottom.alignedStart,
+          true,
+          `${label}: bottom-edge tooltip must align with trigger start`,
+        );
+        assertEquals(
+          res.bottom.onScreen,
+          true,
+          `${label}: bottom-edge tooltip must stay on-screen without clipping at bottom edge`,
+        );
+
+        // 4. Left-viewport: adjacent below trigger, aligned to start, fully on-screen
+        assertEquals(
+          res.left.adjacentBelow,
+          true,
+          `${label}: left-edge tooltip must sit directly adjacent below trigger`,
+        );
+        assertEquals(
+          res.left.alignedStart,
+          true,
+          `${label}: left-edge tooltip must align with trigger start`,
+        );
+        assertEquals(
+          res.left.onScreen,
+          true,
+          `${label}: left-edge tooltip must stay on-screen without clipping at left edge`,
+        );
+
+        // 5. Right-viewport: adjacent below trigger, flips inline (flip-inline) to align end with trigger, stays on-screen
+        assertEquals(
+          res.right.adjacentBelow,
+          true,
+          `${label}: right-edge tooltip must sit directly adjacent below trigger`,
+        );
+        assertEquals(
+          res.right.alignedEnd,
+          true,
+          `${label}: right-edge tooltip must flip inline to align with trigger end (right)`,
+        );
+        assertEquals(
+          res.right.onScreen,
+          true,
+          `${label}: right-edge tooltip must stay on-screen without clipping at right edge`,
+        );
+
+        // 6. Corner (bottom-right): flips both block (above) and inline (end-aligned), stays on-screen at both boundaries
+        assertEquals(
+          res.corner.adjacentAbove,
+          true,
+          `${label}: corner tooltip must flip above trigger`,
+        );
+        assertEquals(
+          res.corner.alignedEnd,
+          true,
+          `${label}: corner tooltip must flip inline to align with trigger end`,
+        );
+        assertEquals(
+          res.corner.onScreen,
+          true,
+          `${label}: corner tooltip must stay on-screen at both viewport boundaries`,
+        );
+      } finally {
+        await Deno.remove(tempHtmlFile).catch(() => {});
+        await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+      }
+    }
+  },
+});
