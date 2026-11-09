@@ -64,6 +64,15 @@ routes, listed separately because the attacker's position there is different.
     durable lifetime ceiling of 5 retries per episode (`src/routes/listen.ts:882-901`).
   - The listen page and its status poll are rate-limited before ANY store work: 60 per 5 min per
     (route, address) (audio-feed-l11jx; `src/routes/listen.ts:641`, `:714-715`).
+  - Feed routes (`GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`) are rate-limited
+    before ANY store work (audio-feed-oxyp1; `src/compose/feeds.ts:85-122`): dual sliding windows in the
+    shared metadata store bound requests per client IP (`FEED_IP_RATE`: 120 per 5 min) against token
+    enumeration and per capability token (`FEED_TOKEN_RATE`: 60 per 5 min) across aggregator IPs and
+    client apps, returning a clean 429 with `Retry-After`.
+  - Feed generation work per request is strictly bounded (audio-feed-oxyp1; `src/compose/feeds.ts:46-83`):
+    `publishableEpisodes` scans at most `FEED_MAX_PAGES` (3 pages of `FEED_EPISODE_CAP` = 200, scanning
+    at most 600 records), unpublishable episodes (pending/failed/synthesizing) never trigger blob I/O,
+    and blob `head()` calls for legacy records lacking `byteLength` are capped at `FEED_MAX_HEAD_CALLS` (30).
   - Capability keys are redacted from logs and error URLs (`src/router.ts`, `redactAudioKey`,
     `sanitizeRequestUrl`).
 - **Residual (documented, accepted):** a leaked capability is a bearer credential, valid until

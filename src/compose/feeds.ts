@@ -10,15 +10,16 @@ import { subscribeToFeed } from "../ingest/feed.ts";
 import { buildFeed, masterFeedUrl, sourceFeedUrl } from "../feed/rss.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "../feed/types.ts";
 import { toFeedEpisode } from "../feed/adapter.ts";
-import { isAudioMode } from "../types.ts";
+import { isAudioMode, isPublishable } from "../types.ts";
 import { resolveOrigin } from "../origin.ts";
 import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
-import { readCappedJson } from "../http.ts";
+import { problem, readCappedJson } from "../http.ts";
 import { approvedUserFor, forbidden, loadUserByFeedToken, notFound } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import type { ComposeDeps } from "./shared.ts";
 import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../types.ts";
+import { extractClientIp, SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
 
 /**
  * Query the user's episodes and project them for the generator.
@@ -33,7 +34,99 @@ import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../typ
  * bound a feed so a client's first sync stays finite; audio-feed-2w8 is the reminder that the bound
  * has to count items the subscriber can actually play, not items listed on the way to filtering.
  */
-const FEED_EPISODE_CAP = 200;
+/**
+ * Rate limit per capability token for the unauthenticated feed routes (audio-feed-oxyp1).
+ * Keyed on the token, not the IP: a capability URL is a bearer credential, so keying on
+ * the token bounds one subscriber's aggregates across any podcast clients and aggregator IPs.
+ * 60 requests per 5 minutes gives 1 request every 5 seconds on average — plenty of headroom
+ * for podcast apps polling every 15-60 minutes and manual refresh bursts.
+ */
+export const FEED_TOKEN_RATE = { maxRequests: 60, windowMs: 5 * 60 * 1000 } as const;
+
+/**
+ * Rate limit per client IP for feed routes (audio-feed-oxyp1).
+ * Bounds enumeration and spray attacks across capability tokens from one address before
+ * any store lookup.
+ */
+export const FEED_IP_RATE = { maxRequests: 120, windowMs: 5 * 60 * 1000 } as const;
+
+export const FEED_RATE_LIMIT = FEED_TOKEN_RATE;
+
+export const FEED_TOKEN_WINDOW = "feed_token";
+export const FEED_IP_WINDOW = "feed_ip";
+
+/**
+ * The RSS cap: at most this many PUBLISHABLE episodes per feed. Industry-standard practice is to
+ * bound a feed so a client's first sync stays finite; audio-feed-2w8 is the reminder that the bound
+ * has to count items the subscriber can actually play, not items listed on the way to filtering.
+ */
+export const FEED_EPISODE_CAP = 200;
+
+/**
+ * Upper bound on the number of `listEpisodePage` pages scanned per feed request (audio-feed-oxyp1).
+ * Page size is `FEED_EPISODE_CAP` (200). With `FEED_MAX_PAGES = 3`, up to 600 scanned records are
+ * examined to find up to 200 publishable episodes (allowing up to 400 non-publishable records intermingled).
+ * An account with thousands of pending/failed episodes stops after 3 pages instead of paging indefinitely.
+ */
+export const FEED_MAX_PAGES = 3;
+
+/**
+ * Upper bound on outbound blob `head()` calls per feed request (audio-feed-oxyp1).
+ * Synthesis writes `byteLength` on completion, so only legacy/un-backfilled records lack it.
+ * Capped to 30: normal accounts (e.g. 30 legacy episodes) can have their sizes fully resolved,
+ * while preventing outbound blob request amplification on accounts with unpopulated sizes.
+ * Furthermore, `head()` is only called for publishable episodes, never for pending/failed ones.
+ */
+export const FEED_MAX_HEAD_CALLS = 30;
+
+/**
+ * Apply the feed rate limits, returning a 429 response or null if admitted.
+ * Checked BEFORE any store work (no `loadUserByFeedToken` or episode traversal).
+ */
+export async function refuseFeedRead(
+  ctx: AppContext,
+  token: string,
+  req: Request,
+  remoteAddr?: string,
+): Promise<Response | null> {
+  const clientIp = extractClientIp(req, Boolean(ctx.config.trustProxyHeaders), remoteAddr);
+
+  // 1. IP check: bounds enumeration across tokens from one address before any tenant read.
+  const ipLimit = await new SlidingWindowRateLimiter(
+    FEED_IP_RATE,
+    ctx.stores.metadata,
+    FEED_IP_WINDOW,
+  ).check(clientIp);
+  if (!ipLimit.allowed) {
+    const refused = problem({
+      status: 429,
+      title: "too_many_requests",
+      detail: "Too many feed requests from this client; retry later.",
+    });
+    refused.headers.set("retry-after", String(Math.max(1, Math.ceil(ipLimit.resetMs / 1000))));
+    return refused;
+  }
+
+  // 2. Token check: bounds one subscriber's aggregate across apps/IPs before any tenant read.
+  if (token) {
+    const tokenLimit = await new SlidingWindowRateLimiter(
+      FEED_TOKEN_RATE,
+      ctx.stores.metadata,
+      FEED_TOKEN_WINDOW,
+    ).check(token);
+    if (!tokenLimit.allowed) {
+      const refused = problem({
+        status: 429,
+        title: "too_many_requests",
+        detail: "Too many feed requests for this token; retry later.",
+      });
+      refused.headers.set("retry-after", String(Math.max(1, Math.ceil(tokenLimit.resetMs / 1000))));
+      return refused;
+    }
+  }
+
+  return null;
+}
 
 async function publishableEpisodes(
   ctx: AppContext,
@@ -44,19 +137,23 @@ async function publishableEpisodes(
   baseUrl: string,
   filter: { sourceId?: string; mode?: AudioMode } = {},
 ): Promise<FeedEpisode[]> {
-  // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found, instead of listing the newest
-  // 200 of any status and filtering afterwards. Listing-then-filtering meant every pending or
-  // failed episode among the newest 200 silently removed a playable item from a subscriber's feed
-  // (audio-feed-2w8): after a large feed poll, or a large "Regenerate all", the oldest ready
-  // episodes fell off the end even though ready work existed to replace them. This is the same
-  // fix the player got in audio-feed-8oz, on the other side of the same seam.
+  // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found or `FEED_MAX_PAGES` is reached.
+  // audio-feed-oxyp1 bounds the work per request:
+  // 1. At most `FEED_MAX_PAGES` pages are scanned so an account with many pending/failed episodes
+  //    cannot cause unbounded KV paging.
+  // 2. Only publishable episodes are considered — pending/failed items never trigger blob head() calls.
+  // 3. Blob head() calls for legacy records lacking byteLength are capped at `FEED_MAX_HEAD_CALLS`.
   //
   // `listEpisodePage`'s limit bounds the SCAN, not the matches, so a short page is not the end —
   // the loop continues while a cursor advances. The cursor guard is not decoration: a store that
   // hands back the same cursor would otherwise spin here forever.
   const publishable: FeedEpisode[] = [];
   let cursor: string | undefined;
+  let pages = 0;
+  let headCalls = 0;
+
   do {
+    pages++;
     const page = await ctx.stores.metadata.listEpisodePage({
       userId,
       sourceId: filter.sourceId,
@@ -66,24 +163,32 @@ async function publishableEpisodes(
     });
     for (const episode of page.episodes) {
       if (publishable.length >= FEED_EPISODE_CAP) break;
-      const needsSize = !episode.byteLength || episode.byteLength <= 0;
+      // Drop unpublishable episodes immediately (audio-feed-oxyp1): unpublishable items
+      // (pending/failed/synthesizing) must never trigger blob head() calls or count toward caps.
+      if (!isPublishable(episode)) continue;
+
+      const needsSize = (!episode.byteLength || episode.byteLength <= 0) &&
+        headCalls < FEED_MAX_HEAD_CALLS;
+      let byteLength: number | undefined;
       // A LEGACY metadata row can carry a key the store boundary refuses (a dot or empty segment —
       // the blobkeys guard made head() throw InvalidBlobKeyError before any network call). One
       // such row must not abort the whole feed: guard on the shared predicate, so a refused key
       // degrades to "size omitted" (length="0") exactly as it behaved before the guard existed,
       // while a genuine transport failure (`S3 head failed (status)`) still surfaces. This is
       // deliberately NOT a blanket catch — storage outages must stay loud.
-      const info = needsSize && episode.audioKey && isSafeBlobKey(episode.audioKey)
-        ? await ctx.stores.blobs.head(episode.audioKey)
-        : null;
+      if (needsSize && episode.audioKey && isSafeBlobKey(episode.audioKey)) {
+        headCalls++;
+        const info = await ctx.stores.blobs.head(episode.audioKey);
+        byteLength = info?.size;
+      }
       const mapped = toFeedEpisode(episode, {
         publicBaseUrl: baseUrl,
-        byteLength: info?.size,
+        byteLength,
       });
       if (mapped) publishable.push(mapped);
     }
     cursor = page.cursor === cursor ? undefined : page.cursor;
-  } while (cursor && publishable.length < FEED_EPISODE_CAP);
+  } while (cursor && publishable.length < FEED_EPISODE_CAP && pages < FEED_MAX_PAGES);
 
   return publishable;
 }
@@ -111,8 +216,11 @@ function feedResponse(xml: string): Response {
  * feed would otherwise keep serving audio generated before a suspension.
  */
 export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFeed"] {
-  return async ({ params, req }) => {
+  return async ({ params, req, remoteAddr }) => {
     const token = params.token ?? "";
+    const refused = await refuseFeedRead(ctx, token, req, remoteAddr);
+    if (refused) return refused;
+
     const user = await loadUserByFeedToken(ctx, token);
     if (!user) return notFound("Unknown feed");
     if (user.status !== "approved") return forbidden(`Feed unavailable (status: ${user.status})`);
@@ -152,8 +260,11 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
 }
 /** `GET /feed/:token/:sourceId/:mode.xml` — one source, one presentation mode. */
 export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFeed"] {
-  return async ({ params, req }) => {
+  return async ({ params, req, remoteAddr }) => {
     const token = params.token ?? "";
+    const refused = await refuseFeedRead(ctx, token, req, remoteAddr);
+    if (refused) return refused;
+
     const user = await loadUserByFeedToken(ctx, token);
     if (!user) return notFound("Unknown feed");
     if (user.status !== "approved") return forbidden(`Feed unavailable (status: ${user.status})`);
