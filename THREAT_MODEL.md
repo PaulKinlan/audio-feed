@@ -62,11 +62,19 @@ routes, listed separately because the attacker's position there is different.
   - The feed routes follow the same rule (audio-feed-vcpyi): an unknown token and a
     known-but-unapproved owner answer the IDENTICAL 404 `{"error":"Unknown feed"}` with no status
     detail, so holding a capability cannot confirm it or read the account's lifecycle out of a refusal
-    (`src/compose/feeds.ts:272-274`, `:321-322`).
-  - The served feed document carries no subscriber identity (audio-feed-zlu04): `ownerEmail` is never
-    populated from the account, so no `<itunes:owner><itunes:email>` is emitted. A capability URL is
-    pasted into third-party clients and directories, and an address published that way cannot be
-    recalled (`src/compose/feeds.ts:293-297`, `:339`).
+    (`src/compose/feeds.ts:274`, `:322`).
+  - The served feed document carries no subscriber EMAIL and no account status (audio-feed-zlu04):
+    `ownerEmail` is never populated from the account, so no `<itunes:owner><itunes:email>` is emitted.
+    A capability URL is pasted into third-party clients and directories, and an address published that
+    way cannot be recalled (`src/compose/feeds.ts:293-297`, `:339`). What the document DOES still
+    publish is the display name: the master feed's channel `<title>` is `${displayName} — Audio Feed`
+    and its `<itunes:author>` is `displayName` itself (`src/compose/feeds.ts:288`, `:292`); a
+    per-source feed titles itself from the source and sends the SOURCE title as `<itunes:author>`
+    (`:334`, `:338`), so the account name does not appear there. No email, no account id and no
+    approval status ride along, and `tests/feed_disclosure_test.ts:147-195` pins both halves — the
+    absent email shape and the present title/author. Dropping the display name as well was left as a
+    PRODUCT decision rather than a leak fix: clients render `<itunes:author>` as the show's author, so
+    removing it changes what every subscriber sees in their player.
   - The retry POST is a PAID mutation behind the weaker credential, walled three ways (audio-feed-8jzgl):
     a same-origin wall, two sliding windows (10/10 min per token+address, 30/10 min per token) and a
     durable lifetime ceiling of 5 retries per episode (`src/routes/listen.ts:882-901`).
