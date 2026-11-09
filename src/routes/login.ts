@@ -78,7 +78,13 @@ export function renderLoginPage(o: { viewer: Viewer | null; next: string; nonce:
   </div>
   ${signedIn}
   <section class="panel" id="signInPanel" aria-labelledby="loginTitle">
-    <button class="btn big" type="button" id="signIn">${KEY_ICON}<span>Sign in with a passkey</span></button>
+    <form id="signInForm" autocomplete="on">
+      <div class="field u-mb-sm">
+        <label for="loginUsername">Account username or email</label>
+        <input id="loginUsername" type="text" name="username" autocomplete="username webauthn" placeholder="you@example.com" />
+      </div>
+      <button class="btn big" type="button" id="signIn">${KEY_ICON}<span>Sign in with a passkey</span></button>
+    </form>
     <p class="feedback" id="signInFeedback" role="status" aria-live="polite"></p>
     <details class="more">
       <summary>No passkey yet, or lost it?</summary>
@@ -125,13 +131,27 @@ ${PASSKEY_CLIENT}
   const say = (el, tone, text) => { el.dataset.tone = tone; el.textContent = text; };
   const signInBtn = $("signIn");
   const signInFeedback = $("signInFeedback");
+  const signInForm = $("signInForm");
+  const bootstrapForm = $("bootstrapForm");
+
+  let conditionalController = null;
+  const abortConditional = () => {
+    if (conditionalController) {
+      try { conditionalController.abort(); } catch {}
+      conditionalController = null;
+    }
+  };
 
   if (!passkeysSupported) {
     signInBtn.disabled = true;
-    say(signInFeedback, "error", "This browser can't use passkeys. Try an up-to-date Chrome, Safari, Edge or Firefox.");
   }
 
   signInBtn.addEventListener("click", async () => {
+    abortConditional();
+    if (!passkeysSupported) {
+      say(signInFeedback, "error", "This browser can't use passkeys. Try an up-to-date Chrome, Safari, Edge or Firefox.");
+      return;
+    }
     signInBtn.disabled = true;
     say(signInFeedback, "ok", "Waiting for your passkey…");
     try {
@@ -155,6 +175,65 @@ ${PASSKEY_CLIENT}
     }
   });
 
+  signInForm?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    abortConditional();
+    if (!signInBtn.disabled) signInBtn.click();
+  });
+
+  document.addEventListener("submit", abortConditional);
+  window.addEventListener("pagehide", abortConditional);
+  window.addEventListener("beforeunload", abortConditional);
+
+  async function initConditionalUI() {
+    if (!passkeysSupported || typeof PublicKeyCredential.isConditionalMediationAvailable !== "function") {
+      return;
+    }
+    try {
+      const available = await PublicKeyCredential.isConditionalMediationAvailable();
+      if (!available) return;
+    } catch {
+      return;
+    }
+    conditionalController = new AbortController();
+    const signal = conditionalController.signal;
+    try {
+      const options = await post("/api/auth/login/options");
+      if (signal.aborted) return;
+      const cred = await navigator.credentials.get({
+        publicKey: requestOptions(options),
+        signal,
+        mediation: "conditional",
+      });
+      if (conditionalController && conditionalController.signal === signal) {
+        conditionalController = null;
+      }
+      if (!cred) return;
+      const encoded = credentialJSON(cred);
+      try {
+        await post("/api/auth/login/verify", encoded);
+      } catch (error) {
+        if (error.status === 404 && PublicKeyCredential.signalUnknownCredential) {
+          PublicKeyCredential.signalUnknownCredential({ rpId: options.rpId, credentialId: encoded.id })
+            .catch(() => {});
+        }
+        throw error;
+      }
+      say(signInFeedback, "ok", "Signed in. Taking you there…");
+      location.assign(NEXT);
+    } catch (error) {
+      if (conditionalController && conditionalController.signal === signal) {
+        conditionalController = null;
+      }
+      if (error && (error.name === "AbortError" || error.name === "NotAllowedError")) {
+        return;
+      }
+      if (error && error.status) {
+        say(signInFeedback, "error", ceremonyError(error));
+      }
+    }
+  }
+
   // A setup link: /login#setup=<secret>. Take it, then scrub it from the address
   // bar and history before anything else can read or record it.
   const match = /^#setup=([A-Za-z0-9_-]+)$/.exec(location.hash);
@@ -163,12 +242,12 @@ ${PASSKEY_CLIENT}
     bootstrapDetails.open = true;
   }
 
-  const bootstrapForm = $("bootstrapForm");
   const bootstrapBtn = $("bootstrapSubmit");
   const bootstrapFeedback = $("bootstrapFeedback");
 
   bootstrapForm?.addEventListener("submit", async (e) => {
     e.preventDefault();
+    abortConditional();
     if (!passkeysSupported) {
       say(bootstrapFeedback, "error", "This browser can't create passkeys.");
       return;
@@ -238,6 +317,9 @@ ${PASSKEY_CLIENT}
         createBtn.disabled = false;
       }
     });
+  }
+  if (!match) {
+    initConditionalUI();
   }
 })();`;
 
