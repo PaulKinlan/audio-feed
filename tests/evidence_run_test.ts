@@ -13,12 +13,14 @@ import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/a
 import { fromFileUrl, join } from "@std/path";
 import {
   assertExemptionReasons,
+  CANONICAL_PROJECTION_VERSION,
   collect,
   EVIDENCE_RECORD_EXEMPTIONS,
   EVIDENCE_RECORDS_ENFORCED,
   EVIDENCE_RECORDS_ENFORCED_FOR_TESTS,
   findNestedEvidence,
   hashEvidenceDir,
+  hashEvidenceDirCanonical,
   parseOptions,
   readDeclaration,
   readRunRecord,
@@ -1511,28 +1513,33 @@ Deno.test(
 );
 
 /**
- * audio-feed-fufd0 - WHAT AN ARTEFACT HASH PROVES, PINNED SO NOBODY OVER-READS IT. `hashEvidenceDir`
- * hashes the bytes on disk at record time, so the record's `artefacts` map is a DISK-COINCIDENCE
- * CHECK, not a reproducibility claim. audio-feed-icl4's repro.json embeds `capturedAt`, so its
- * recorded hash changes every run; audio-feed-wzv9's artefacts happen to be stable. Both readings are
- * asserted here through the real CLI, so neither can be assumed - and a canonical-projection hash
- * (timestamps normalised before hashing) would RED this test's first row, which is the point: it is a
- * change of meaning, not a refactor.
+ * audio-feed-fufd0 - WHAT AN ARTEFACT HASH PROVES, AND THE DIGEST THAT CAN ATTEST REPRODUCIBILITY.
+ * `hashEvidenceDir` hashes the bytes on disk at record time, so `artefacts` is a DISK-COINCIDENCE
+ * CHECK: audio-feed-icl4's repro.json embeds `capturedAt`, so its raw hash changes every run and
+ * still pre-flights clean. `hashEvidenceDirCanonical` hashes a projection with the clock fields
+ * normalised, so a re-run IS comparable. ROW 1 runs the same volatile proof twice and asserts both
+ * readings at once - raw bytes and raw hash differ, canonical digest is EQUAL - which is the
+ * determinism claim in hash form. Mutants that red row 1: (a) drop `capturedAt` from
+ * VOLATILE_ARTEFACT_FIELDS - the two canonical digests then differ; (b) pin the proof's timestamp to
+ * a constant - the raw bytes stop differing. ROW 2 restores the first run's bytes without touching
+ * the record and requires RECORD TAMPERED (mutant: delete the raw comparison and it exits 0). ROW 3
+ * changes only non-volatile content and requires RECORD DERIVED CHANGED (mutant: drop the canonical
+ * comparison and it exits 0), which is what makes the canonical map a rule rather than decoration.
  */
 Deno.test(
-  "an artefact hash attests the bytes on disk at record time, not reproducibility (audio-feed-fufd0)",
+  "an artefact hash attests the bytes on disk, and its canonical digest attests reproducibility (audio-feed-fufd0)",
   async () => {
     const h = await makeRecordScratch(VOLATILE_PROOF);
     try {
-      // ROW 1 (GREEN): two real runs of a volatile proof. The bytes and the recorded hash both
-      // differ, and BOTH pre-flights are clean: the tier never notices that run 2 did not reproduce
-      // run 1's file, because the record is rewritten from the same disk it describes. That is the
-      // limit this row pins - it becomes a failure the day the hash claims more than coincidence.
+      // ROW 1 (GREEN): two real runs of a volatile proof. The bytes and the recorded raw hash both
+      // differ; the canonical digests are equal, so this artefact's content IS reproducible and the
+      // record can say so. Both pre-flights are clean.
       const first = await runTier(h.root);
       assertEquals(first.code, 0, `first run must pass: ${first.stdout}\n${first.stderr}`);
       const firstBytes = await readArtefact(h.dirAbs, "repro.json");
       const firstRecord = expectOk(await readRunRecord(h.dirAbs));
       const firstHash = firstRecord.artefacts["repro.json"]!;
+      const firstStamp = JSON.parse(firstBytes).capturedAt;
       assertStringIncludes(firstBytes, "capturedAt", "the artefact must embed the volatile field");
 
       const second = await runTier(h.root);
@@ -1540,7 +1547,7 @@ Deno.test(
       assertEquals(
         second.stdout.includes("record incident"),
         false,
-        "a volatile artefact is not an incident: the record matched the disk before the run",
+        "a volatile field is not an incident: the record matched the disk before the run",
       );
       const secondBytes = await readArtefact(h.dirAbs, "repro.json");
       const secondRecord = expectOk(await readRunRecord(h.dirAbs));
@@ -1548,14 +1555,38 @@ Deno.test(
       assert(firstBytes !== secondBytes, "the artefact bytes must differ between the two runs");
       assert(
         firstHash !== secondHash,
-        "the recorded hash must change with them - it cannot attest that a re-run reproduces the file",
+        "the raw hash must change with them - on its own it cannot attest that a re-run reproduces the file",
       );
-      // The one thing the hash DOES attest still holds: it equals the hash of the bytes on disk.
-      const onDisk = await hashEvidenceDir(h.dirAbs);
-      assertEquals(Object.entries(onDisk), [["repro.json", secondHash]]);
+      assert(
+        typeof firstStamp === "string" && firstStamp !== JSON.parse(secondBytes).capturedAt,
+        "the two runs must disagree on the timestamp, or this row proves nothing",
+      );
+
+      // THE DETERMINISM READING: the same artefact, hashed over its volatile-free projection, is
+      // EQUAL across the two runs. Asserted from the recorded maps and recomputed from disk.
+      assertEquals(
+        secondRecord.canonicalVersion,
+        CANONICAL_PROJECTION_VERSION,
+        "the record must name the projection version that produced its canonical map",
+      );
+      assertEquals(
+        firstRecord.canonicalArtefacts?.["repro.json"],
+        secondRecord.canonicalArtefacts?.["repro.json"],
+        "the canonical digest must be equal across runs - it is the hash that attests reproducibility",
+      );
+      const onDisk = await hashEvidenceDirCanonical(h.dirAbs);
+      assertEquals(
+        Object.entries(onDisk),
+        [["repro.json", secondRecord.canonicalArtefacts!["repro.json"]!]],
+      );
+      assertEquals(
+        Object.entries(await hashEvidenceDir(h.dirAbs)),
+        [["repro.json", secondHash]],
+        "the raw map still equals the hash of the bytes on disk",
+      );
 
       // ROW 2 (RED): put the FIRST run's bytes back without touching the record - a file edited
-      // after the run. This is the only divergence the hash detects.
+      // after the run. This is the divergence the RAW hash detects.
       await Deno.writeTextFile(join(h.dirAbs, "repro.json"), firstBytes);
       const edited = await runTier(h.root);
       assertEquals(edited.code, 1, `a file edited after the run must exit 1: ${edited.stdout}`);
@@ -1565,6 +1596,33 @@ Deno.test(
       );
       assertStringIncludes(edited.stdout, `recorded ${secondHash}`);
       assertStringIncludes(edited.stdout, "1 record incident(s)");
+
+      // ROW 3 (RED): a record whose canonical digest no longer matches the file, with the raw digest
+      // left intact. That is the shape of a re-run producing different NON-volatile content - the
+      // only failure the canonical rule exists to name. The tier rewrites every incident-free
+      // pre-flight's record, so the mismatch is applied to the canonical map of a freshly written
+      // record instead.
+      const current = expectOk(await readRunRecord(h.dirAbs));
+      await Deno.writeTextFile(
+        join(h.dirAbs, RECORD_FILE),
+        JSON.stringify(
+          {
+            ...current,
+            canonicalArtefacts: {
+              "repro.json": "sha256:" + "0".repeat(64),
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      const derived = await runTier(h.root);
+      assertEquals(derived.code, 1, `a changed canonical digest must exit 1: ${derived.stdout}`);
+      assertStringIncludes(
+        derived.stdout,
+        "RECORD DERIVED CHANGED: docs/evidence/h22ml-scratch artefact repro.json content changed outside the volatile fields",
+      );
+      assertStringIncludes(derived.stdout, "a re-run did not reproduce the artefact");
     } finally {
       await h.cleanup();
     }

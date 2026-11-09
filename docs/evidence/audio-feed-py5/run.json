@@ -1,15 +1,17 @@
 {
   "script": "scripts/listen-browser-proof.ts",
-  "sha": "fb8befa08d0cf63fcf32b70eeb8e164aaa5141b8",
+  "sha": "0c030e8fcbec624543303338a35b79c47a6dfd52",
   "bound": {
-    "ms": 420000,
-    "provenance": "flag"
+    "ms": 300000,
+    "provenance": "default"
   },
-  "startedAt": "2026-11-02T11:12:23.406Z",
-  "endedAt": "2026-11-02T11:12:25.907Z",
+  "startedAt": "2026-11-09T09:20:06.551Z",
+  "endedAt": "2026-11-09T09:20:13.888Z",
   "exit": 0,
   "marker": true,
   "artefacts": {
-    "01-listen-harness-5-episodes.png": "sha256:7f655249eaf44ca8be33e2b7819957e12c08c60f44f448ab65feec10071d3c33"
-  }
+    "01-listen-harness-5-episodes.png": "sha256:070c5cd84452bd1831d57feffe8b8eda2a5d30c8995c6bb71263aa1b85245223"
+  },
+  "canonicalArtefacts": {},
+  "canonicalVersion": 2
 }
