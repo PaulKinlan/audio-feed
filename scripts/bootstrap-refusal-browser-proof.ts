@@ -18,7 +18,7 @@ import {
   writeEvidenceReadme,
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
-import { withHangBound } from "./proof-cdp.ts";
+import { connectCdp, HANG_BOUND_MS } from "./proof-cdp.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-xw7/", import.meta.url).pathname;
 
@@ -36,69 +36,21 @@ await runProof("audio-feed-xw7", async (checker) => {
 
   try {
     await withChrome(async (chrome) => {
-      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
-      const page = targets.find((t: { type: string }) => t.type === "page");
-      const ws = new WebSocket(page.webSocketDebuggerUrl);
-      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-      let nextId = 0;
-      const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-      ws.addEventListener("message", (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)!(msg);
-          pending.delete(msg.id);
-        }
-      });
-
-      // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
-        const id = ++nextId;
-        ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
-        );
-        if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-        return msg.result;
-      }
-      // deno-lint-ignore no-explicit-any
-      async function js(expression: string): Promise<any> {
-        const r = await cdp("Runtime.evaluate", {
-          expression,
-          awaitPromise: true,
-          returnByValue: true,
-          userGesture: true,
-        });
-        if (r.exceptionDetails) {
-          throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
-        }
-        return r.result?.value;
-      }
-
-      /**
-       * This host has MEASURED a bare `readyState === "complete"`
-       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
-       * That measured starved floor is the unit.
-       *
-       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
-       * bound: a page whose main thread never answers still fails, in two minutes rather
-       * than hanging until something outside the proof kills the lane - and it fails with a
-       * message naming what was asked and the budget it had.
-       */
-      const MEASURED_STARVED_POLL_MS = 8_000;
-      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
-      async function until(expr: string, desc: string, timeoutMs = 8000) {
-        const t0 = Date.now();
-        while (Date.now() - t0 < timeoutMs) {
-          if (await withHangBound(js(expr), desc)) return;
-          await sleep(50);
-        }
-        throw new Error(`timed out waiting for: ${desc}`);
-      }
+      // The shared client, not a private copy of it (audio-feed-go4le). The copy this file used
+      // to carry sent its `Runtime.evaluate` with NO timeout at all, so every bare `await js(...)`
+      // below had no per-wait ceiling and a main thread that never answered hung the proof until
+      // something outside it killed the lane; its private `until` also defaulted to the
+      // un-derived 8s and never clamped a poll to the budget that was left. `connectCdp` bounds
+      // ONE evaluate against the timer (CdpHangBoundExceeded), defaults `js()` and `until()` to
+      // HANG_BOUND_MS = 120s = 15 x the measured 8s starved-poll floor (audio-feed-6gst1), and
+      // bounds each poll by what is left of the wait it is serving. HANG_BOUND_MS is a HANG
+      // bound, never a latency promise: a page whose main thread never answers still fails, in
+      // two minutes, with a message naming what was asked and the budget it had.
+      const { cdp, js, until, ws } = await connectCdp(chrome.port);
 
       async function go(path: string) {
         await cdp("Page.navigate", { url: `${BASE}${path}` });
-        await until(`document.readyState === "complete"`, `load ${path}`, UNTIL_HANG_BOUND_MS);
+        await until(`document.readyState === "complete"`, `load ${path}`, HANG_BOUND_MS);
         await sleep(100);
       }
 
@@ -134,7 +86,7 @@ await runProof("audio-feed-xw7", async (checker) => {
         await until(
           `document.getElementById("bootstrapFeedback").dataset.tone === "error"`,
           "error on existing user bootstrap",
-          UNTIL_HANG_BOUND_MS,
+          HANG_BOUND_MS,
         );
         const ritaFeedback = await js(`document.getElementById("bootstrapFeedback").textContent`);
         check(
@@ -167,7 +119,7 @@ await runProof("audio-feed-xw7", async (checker) => {
         await until(
           `document.getElementById("bootstrapFeedback").dataset.tone === "error"`,
           "error on existing pending user bootstrap",
-          UNTIL_HANG_BOUND_MS,
+          HANG_BOUND_MS,
         );
         const samFeedback = await js(`document.getElementById("bootstrapFeedback").textContent`);
         check(
@@ -185,7 +137,7 @@ await runProof("audio-feed-xw7", async (checker) => {
       `);
 
         // Wait for WebAuthn ceremony to complete and redirect to /admin
-        await until(`location.pathname === "/admin"`, "redirect to /admin", 10000);
+        await until(`location.pathname === "/admin"`, "redirect to /admin", HANG_BOUND_MS);
         check(
           "new admin bootstrap completes passkey registration and redirects to /admin",
           (await js(`location.pathname`)) === "/admin",
@@ -196,7 +148,7 @@ await runProof("audio-feed-xw7", async (checker) => {
         await until(
           `document.getElementById("usersBody")?.children?.length > 0`,
           "console subscribers loaded",
-          UNTIL_HANG_BOUND_MS,
+          HANG_BOUND_MS,
         );
         const adminEmail = await js(
           `document.querySelector(".signin-card strong")?.textContent || ""`,

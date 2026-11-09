@@ -470,13 +470,17 @@ is the BROWSER branch, recorded so the next person does not rediscover the proof
 surface one gate red at a time. First measured directly on `origin/main` at `ea949d2e`; recounted
 2026-10-31 at `origin/main` `275df1da` with a trailing-comma-safe walker, recounted again the same
 day at `origin/main` `ed7116fb` after five `fleet/until-sweep-*` merges, recounted once more after
-the sixth (`265131c3`), and re-run once more since — the aggregate below is the newest recount,
-`c84ced51` (2026-11-09), and it names its command so the next recount is a command rather than a
-claim:
+the sixth (`265131c3`), then at `c84ced51`, and again at `f2d5ead5` (2026-11-09) after `fleet/until-4`
+— the aggregate below is that newest recount, and it names its command so the next recount is a
+command rather than a claim:
 
 - **Zero `until()` call sites pass only the two required arguments** — the two-argument population
-  is **0 across 0 files** at `origin/main` `c84ced51`, out of **181** `until(` calls in 29 files, and
+  is **0 across 0 files** at `origin/main` `f2d5ead5`, out of **181** `until(` calls in 29 files, and
   **all 181** sites pass an explicit third argument (argc 3): the sweep series below is complete.
+  **Exactly one of the 181 still passes a bare numeric literal** — `uploads-six-type-browser-proof.ts:419`,
+  `60_000`, carrying its own measured rationale in place (a cold pdf-parse/readability import can
+  exceed 15s); the other 180 name a constant. Recount the literal population with the same walker plus
+  a grep for a numeric third argument; do not carry this sentence forward without re-running it.
   Count it rather than trusting this figure, with the repo's own tool — `scripts/call-arity.ts`, the
   trailing-comma-safe walker (paren/quote/template-aware over each `until(` argument list, counting
   only non-empty argument spans, with definitions and type positions excluded).
@@ -484,7 +488,8 @@ claim:
   site as `file:line` and then the file tally, and prints `# 0 two-argument call(s) to until in 0
   file(s) (92 scanned)` today; the full variant `deno run --allow-read scripts/call-arity.ts until
   scripts` counts every site with its argument count and prints `# 181 call(s) to until in 29 file(s)
-  with calls (92 scanned), 0 two-argument` at `c84ced51` (2026-11-09). The 176 this section used to
+  with calls (92 scanned), 0 two-argument` at `f2d5ead5` (2026-11-09) — the same 181-in-29 population
+  `c84ced51` carried, re-derived here rather than inherited. The 176 this section used to
   quote was not wrong, only stale: re-running the same tool against `265131c3` (the base it named)
   prints 176, and the five-call growth is later landings, not drift or a change of method —
   `scripts/csp-nonce-browser-proof.ts` +2 and `scripts/listen-browser-proof.ts` +3, the only two files
@@ -511,13 +516,14 @@ claim:
   default for BOTH helpers: `until(expr, desc, timeoutMs = HANG_BOUND_MS)` (`:156`) and
   `js(expression, timeoutMs = HANG_BOUND_MS)` (`:113`), which races its ONE `Runtime.evaluate`
   against the timer and rejects with `CdpHangBoundExceeded` rather than polling
-  (`fleet/shared-proof-bound`, merge `7a3df3be`). 26 private `until` copies live beside it: **15
-  default to 8 s** (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-,
-  request-access-, playback-position-, spend-visibility-, voice-audition-, home-player-link- and
-  listen-filter-browser-proof.ts, verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts,
-  verify_qz3x_confirm_dismiss_browser.ts and verify_main_l7m1_e2e.ts — one more than the earlier
-  count of 14, which missed the arrow-function copy at `:261`), 7 default to 15s and 4 to 10s. There
-  is no single file to fix: the default itself is forked per script.
+  (`fleet/shared-proof-bound`, merge `7a3df3be`). 24 private `until` copies live beside it (down
+  from 26 — `fleet/until-4` deleted the two in the bootstrap proofs): **13 default to 8 s**
+  (tokens-, bookmarklet-, account-, request-access-, playback-position-, spend-visibility-,
+  voice-audition-, home-player-link- and listen-filter-browser-proof.ts,
+  verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts,
+  verify_qz3x_confirm_dismiss_browser.ts and the arrow-function copy at
+  `verify_main_l7m1_e2e.ts:261`), 7 default to 15s and 4 to 10s. There is no single file to fix:
+  the default itself is forked per script.
 - **`scripts/account-mobile-layout-proof.ts` evaluates with no bound at all.** Four `measure()`
   layout reads (call sites at lines 390, 401, 422, 483) and seven `await js(...)` call sites (five
   inline asserts/reads at 398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all
@@ -529,7 +535,7 @@ claim:
   (`9921a815`) has now merged too — `origin/main` tip `275df1da` is that merge — so the four reads
   and the bare evaluates are all bounded on `main` today.)
 
-Three fixes exist and are the pattern to copy, not a complaint to file:
+Four fixes exist and are the pattern to copy, not a complaint to file:
 
 - **`fleet/anchor-wait` (`d0a546ca`)** — one test row's `until` (the native popover fade row) passes
   an explicit `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS`, and `proof-cdp.ts`'s timeout
@@ -541,6 +547,22 @@ Three fixes exist and are the pattern to copy, not a complaint to file:
 - **`fleet/measure-waits` (`4cc6b4b3`)** is the variant for single reads: RACE the one evaluate
   against a timer rather than polling it, because a poll would re-run the read and could report a
   box from a later state than the call asked about.
+- **`fleet/until-4` (`audio-feed-go4le`)** is the variant for a file that kept its own CLIENT, not
+  just its own `until`. Three proofs, five call sites: `bootstrap-browser-proof.ts` and
+  `bootstrap-refusal-browser-proof.ts` sent every bare `await js(...)` through a private `js()` with
+  **no timeout at all** (one evaluate the page never answered hung the proof until the lane's killer;
+  their private `until` also defaulted to the un-derived 8 s and never clamped a poll to the budget
+  that was left), and both now call `connectCdp()` and pass the imported `HANG_BOUND_MS` — the
+  `10000` literal at each file's `/admin` redirect wait went with them.
+  `playback-csp-browser-proof.ts` had two load waits at a bare `15_000` and now passes
+  `HANG_BOUND_MS`; its playback-start loop keeps 15 s because that wait is a LATENCY budget for a
+  press already sent, not a hang bound, and it is now spelled `HANG_BOUND_MS / 8` (120 s / 8) so it
+  is derived from the same measured floor instead of being a second magic number. The row that keeps
+  it: `tests/proof_cdp_test.ts` row 13 drives a bare `js()` (no third argument) on the fake clock and
+  requires it to settle as `CdpHangBoundExceeded` at exactly `HANG_BOUND_MS`, and row 14 pins that the
+  two bootstrap proofs declare no private `js()`/`until()`. The mutant — delete the timer race in
+  `scripts/proof-cdp.ts`'s `js()` — reds rows 10 and 13 ("the evaluate was never answered … still
+  pending after the bound elapsed") instead of passing.
 
 The derivation, stated honestly wherever the constant appears: **120 s = 15 × the measured
 starved-poll floor** — an 8s `document.readyState` wait was observed to legitimately exceed 8s under

@@ -33,10 +33,21 @@ import { memoryStores } from "../src/config.ts";
 import { audioBlobKey } from "../src/types.ts";
 import { wav } from "./listen-harness.ts";
 import { runProof, startInProcessServer, withChrome } from "./proof-helper.ts";
-import { connectCdp } from "./proof-cdp.ts";
+import { connectCdp, HANG_BOUND_MS } from "./proof-cdp.ts";
 
 const TOKEN = "playback-proof-token";
 const EPISODE_ID = "ep-1";
+/**
+ * How long the play press is given to START playback, sampled between polls.
+ *
+ * 15s is NOT a second magic number: it is `HANG_BOUND_MS / 8` (120s / 8), derived from the
+ * same measured 8s starved-poll floor every other wait in this file uses. It is deliberately
+ * NOT the hang bound: this wait is a LATENCY budget for a press that has already been sent,
+ * and the assertion that actually judges playback is the pair of `currentTime` samples below
+ * (a second sample 1.2s later must have MOVED), so a press that never starts is reported as a
+ * failed check with the sampled state, not thrown as a hang (audio-feed-go4le).
+ */
+const PLAYBACK_ADVANCE_WAIT_MS = HANG_BOUND_MS / 8;
 /** Six seconds of real PCM: long enough that currentTime must move, short enough to stay fast. */
 const AUDIO: Uint8Array<ArrayBuffer> = wav(6) as Uint8Array<ArrayBuffer>;
 
@@ -232,11 +243,11 @@ await runProof("playback-proof", async (checker) => {
         });
 
         await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-        await until(`document.readyState === "complete"`, "player page loaded", 15_000);
+        await until(`document.readyState === "complete"`, "player page loaded", HANG_BOUND_MS);
         await until(
           `document.querySelectorAll("#episodes .episode").length === 1`,
           "the seeded episode row rendered",
-          15_000,
+          HANG_BOUND_MS,
         );
 
         // Record element-level events so an error/decode block is named, not inferred.
@@ -261,7 +272,7 @@ await runProof("playback-proof", async (checker) => {
         // Playback is asynchronous; poll rather than sleep a fixed guess.
         const startTime = Date.now();
         let advanced = false;
-        while (Date.now() - startTime < 15_000) {
+        while (Date.now() - startTime < PLAYBACK_ADVANCE_WAIT_MS) {
           advanced = await js(
             `(() => {
               const a = document.getElementById("audio");
