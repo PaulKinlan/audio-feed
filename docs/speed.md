@@ -469,18 +469,26 @@ The unit census above is the tests-asserting-on-the-real-clock branch of the fam
 is the BROWSER branch, recorded so the next person does not rediscover the proof scripts' wait
 surface one gate red at a time. First measured directly on `origin/main` at `ea949d2e`; recounted
 2026-10-31 at `origin/main` `275df1da` with a trailing-comma-safe walker, recounted again the same
-day at `origin/main` `ed7116fb` after five `fleet/until-sweep-*` merges, and recounted once more
-after the sixth — the `265131c3` recount (2026-10-31) is the aggregate below:
+day at `origin/main` `ed7116fb` after five `fleet/until-sweep-*` merges, recounted once more after
+the sixth (`265131c3`), and re-run once more since — the aggregate below is the newest recount,
+`c84ced51` (2026-11-09), and it names its command so the next recount is a command rather than a
+claim:
 
 - **Zero `until()` call sites pass only the two required arguments** — the two-argument population
-  is **0 across 0 files** at `origin/main` `265131c3`, out of 176 `until(` calls in 29 files, and
-  **all 176** sites pass an explicit third argument: the sweep series below is complete. Method
-  (2026-10-31, `265131c3`): paren/quote/template-aware walk of each `until(` argument list, counting
-  only non-empty argument spans, with definitions and type positions excluded. Count it rather than
-  trusting this figure: `deno run --allow-read scripts/call-arity.ts --only-2arg until scripts`,
-  which prints each two-argument site as `file:line` and then the file tally — it prints none today,
-  and the full variant `deno run --allow-read scripts/call-arity.ts until scripts` counts every site
-  with its argument count (176 sites, all argc 3). The 31 sites the `ed7116fb` recount found sat in
+  is **0 across 0 files** at `origin/main` `c84ced51`, out of **181** `until(` calls in 29 files, and
+  **all 181** sites pass an explicit third argument (argc 3): the sweep series below is complete.
+  Count it rather than trusting this figure, with the repo's own tool — `scripts/call-arity.ts`, the
+  trailing-comma-safe walker (paren/quote/template-aware over each `until(` argument list, counting
+  only non-empty argument spans, with definitions and type positions excluded).
+  `deno run --allow-read scripts/call-arity.ts --only-2arg until scripts` prints each two-argument
+  site as `file:line` and then the file tally, and prints `# 0 two-argument call(s) to until in 0
+  file(s) (92 scanned)` today; the full variant `deno run --allow-read scripts/call-arity.ts until
+  scripts` counts every site with its argument count and prints `# 181 call(s) to until in 29 file(s)
+  with calls (92 scanned), 0 two-argument` at `c84ced51` (2026-11-09). The 176 this section used to
+  quote was not wrong, only stale: re-running the same tool against `265131c3` (the base it named)
+  prints 176, and the five-call growth is later landings, not drift or a change of method —
+  `scripts/csp-nonce-browser-proof.ts` +2 and `scripts/listen-browser-proof.ts` +3, the only two files
+  whose per-file tally moved between the two bases. The 31 sites the `ed7116fb` recount found sat in
   files that declare their own `until`, so none of them inherited the shared `proof-cdp.ts` default.
   The originally published aggregate for the base this census first measured (`ea949d2e`) — 101
   two-argument sites across 28 files, 75 explicit-bound — was an undercount: re-walking that same
