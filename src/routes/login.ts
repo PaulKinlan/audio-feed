@@ -225,7 +225,7 @@ ${PASSKEY_CLIENT}
       if (conditionalController && conditionalController.signal === signal) {
         conditionalController = null;
       }
-      if (error && (error.name === "AbortError" || error.name === "NotAllowedError")) {
+      if (error && (error.name === "AbortError" || error.name === "NotAllowedError" || error.status === 429)) {
         return;
       }
       if (error && error.status) {

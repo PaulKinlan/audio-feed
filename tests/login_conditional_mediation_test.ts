@@ -118,6 +118,7 @@ function createHarness(options: {
   conditionalAvailable?: boolean | (() => Promise<boolean>);
   credentialResult?: unknown;
   fetchOptionsResult?: unknown;
+  fetchOptionsStatus?: number;
   hash?: string;
 }): HarnessContext {
   const elements = new Map<string, StubElement>();
@@ -195,16 +196,20 @@ function createHarness(options: {
 
   const fakeFetch = (path: string) => {
     fetchCalls.push(path);
+    const status = options.fetchOptionsStatus ?? 200;
+    const ok = status >= 200 && status < 300;
     return Promise.resolve({
-      ok: true,
-      status: 200,
+      ok,
+      status,
       json: () =>
         Promise.resolve(
-          options.fetchOptionsResult || {
-            challenge: "dGVzdA",
-            rpId: "audio.test",
-            allowCredentials: [],
-          },
+          options.fetchOptionsResult || (ok
+            ? {
+              challenge: "dGVzdA",
+              rpId: "audio.test",
+              allowCredentials: [],
+            }
+            : { error: "Rate limit exceeded" }),
         ),
     });
   };
@@ -460,6 +465,53 @@ Deno.test("login: (d) unsupported browser path shows no error on page load when 
   assertEquals(feedback.dataset.tone, undefined, "No error tone on initial page load");
   assertEquals(feedback.textContent, "", "No error toast on initial page load");
   assertEquals(h.calls.length, 0);
+});
+
+// -----------------------------------------------------------------------------
+// Row (d / options 429): page load with options endpoint returning 429 leaves
+// #signInFeedback text empty and data-tone undefined (audio-feed-0cd0r)
+// Mutant: if initConditionalUI catch shows the toast again on 429, this row reds.
+// -----------------------------------------------------------------------------
+Deno.test("login: (d) page load with options endpoint returning 429 leaves #signInFeedback text empty and data-tone undefined (audio-feed-0cd0r)", async () => {
+  const h = createHarness({
+    passkeysSupported: true,
+    conditionalAvailable: true,
+    fetchOptionsStatus: 429,
+  });
+
+  await new Promise((r) => setTimeout(r, 20));
+
+  assertEquals(h.fetchCalls, ["/api/auth/login/options"], "Attempted options fetch");
+  const feedback = h.doc.getElementById("signInFeedback");
+  assertEquals(
+    feedback.dataset.tone,
+    undefined,
+    "No error tone set on feedback when options rate-limited",
+  );
+  assertEquals(feedback.textContent, "", "No error toast displayed when options rate-limited");
+});
+
+Deno.test("login: explicit passkey button click with options returning 429 surfaces error toast (audio-feed-0cd0r)", async () => {
+  const h = createHarness({
+    passkeysSupported: true,
+    conditionalAvailable: true,
+    fetchOptionsStatus: 429,
+  });
+
+  await new Promise((r) => setTimeout(r, 20));
+
+  const signInBtn = h.doc.getElementById("signIn");
+  signInBtn.click();
+  await new Promise((r) => setTimeout(r, 20));
+
+  const feedback = h.doc.getElementById("signInFeedback");
+  assertEquals(feedback.dataset.tone, "error", "Explicit button click sets error tone");
+  assertEquals(
+    feedback.textContent,
+    "Rate limit exceeded",
+    "Explicit button click shows error message",
+  );
+  assertEquals(signInBtn.disabled, false, "Sign in button re-enabled after error");
 });
 
 // -----------------------------------------------------------------------------
