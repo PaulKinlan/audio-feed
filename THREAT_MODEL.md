@@ -62,16 +62,28 @@ routes, listed separately because the attacker's position there is different.
   - The feed routes follow the same rule (audio-feed-vcpyi): an unknown token and a
     known-but-unapproved owner answer the IDENTICAL 404 `{"error":"Unknown feed"}` with no status
     detail, so holding a capability cannot confirm it or read the account's lifecycle out of a refusal
-    (`src/compose/feeds.ts:120-124`, `:166-169`).
+    (`src/compose/feeds.ts:272-274`, `:321-322`).
   - The served feed document carries no subscriber identity (audio-feed-zlu04): `ownerEmail` is never
     populated from the account, so no `<itunes:owner><itunes:email>` is emitted. A capability URL is
     pasted into third-party clients and directories, and an address published that way cannot be
-    recalled (`src/compose/feeds.ts:143-148`, `:186-187`).
+    recalled (`src/compose/feeds.ts:293-297`, `:339`).
   - The retry POST is a PAID mutation behind the weaker credential, walled three ways (audio-feed-8jzgl):
     a same-origin wall, two sliding windows (10/10 min per token+address, 30/10 min per token) and a
     durable lifetime ceiling of 5 retries per episode (`src/routes/listen.ts:882-901`).
   - The listen page and its status poll are rate-limited before ANY store work: 60 per 5 min per
     (route, address) (audio-feed-l11jx; `src/routes/listen.ts:641`, `:714-715`).
+  - Feed routes (`GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`) are
+    rate-limited before ANY store work (audio-feed-oxyp1; `src/compose/feeds.ts:96-139`): dual
+    sliding windows in the shared metadata store bound requests per client IP (`FEED_IP_RATE`: 120
+    per 5 min) against token enumeration and per capability token (`FEED_TOKEN_RATE`: 60 per 5 min)
+    across aggregator IPs and client apps, returning a clean 429 with `Retry-After`.
+  - Feed generation work per request is bounded (audio-feed-oxyp1; `src/compose/feeds.ts:63-90`,
+    `:141-236`): `publishableEpisodes` asks the store for publishable episodes (`publishable: true`)
+    so unpublishable noise (pending/failed/synthesizing) never consumes a page slot, scans at most
+    `FEED_MAX_PAGES` (3 pages of `FEED_EPISODE_CAP` = 200) once it has found one,
+    `FEED_MAX_SCAN_PAGES` (10 pages) only while it has found nothing, never calls blob `head()` on
+    an unpublishable episode, and caps those calls at `FEED_MAX_HEAD_CALLS` (30) for legacy records
+    lacking `byteLength`.
   - Capability keys are redacted from logs and error URLs (`src/router.ts`, `redactAudioKey`,
     `sanitizeRequestUrl`).
 - **Residual (documented, accepted):** a leaked capability is a bearer credential, valid until
@@ -79,6 +91,13 @@ routes, listed separately because the attacker's position there is different.
   (`POST /api/admin/users/:id/rotate-token`), and neither can reach a device that already downloaded
   episodes — see the offline-cache section below. The retry ceiling is intentionally small; a
   persistently failing episode is an owner problem by design (`src/routes/listen.ts:889-892`).
+  Feed reach is bounded by RAW records, not only by publishable ones: `listEpisodePage`'s `limit`
+  bounds the underlying scan and the `publishable` filter runs over the page it returns, so once a
+  request has found one publishable episode the loop stops after `FEED_MAX_PAGES` x
+  `FEED_EPISODE_CAP` = **600 raw index entries** — ready episodes past that are missing from a
+  non-empty feed. The 2,000-record `FEED_MAX_SCAN_PAGES` ceiling therefore applies only to a request
+  that found NOTHING, which is also the only case the `feed.scan_ceiling_reached` warning covers;
+  the non-empty truncation logs `feed.publishable_page_cap_reached`.
 
 ### Boundary 2 — Feed-token APIs (capability-token account surface)
 
