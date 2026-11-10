@@ -223,10 +223,11 @@ export class SlidingWindowRateLimiter {
    * Give back ONE credit recorded at exactly `recordedAt` — the `recordedAt` of a
    * `check` whose work did not happen (audio-feed-ukuka).
    *
-   * WHAT THIS MUST NOT DO: it removes at most one entry, and only one whose value
-   * EQUALS `recordedAt`, so it cannot clear older hits or free budget the caller
-   * never reserved. Rolling back a reservation that was already released (or one
-   * this process never made) is a no-op and reports `false`.
+   * Removals match by value equality on `recordedAt` (line 248), taking at most
+   * one entry without verifying caller ownership, so callers must pass only
+   * their own reservation's value (audio-feed-ziukq). It cannot undo an
+   * unrecorded charge, refund a reservation more than once, or restore budget for
+   * an expired hit pruned from the window, returning `false` (lines 248–251).
    *
    * Two concurrent admissions in the same millisecond are indistinguishable to a
    * timestamp, but that is harmless: one release removes one of them, which is
