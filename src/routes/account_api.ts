@@ -464,6 +464,16 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         // failure whose text can carry a store key, a bucket path or a provider message, so
         // it is screened into the log seam (the same screen src/server.ts applies to an
         // unhandled error) and answered with a fixed detail instead of the throw.
+        //
+        // The sibling site is `createCreateSourceHandler` in src/compose/feeds.ts (POST
+        // /api/sources). Do NOT tidy it away as a duplicate of this one, or this one as a
+        // duplicate of it: the callers are disjoint - this route requires a session cookie
+        // and a same-origin request and ignores a feed token, that one reads the token and
+        // ignores the cookie - so deleting either leaves a real caller with no guard. What
+        // must stay identical in both is the rule: an IngestError keeps its own message AND
+        // status, everything else is the fixed detail plus 502, and the throw reaches the log
+        // only through screenErrorForLogging. audio-feed-hoodo drives both routes so a drift
+        // reds a test rather than reaching a user.
         if (error instanceof IngestError) {
           return reply({ error: error.message }, error.status ?? 422);
         }
