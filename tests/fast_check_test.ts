@@ -11,6 +11,9 @@
 
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
+// audio-feed-v527x: the one place that knows quote and comment state. Comment-stripping and
+// literal-masking cannot be two ordered regex passes, either way round.
+import { maskNonCode } from "../scripts/source-mask.ts";
 import {
   allTestFiles,
   changedFiles,
@@ -417,14 +420,18 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   // audio-feed-em9ib: tighten the dispatch check beyond bare substring includes("fetch(").
   // Strips comments and string literals, then requires a call to fetch(...) rather than
   // matching an incidental comment, string literal, or prefetch(...) identifier.
-  const hasDispatch = (source: string): boolean => {
-    const stripped = source
-      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, "")
-      .replace(/"[^"\r\n\\]*(?:\\.[^"\r\n\\]*)*"/g, '""')
-      .replace(/'[^'\r\n\\]*(?:\\.[^'\r\n\\]*)*'/g, "''")
-      .replace(/`[^`\\]*(?:\\.[^`\\]*)*`/g, "``");
-    return /(?<!\w)fetch\s*\(/.test(stripped);
-  };
+
+  // audio-feed-v527x: the strip is scripts/source-mask.ts maskNonCode(), NOT a chain of regexes.
+  // Comment-stripping and literal-masking are MUTUALLY DEPENDENT and cannot be ordered into a
+  // correct pair of whole-file passes either way round: comment-first is what broke the union
+  // gate - the RSS fixture at tests/source_error_disclosure_test.ts:39-41 carries
+  // `<link>https://example.com/p1</link>`, the `//` read as a comment start, the rest of that line
+  // went with it INCLUDING the template's closing backtick, and the literal masker then paired
+  // that backtick with one 40 lines later and swallowed all four real `fetch(` calls (4 raw, 0
+  // after masking). Mask-first is no better: an apostrophe in prose (`// don't dispatch yet`)
+  // would open a string. maskNonCode walks the source once and knows which of code / line
+  // comment / block comment / string / template it is in, so neither can corrupt the other.
+  const hasDispatch = (source: string): boolean => /(?<!\w)fetch\s*\(/.test(maskNonCode(source));
   const helperDispatches = (source: string, callee: string): boolean => {
     const name = callee.replace(/^.*\./, "");
     if (!/^[A-Za-z_$][\w$]*$/.test(name)) return false;
@@ -451,6 +458,11 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     paths: readonly string[],
     isLogin = false,
   ): boolean => {
+    // audio-feed-anqjk (not fixed here, filed): this strip has no quote state, so a `//` inside a
+    // string or template truncates the rest of the line - and a route URL carrying its protocol
+    // (`new Request("https://host/login")`, tests/login_conditional_mediation_test.ts:269) loses
+    // the path this classifier is looking for. maskNonCode is not a drop-in: it blanks literal
+    // BODIES, and a route path IS a literal. The CLASSIFIER_ROWS below therefore omit protocols.
     let stripped = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
     stripped = stripped.replace(
       /Deno\.test\s*\(\s*(?:"[^"]*"|`[^`]*`|'[^']*')\s*,/g,
@@ -481,8 +493,9 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   const CLASSIFIER_ROWS: { why: string; source: string; exercising: boolean }[] = [
     {
       why: "dispatches through the app fetch with a constructed Request",
-      // No "https://" in the row: the classifier strips //-comments, so a protocol prefix
-      // would truncate the line before the path and make this row prove nothing.
+      // audio-feed-anqjk: no protocol prefix in this row. exercisesRoute still strips //-comments
+      // before any quote state, so `https://` would truncate the line before the path and make
+      // this row prove nothing. Restore it when that strip becomes quote-aware.
       source: 'await fetch(new Request("/login"));',
       exercising: true,
     },
@@ -566,6 +579,34 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       why: "prefetch identifier",
       source: 'prefetch("/login");\nconst req = new Request("/login");',
       passes: false,
+    },
+    {
+      why: "dispatch that follows a template containing //",
+      // audio-feed-v527x, the union-gate case in miniature: tests/source_error_disclosure_test.ts
+      // builds its RSS fixture at :39-41 with `<link>https://example.com/p1</link>`. Stripping
+      // comments first deleted that line from the `//` on, INCLUDING the template's closing
+      // backtick, so the template masker paired that backtick with one 40 lines later and the file
+      // measured 4 raw `fetch(` sites and 0 after masking.
+      source: 'const RSS = `<?xml version="1.0"?>\n<link>https://example.com/p1</link>`;\n' +
+        "await fetch(new Request(`${BASE}/api/sources`));",
+      passes: true,
+    },
+    {
+      why: "commented-out fetch that follows a template containing //",
+      // The other direction, and the dangerous one: a `//` in a template must not licence
+      // counting a fetch( a human commented out, nor reach back into that template's backtick.
+      source: "const RSS = `https://example.com/p1`;\n" +
+        "// await fetch(new Request(`${BASE}/api/sources`));\n" +
+        'const req = new Request("/login");',
+      passes: false,
+    },
+    {
+      why: "real dispatch after an apostrophe in a line comment",
+      // Both strips are mutually dependent, so the fix cannot be "mask first, then strip": the
+      // apostrophe in that comment is not a string start, and a masker that believes it is would
+      // swallow the dispatch below it.
+      source: '// don\'t dispatch yet\nawait fetch(new Request("/login"));',
+      passes: true,
     },
   ];
   for (const row of DISPATCH_ROWS) {
