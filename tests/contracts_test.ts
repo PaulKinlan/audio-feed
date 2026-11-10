@@ -127,3 +127,120 @@ Deno.test("contracts.json covers audio-feed-2i3y and audio-feed-ey8i storage sub
 // in ~/fleet/tests/check-coverage.test.sh fed by a fixture contracts file - not here, by reading
 // another repository's script from this repo's suite.
 // ---------------------------------------------------------------------------------------------
+
+const COVERAGE_CONTRACT_PATH =
+  new URL("../.fleet/coverage-contract.json", import.meta.url).pathname;
+
+function loadCoverageContract(): ContractMapping {
+  const content = Deno.readTextFileSync(COVERAGE_CONTRACT_PATH);
+  return JSON.parse(content) as ContractMapping;
+}
+
+Deno.test("coverage-contract.json is valid, targets real files and suites, and suites genuinely exercise targets (audio-feed-c0oh9)", () => {
+  const contract = loadCoverageContract();
+  assert(Object.keys(contract).length > 0, "coverage-contract.json must not be empty");
+
+  for (const [declaredPath, suites] of Object.entries(contract)) {
+    assert(declaredPath.length > 0, "declared path must be non-empty");
+    const targetStat = Deno.statSync(new URL(`../${declaredPath}`, import.meta.url).pathname);
+    assert(targetStat.isFile, `declared path ${declaredPath} must exist on disk`);
+
+    assert(
+      Array.isArray(suites) && suites.length > 0,
+      `declared path ${declaredPath} must map to non-empty suite array`,
+    );
+
+    const baseName = declaredPath.split("/").pop() ?? "";
+    const pathWithoutSrc = declaredPath.replace(/^src\//, "");
+
+    for (const suite of suites) {
+      assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
+      const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
+      assert(suiteStat.isFile, `suite ${suite} must exist on disk`);
+
+      const suiteSource = Deno.readTextFileSync(new URL(`../${suite}`, import.meta.url).pathname);
+      const exercises = suiteSource.includes(declaredPath) ||
+        suiteSource.includes(baseName) ||
+        suiteSource.includes(pathWithoutSrc);
+      assert(
+        exercises,
+        `declared mapping for ${declaredPath} points to suite ${suite}, but ${suite} does not import, read, or reference ${declaredPath}`,
+      );
+    }
+  }
+});
+
+Deno.test("coverage-contract.json covers required browser proof scripts and changed scripts under scripts/ (audio-feed-c0oh9)", async () => {
+  const coverageContract = loadCoverageContract();
+  const REQUIRED_PROOF_SCRIPTS = [
+    "scripts/proof-latency-budgets.ts",
+    "scripts/bootstrap-browser-proof.ts",
+    "scripts/playback-csp-browser-proof.ts",
+    "scripts/bootstrap-refusal-browser-proof.ts",
+    "scripts/bd-durability-check.sh",
+  ];
+
+  for (const script of REQUIRED_PROOF_SCRIPTS) {
+    assert(
+      script in coverageContract,
+      `required proof script ${script} must have an entry in .fleet/coverage-contract.json`,
+    );
+    const suites = coverageContract[script];
+    assert(
+      Array.isArray(suites) && suites.length > 0,
+      `required proof script ${script} must map to a non-empty suite array`,
+    );
+    for (const suite of suites!) {
+      const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
+      assert(suiteStat.isFile, `suite ${suite} for ${script} must exist on disk`);
+    }
+  }
+
+  // Narrow dynamic check: detect any changed script under scripts/ via git diff
+  let changedFiles: string[] = [];
+  try {
+    const gitDiff = await new Deno.Command("git", {
+      args: ["diff", "--name-only", "origin/main...HEAD"],
+    }).output();
+    if (gitDiff.success) {
+      changedFiles = new TextDecoder().decode(gitDiff.stdout).trim().split("\n").filter(Boolean);
+    } else {
+      const gitDiffHead = await new Deno.Command("git", {
+        args: ["diff", "--name-only", "HEAD"],
+      }).output();
+      if (gitDiffHead.success) {
+        changedFiles = new TextDecoder().decode(gitDiffHead.stdout).trim().split("\n").filter(
+          Boolean,
+        );
+      }
+    }
+  } catch {
+    // git not runnable or outside git repo
+  }
+
+  const contracts = loadContracts();
+  for (const file of changedFiles) {
+    if (!file.startsWith("scripts/") || (!file.endsWith(".ts") && !file.endsWith(".sh"))) {
+      continue;
+    }
+    const stem = file.split("/").pop()!.replace(/\.(ts|sh)$/, "");
+    const normalizedStem = stem.replace(/-/g, "_");
+    const directTest1 = new URL(`../tests/${stem}_test.ts`, import.meta.url).pathname;
+    const directTest2 = new URL(`../tests/${normalizedStem}_test.ts`, import.meta.url).pathname;
+    let hasDirectTest = false;
+    try {
+      hasDirectTest = Deno.statSync(directTest1).isFile;
+    } catch {
+      try {
+        hasDirectTest = Deno.statSync(directTest2).isFile;
+      } catch {
+        hasDirectTest = false;
+      }
+    }
+    const hasContractEntry = file in coverageContract || file in contracts;
+    assert(
+      hasDirectTest || hasContractEntry,
+      `changed file ${file} under scripts/ has no direct test and no entry in .fleet/coverage-contract.json (audio-feed-c0oh9)`,
+    );
+  }
+});

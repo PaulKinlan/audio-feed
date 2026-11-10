@@ -6,7 +6,7 @@
     "tests/bd_durability_check_test.ts"
   ],
   "src/compose/feeds.ts": [
-    "tests/feed_subscription_test.ts"
+    "tests/feed_rate_limit_test.ts"
   ],
   "src/routes/cwv.ts": [
     "tests/observability_cwv_test.ts"
@@ -41,5 +41,17 @@
     "tests/anchor_positioning_test.ts",
     "tests/admin_asset_test.ts",
     "tests/admin_ui_test.ts"
+  ],
+  "scripts/proof-latency-budgets.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/bootstrap-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/playback-csp-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/bootstrap-refusal-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
   ]
 }
