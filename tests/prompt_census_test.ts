@@ -20,11 +20,14 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   APP_VALUES_ONLY_MARKER,
+  functionSpans,
   promptCensus,
   promptCensusSource,
   PromptSite,
   TRANSCRIPT_ONLY_MARKER,
 } from "../scripts/prompt-census.ts";
+import { maskNonCode } from "../scripts/source-mask.ts";
+import { DEFAULT_MAX_BODY_CHARS } from "../src/worker/script.ts";
 
 /** One entry of the pinned census: "file :: name" and the mechanism that makes it safe. */
 interface ExpectedSite {
@@ -55,6 +58,45 @@ const EXPECTED_PROMPT_SITES: ExpectedSite[] = [
 
 function siteKey(site: PromptSite): string {
   return `${site.file} :: ${site.name}`;
+}
+
+/**
+ * Asserts that all prompt literals in a discovered prompt site stay at or under the length cap.
+ * If any literal exceeds the cap, throws an Error naming the site.
+ */
+function assertSitePromptsUnderCap(site: PromptSite, cap: number): void {
+  for (const lit of site.literals) {
+    if (lit.length > cap) {
+      throw new Error(
+        `PROMPT EXCEEDS LENGTH CAP: ${
+          siteKey(site)
+        } has a prompt literal of length ${lit.length}, exceeding cap of ${cap}`,
+      );
+    }
+  }
+}
+
+/**
+ * Asserts that buildScriptPrompt derives its cap from DEFAULT_MAX_BODY_CHARS and wraps all
+ * untrusted publisher-controlled fields in capped().
+ */
+function assertPromptBuilderCapped(source: string): void {
+  const masked = maskNonCode(source);
+  const spans = functionSpans(masked);
+  const span = spans.find((s) => s.name === "buildScriptPrompt");
+  assert(span !== undefined, "buildScriptPrompt function span must exist");
+
+  const fnSource = source.slice(span.bodyStart, span.bodyEnd);
+  assert(
+    fnSource.includes("DEFAULT_MAX_BODY_CHARS"),
+    "src/worker/script.ts :: buildScriptPrompt must derive its cap from DEFAULT_MAX_BODY_CHARS",
+  );
+  for (const field of ["article.title", "article.author", "article.summary", "article.body"]) {
+    assert(
+      fnSource.includes(`capped(${field})`),
+      `src/worker/script.ts :: buildScriptPrompt must wrap ${field} in capped()`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +358,58 @@ export function buildSummaryPrompt(title: string): string {
   );
 });
 
+Deno.test("MUTANT: growing one prompt past the cap reds by name", async () => {
+  const source = await readRealSource("src/worker/script.ts");
+  const anchor =
+    "`You are preparing a critical, evidence-led audio deep dive about the article below.`";
+  const mutant = applyMutant(
+    source,
+    anchor,
+    "`" + "x".repeat(DEFAULT_MAX_BODY_CHARS + 1) +
+      " You are preparing a critical, evidence-led audio deep dive about the article below.`",
+  );
+  const sites = promptCensusSource(mutant, "src/worker/script.ts");
+  const builder = sites.find((site) => site.name === "buildScriptPrompt");
+  assert(builder !== undefined, "buildScriptPrompt must be found in census");
+
+  let threw = false;
+  try {
+    assertSitePromptsUnderCap(builder, DEFAULT_MAX_BODY_CHARS);
+  } catch (err) {
+    threw = true;
+    assertStringIncludes(
+      (err as Error).message,
+      "src/worker/script.ts :: buildScriptPrompt",
+      "failure message must name the oversized prompt site by name",
+    );
+    assertStringIncludes(
+      (err as Error).message,
+      `exceeding cap of ${DEFAULT_MAX_BODY_CHARS}`,
+      "failure message must cite the cap",
+    );
+  }
+  assert(threw, "growing a prompt past DEFAULT_MAX_BODY_CHARS must red the cap check");
+});
+
+Deno.test("MUTANT: deleting capped() from a field in buildScriptPrompt fails the cap check", async () => {
+  const source = await readRealSource("src/worker/script.ts");
+  const anchor = "capped(article.body)";
+  const mutant = applyMutant(source, anchor, "article.body");
+
+  let threw = false;
+  try {
+    assertPromptBuilderCapped(mutant);
+  } catch (err) {
+    threw = true;
+    assertStringIncludes(
+      (err as Error).message,
+      "src/worker/script.ts :: buildScriptPrompt must wrap article.body in capped()",
+      "failure message must name the uncapped field in buildScriptPrompt",
+    );
+  }
+  assert(threw, "deleting capped() from article.body must fail the cap check");
+});
+
 // ---------------------------------------------------------------------------
 // THE REAL-TREE ROWS: exact-set equality, and the remediation in the failure text.
 // ---------------------------------------------------------------------------
@@ -377,4 +471,48 @@ src/worker/script.ts), or, if the literals carry transcript data or app-computed
 declare it with PROMPT-CENSUS:TRANSCRIPT-ONLY or PROMPT-CENSUS:APP-VALUES-ONLY on the doc
 comment — and say which, honestly.`,
   );
+});
+
+Deno.test("REAL TREE: prompt length cap matches documented value in THREAT_MODEL.md (promptcensus)", async () => {
+  const doc = await readRealSource("THREAT_MODEL.md");
+  // THREAT_MODEL.md line 313: bound `DEFAULT_MAX_BODY_CHARS` 12,000 chars, `:49`
+  const match = doc.match(/bound\s+`DEFAULT_MAX_BODY_CHARS`\s+([0-9,]+)\s+chars/);
+  assert(
+    match !== null && match[1] !== undefined,
+    "THREAT_MODEL.md must document the DEFAULT_MAX_BODY_CHARS bound",
+  );
+  const documentedCap = parseInt(match[1].replace(/,/g, ""), 10);
+  assertEquals(
+    DEFAULT_MAX_BODY_CHARS,
+    documentedCap,
+    `DEFAULT_MAX_BODY_CHARS definition (${DEFAULT_MAX_BODY_CHARS}) does not match documented cap in THREAT_MODEL.md (${documentedCap})`,
+  );
+  assertStringIncludes(
+    doc,
+    `${DEFAULT_MAX_BODY_CHARS.toLocaleString("en-US")}-character cap`,
+    "THREAT_MODEL.md must cite the exact character cap",
+  );
+});
+
+Deno.test("REAL TREE: every discovered prompt is at or under the length cap (promptcensus)", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const census = await promptCensus(root);
+
+  // Every discovered prompt site must have all its prompt literals at or under DEFAULT_MAX_BODY_CHARS.
+  //
+  // EXEMPTION / EXCEEDING PROMPT HONESTY:
+  // `src/tts/gemini.ts :: formatNarrationPrompt` builds single-voice narration TTS prompts
+  // (PROMPT-CENSUS:TRANSCRIPT-ONLY) that interpolate full article bodies up to MAX_NARRATION_BYTES
+  // (192,000 text bytes, src/ingest/upload.ts:16, src/tts/gemini.ts:123) for ~4.4-hour episodes.
+  // It is legitimately allowed to exceed DEFAULT_MAX_BODY_CHARS (12,000 chars) at runtime because
+  // it carries spoken narration transcript with no reasoning-LLM instructions; the 12,000 char
+  // cap is the prompt injection mitigation bound specific to buildScriptPrompt (src/worker/script.ts:49).
+  for (const site of census.sites) {
+    assertSitePromptsUnderCap(site, DEFAULT_MAX_BODY_CHARS);
+  }
+});
+
+Deno.test("REAL TREE: buildScriptPrompt applies DEFAULT_MAX_BODY_CHARS cap to all untrusted fields (promptcensus)", async () => {
+  const source = await readRealSource("src/worker/script.ts");
+  assertPromptBuilderCapped(source);
 });
