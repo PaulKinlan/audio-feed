@@ -22,6 +22,7 @@ import {
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 import { connectCdp, HANG_BOUND_MS } from "./proof-cdp.ts";
+import { BOOTSTRAP_REDIRECT_LATENCY_MS } from "./proof-latency-budgets.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-8eh/", import.meta.url).pathname;
 
@@ -114,8 +115,16 @@ await runProof("audio-feed-8eh", async (checker) => {
         document.getElementById("bootstrapForm").requestSubmit();
       `);
 
-        // Wait for WebAuthn ceremony to complete and redirect to /admin
-        await until(`location.pathname === "/admin"`, "redirect to /admin", HANG_BOUND_MS);
+        // Wait for WebAuthn ceremony to complete and redirect to /admin. This is the one wait in
+        // this file that measures a PRODUCT transition rather than the page's liveness, so it
+        // keeps its own latency budget instead of the hang ceiling (audio-feed-c0l7b; the
+        // derivation, and its status as a floor rather than a proven bound, is in
+        // proof-latency-budgets.ts).
+        await until(
+          `location.pathname === "/admin"`,
+          "redirect to /admin",
+          BOOTSTRAP_REDIRECT_LATENCY_MS,
+        );
         check(
           "bootstrap completes passkey registration and redirects to /admin",
           (await js(`location.pathname`)) === "/admin",

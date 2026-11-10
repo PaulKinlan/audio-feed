@@ -43,6 +43,11 @@ import {
   MEASURED_STARVED_POLL_MS,
   withHangBound,
 } from "../scripts/proof-cdp.ts";
+import {
+  BOOTSTRAP_REDIRECT_LATENCY_MS,
+  PLAYBACK_ADVANCE_SAMPLE_MS,
+  PLAYBACK_ADVANCE_WAIT_MS,
+} from "../scripts/proof-latency-budgets.ts";
 
 Deno.test(
   "proof-cdp: withHangBound bounds ONE raw cdp reply that never arrives as a named failure, and passes real replies and errors through unchanged",
@@ -587,6 +592,67 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         assert(
           !/until\([^)]*,\s*(8000|10000|15_000|15000)\s*,?\s*\)/u.test(sweptSource),
           `${swept} must pass the derived HANG_BOUND_MS, not a bare literal count`,
+        );
+      }
+
+      // 15. Product-latency budgets are derived from the behaviour they measure, never from the
+      // hang ceiling (audio-feed-c0l7b). fleet/until-4 tied both the `/admin` redirect waits and
+      // the playback start wait to HANG_BOUND_MS, so moving the starved-poll floor silently
+      // reshaped a product budget - a redirect merely SLOW by 60s passed where a 10s literal had
+      // failed. The numbers themselves are derived in scripts/proof-latency-budgets.ts; these
+      // rows pin the derivation, the ordering against the hang bound, and the call sites, because
+      // the property is the WIRING: a proof that goes back to a hang fraction looks identical at
+      // the `until(` call site.
+      assertEquals(
+        PLAYBACK_ADVANCE_WAIT_MS,
+        MEASURED_STARVED_POLL_MS + PLAYBACK_ADVANCE_SAMPLE_MS,
+        "the playback start budget is one measured starved poll plus the advance sample window",
+      );
+      assertEquals(
+        PLAYBACK_ADVANCE_SAMPLE_MS,
+        1_200,
+        "the advance sample window the assertion uses",
+      );
+      assertEquals(BOOTSTRAP_REDIRECT_LATENCY_MS, 10_000, "the redirect budget is its own literal");
+      for (
+        const [name, budgetMs] of Object.entries({
+          PLAYBACK_ADVANCE_WAIT_MS,
+          BOOTSTRAP_REDIRECT_LATENCY_MS,
+        })
+      ) {
+        assert(
+          budgetMs < HANG_BOUND_MS,
+          `${name} = ${budgetMs}ms must stay below HANG_BOUND_MS = ${HANG_BOUND_MS}ms: a product ` +
+            "budget at or above the ceiling is a wait that outlives the bound it fails under",
+        );
+      }
+      const playbackProof = await Deno.readTextFile(
+        new URL("../scripts/playback-csp-browser-proof.ts", import.meta.url),
+      );
+      assertStringIncludes(
+        playbackProof,
+        "while (Date.now() - startTime < PLAYBACK_ADVANCE_WAIT_MS)",
+      );
+      assert(
+        !playbackProof.includes("HANG_BOUND_MS /") &&
+          !playbackProof.includes("HANG_BOUND_MS/"),
+        "playback-csp-browser-proof.ts must not derive a product budget from HANG_BOUND_MS",
+      );
+      assert(
+        // The start budget is only measured if the loop's own result is judged: `advanced` is what
+        // reds the row when the press takes longer than the budget, so a check that omits it makes
+        // the budget decorative (this row reddened with the field removed - the mutant in
+        // audio-feed-c0l7b).
+        /check\(\s*"the audio element reached a PLAYING state[^"]*",\s*advanced && /u.test(
+          playbackProof,
+        ),
+        "the PLAYING check must require `advanced`, so a start slower than the budget reds the row",
+      );
+      for (const [swept, bootstrapProof] of sweptProofs) {
+        assertStringIncludes(bootstrapProof, "BOOTSTRAP_REDIRECT_LATENCY_MS,");
+        assert(
+          /"redirect to \/admin",\s*BOOTSTRAP_REDIRECT_LATENCY_MS,/u.test(bootstrapProof),
+          `${swept} /admin redirect wait must carry the product budget, not HANG_BOUND_MS`,
         );
       }
     } finally {
