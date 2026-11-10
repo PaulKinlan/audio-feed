@@ -218,6 +218,49 @@ Deno.test("audio-feed-ukuka: deferral never consumes a creation credit", async (
 });
 
 /**
+ * A fetch seam that records every article URL it is asked for (audio-feed-sn1ai).
+ *
+ * The budget peek exists to bound WORK, not only to set `deferred`: an over-budget item must
+ * cost a peek, not an outbound fetch. Call counts are the only evidence of that difference —
+ * an ignored peek still ends in `deferred++` and still leaves the URL unseen, so every store
+ * and result-field assertion is identical whether the fetch happened or not.
+ */
+function countingArticles() {
+  const fetched: string[] = [];
+  return {
+    fetched,
+    fetchArticle: (url: string) => {
+      fetched.push(url);
+      return article("Post", "Body")();
+    },
+  };
+}
+
+Deno.test("audio-feed-sn1ai: an over-budget item is peeked, never fetched", async () => {
+  const { user, source, ctx, deps, limiter, episodes } = await deferralFixture(10);
+  for (let n = 0; n < 10; n++) assert((await limiter.check(user.id)).allowed);
+  const { fetched, fetchArticle } = countingArticles();
+  const poll = await pollFeedSource(ctx, source, { ...deps, fetchArticle });
+  assertEquals(poll.deferred, 10, "the exhausted budget defers every item");
+  assertEquals(
+    fetched,
+    [],
+    "the peek refuses BEFORE the article fetch: no over-budget item costs a read",
+  );
+  assertEquals((await episodes()).length, 0);
+});
+
+Deno.test("audio-feed-sn1ai: a budget with room still fetches every admitted item, once", async () => {
+  const { user, source, ctx, deps, limiter } = await deferralFixture(10);
+  const { fetched, fetchArticle } = countingArticles();
+  const poll = await pollFeedSource(ctx, source, { ...deps, fetchArticle });
+  assertEquals(poll.queued, 10, "ten items fit the budget and the ten-per-poll bound");
+  assertEquals(fetched.length, 10, "the peek must not withhold an item the budget can afford");
+  assertEquals(new Set(fetched).size, 10, "each admitted item is fetched exactly once");
+  assertEquals((await limiter.peek(user.id)).remaining, 0);
+});
+
+/**
  * The same fixture's store, with the article+episode CAS replaced — the one seam a feed
  * poll cannot reach any other way (audio-feed-ukuka).
  */
