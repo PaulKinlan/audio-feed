@@ -19,6 +19,7 @@ import { DEFAULT_DAILY_EPISODE_BUDGET, memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { AppContext } from "../src/app.ts";
 import {
+  applySourceCeiling,
   createIngestHandler,
   createUploadHandler,
   INGEST_CREATION_BOUND,
@@ -791,4 +792,131 @@ Deno.test("audio-feed-maxxw: a deleted source gives its ceiling slot back", asyn
   );
   assert(replacement.source.id);
   assertEquals((await stores.metadata.listSources(USER_ID)).length, ceiling);
+});
+
+/**
+ * audio-feed-jhllh: the snapshot UNION is what bounds a subscriber whose row has not seen their
+ * sources.
+ *
+ * WHAT WAS UNPINNED: `applySourceCeiling` unions the caller's `storedIds` snapshot into the row so
+ * the row is the authority and the snapshot is only a way to learn ids the row has not seen — the
+ * ids of sources created before the row existed, or by an operator path exempt from the ceiling.
+ * Every other row in the suite races against a row that already holds the ids it counts, so
+ * deleting the union reds nothing and leaves the population the union was written for uncovered.
+ *
+ * THE MUTANT: delete the union in `applySourceCeiling` (leave only `current?.ids`) and both rows
+ * red — the empty-row subscriber is ADMITTED and ends the run holding 1 id against a ceiling of 4
+ * (`held` 1, not 4), and the partial-row one holding 3 (`held` 3, not 4). Measured, see
+ * audio-feed-jhllh.
+ */
+Deno.test("audio-feed-jhllh: an empty row does not un-bound a subscriber whose snapshot is full", () => {
+  const limit = 4;
+  const snapshot = ["a", "b", "c", "d"]; // what listSources returns; the row has seen none of it
+  const applied = applySourceCeiling(null, snapshot, "e", limit);
+
+  assertEquals(
+    applied.held,
+    limit,
+    "the snapshot's ids are counted, so the account is at the ceiling",
+  );
+  assertEquals(
+    applied.admitted,
+    false,
+    "a full subscriber is refused, not admitted on an empty row",
+  );
+  assertEquals(
+    [...applied.next.ids].sort(),
+    [...snapshot].sort(),
+    "the refused write still carries the ids the row learned, so the next admission sees them",
+  );
+});
+
+Deno.test("audio-feed-jhllh: a snapshot raises the count above a partial row and never lowers it", () => {
+  const limit = 4;
+  // A row written before two of the subscriber's sources existed: it holds 2 of the 4 they hold.
+  const partialRow = { ids: ["a", "b"] };
+  const snapshot = ["a", "b", "c", "d"];
+  const raised = applySourceCeiling(partialRow, snapshot, "e", limit);
+
+  assertEquals(raised.held, limit, "the ids the row had not seen are counted too");
+  assertEquals(raised.admitted, false, "a subscriber at the ceiling is refused");
+
+  // The other direction of the same union: a snapshot BEHIND the row is stale, and staleness may
+  // only over-count. The row keeps its ids, so this can never read as a free slot either.
+  const stale = applySourceCeiling({ ids: snapshot }, ["a"], "e", limit);
+  assertEquals(stale.held, limit, "a stale snapshot cannot lower the row's count");
+  assertEquals(stale.admitted, false, "the failure direction is a refusal");
+});
+
+/**
+ * audio-feed-qqa03 (refund half): the slot an admission took is given back when the insert fails.
+ *
+ * THE LEAK THAT IS OUT OF SCOPE HERE: a process that dies between the admission commit and the
+ * insert still leaves the id in the row with nothing to reconcile it (that is audio-feed-qqa03's
+ * reconcile question, not this row). What this row pins is the case the code DOES handle — a
+ * `putSource` that throws — so the refund cannot be dropped by a refactor without a red row.
+ *
+ * THE MUTANT: delete the catch around `putSource` in `subscribeToFeed` (back to a bare write, no
+ * `releaseSourceSlot`) and the replacement subscribe reds with `SubscriptionLimitError` — the
+ * failed write is still holding a slot the subscriber never used. Measured, see audio-feed-qqa03.
+ *
+ * DISTINCT HOSTS on purpose: `sourceIdForFeed` derives the id from the host, so two feeds on one
+ * host are two ids. A leaked id answered by the next subscribe at the SAME host would take the
+ * "already holds a slot" branch and mask the leak, so the replacement below has its own host.
+ */
+Deno.test("audio-feed-qqa03: a failed source write gives its admitted slot back", async () => {
+  const ceiling = 2;
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID, dailyEpisodeBudget: ceiling }));
+  const ctx: AppContext = { config, stores };
+  const deps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(`<rss><channel><title>F</title></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({ url, title: "T", author: null, publishedAt: null, lead: "L", body: "B." }),
+  };
+
+  const first = await subscribeToFeed(ctx, {
+    userId: USER_ID,
+    feedUrl: "https://alpha.example/feed.xml",
+  }, deps);
+  assertEquals(first.source.id, "alpha");
+  assertEquals((await stores.metadata.listSources(USER_ID)).length, 1);
+
+  // The INSERT after a successful admission is the step that can fail: refuse exactly one write.
+  const storedWrite = stores.metadata.putSource.bind(stores.metadata);
+  let refusals = 1;
+  stores.metadata.putSource = (source) => {
+    if (refusals-- > 0) return Promise.reject(new Error("metadata write refused"));
+    return storedWrite(source);
+  };
+
+  await assertRejects(
+    () => subscribeToFeed(ctx, { userId: USER_ID, feedUrl: "https://beta.example/feed.xml" }, deps),
+    Error,
+    "metadata write refused",
+  );
+  assertEquals(
+    (await stores.metadata.listSources(USER_ID)).length,
+    1,
+    "the failing source was never stored, so its slot is spent capacity",
+  );
+
+  // One slot is genuinely free (cap-1). It must be the one the failed admission took — and it is
+  // taken by THIS feed's own id, not by re-using the id the failed admission reserved.
+  const replacement = await subscribeToFeed(
+    ctx,
+    { userId: USER_ID, feedUrl: "https://gamma.example/feed.xml" },
+    deps,
+  );
+  assertEquals(replacement.source.id, "gamma");
+  assertEquals(
+    (await stores.metadata.listSources(USER_ID)).length,
+    ceiling,
+    "the refund makes the cap-1 subscribe land instead of refusing",
+  );
 });
