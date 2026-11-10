@@ -28,13 +28,24 @@
  *   settlement, deliberately never speed, and failing in bounded time on the row's own deadline
  *   if that deadline never fires at all
  * - the exported MEASURED_STARVED_POLL_MS / HANG_BOUND_MS pair is still 8s and 15x it
+ * - the product-budget GUARD is pinned, not only the budgets it accepts: the exported
+ *   assertBudgetBelowHang THROWS for a budget at or above the ceiling (checked at the ceiling
+ *   and above it, naming the budget and the ceiling) and does not throw for the real budgets, and
+ *   the import-time loop still applies it. Ceiling as a parameter is what lets the row drive a
+ *   budget over the bound without mutating a source constant at test time (audio-feed-zkto5)
  * - close() closes the WebSocket cleanly
  *
  * No Chrome is needed: the hang bound is a race against a timer over the CDP round-trip, so a
  * mock DevTools server that simply never answers one expression exercises it end to end.
  */
 
-import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { FakeTime } from "@std/testing/time";
 import {
   CdpHangBoundExceeded,
@@ -44,6 +55,7 @@ import {
   withHangBound,
 } from "../scripts/proof-cdp.ts";
 import {
+  assertBudgetBelowHang,
   BOOTSTRAP_REDIRECT_LATENCY_MS,
   PLAYBACK_ADVANCE_SAMPLE_MS,
   PLAYBACK_ADVANCE_WAIT_MS,
@@ -614,18 +626,44 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         "the advance sample window the assertion uses",
       );
       assertEquals(BOOTSTRAP_REDIRECT_LATENCY_MS, 10_000, "the redirect budget is its own literal");
+
+      // 15b. The GUARD is pinned, not only the constants it happens to accept (audio-feed-zkto5).
+      // Every row above stays green when the ceiling check is deleted, because with the current
+      // budgets nothing observable changes - the previous gate proved exactly that ("deleting the
+      // import guard with sane budgets stays green"). So the rule is exercised directly: the
+      // exported guard, handed an over-ceiling budget, must THROW, and handed each real budget it
+      // must NOT. `ceilMs` is a parameter for this row only, so a budget can be driven over the
+      // ceiling without a source constant being mutated at test time - a mutant that changes a
+      // source line is the same edit the guard exists to catch, not a test of it.
       for (
         const [name, budgetMs] of Object.entries({
           PLAYBACK_ADVANCE_WAIT_MS,
           BOOTSTRAP_REDIRECT_LATENCY_MS,
         })
       ) {
-        assert(
-          budgetMs < HANG_BOUND_MS,
-          `${name} = ${budgetMs}ms must stay below HANG_BOUND_MS = ${HANG_BOUND_MS}ms: a product ` +
-            "budget at or above the ceiling is a wait that outlives the bound it fails under",
-        );
+        assertBudgetBelowHang(name, budgetMs);
       }
+      for (const overCeilingMs of [HANG_BOUND_MS, HANG_BOUND_MS + 60_000]) {
+        const overCeiling = assertThrows(
+          () => assertBudgetBelowHang("PLAYBACK_ADVANCE_WAIT_MS", overCeilingMs),
+          Error,
+          undefined,
+          `${overCeilingMs}ms is at or above the ${HANG_BOUND_MS}ms ceiling, so the guard must ` +
+            "reject it rather than let a product wait outlive the bound it fails under",
+        );
+        // The failure has to be actionable in a gate log: the budget by name and value, and the
+        // ceiling it was judged against.
+        assertStringIncludes(overCeiling.message, "PLAYBACK_ADVANCE_WAIT_MS");
+        assertStringIncludes(overCeiling.message, `${overCeilingMs}ms`);
+        assertStringIncludes(overCeiling.message, `${HANG_BOUND_MS}ms`);
+      }
+      // The rule is only enforced where it is APPLIED. The import-time loop is what makes a bad
+      // constant fail at import instead of at a browser row nobody re-derives, and deleting the
+      // loop while keeping the function would leave every suite green again.
+      const budgetsSource = await Deno.readTextFile(
+        new URL("../scripts/proof-latency-budgets.ts", import.meta.url),
+      );
+      assertStringIncludes(budgetsSource, "assertBudgetBelowHang(name, budgetMs);");
       const playbackProof = await Deno.readTextFile(
         new URL("../scripts/playback-csp-browser-proof.ts", import.meta.url),
       );

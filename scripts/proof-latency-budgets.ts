@@ -45,17 +45,35 @@ export const PLAYBACK_ADVANCE_WAIT_MS = MEASURED_STARVED_POLL_MS + PLAYBACK_ADVA
  */
 export const BOOTSTRAP_REDIRECT_LATENCY_MS = 10_000;
 
-// A product budget at or above the hang bound would be a wait that outlives the ceiling it is
-// supposed to fail under. Fail at import, by name, instead of at a browser row nobody re-derives.
+/**
+ * The rule every product budget has to satisfy: a budget at or above the hang ceiling is a wait
+ * that outlives the bound it is supposed to fail under, so fail by name and by value.
+ *
+ * Exported to be TESTABLE, not to be reused: `ceilMs` defaults to the one `HANG_BOUND_MS` in
+ * force, so the import-time check below applies the real ceiling, while a test row can hand the
+ * rule a ceiling of its own and see it reject a budget without mutating a source constant at
+ * test time (a mutation that was previously invisible with sane budgets - audio-feed-zkto5).
+ * Nothing under src/ calls it; it guards proof scripts' budgets, and its callers are the import
+ * check below and that row.
+ */
+export function assertBudgetBelowHang(
+  name: string,
+  budgetMs: number,
+  ceilMs: number = HANG_BOUND_MS,
+): void {
+  if (budgetMs >= ceilMs) {
+    throw new Error(
+      `${name} = ${budgetMs}ms must be strictly below the hang ceiling = ${ceilMs}ms ` +
+        "(a product budget at or above the ceiling is a wait that outlives the bound it fails under)",
+    );
+  }
+}
+
+// Fail at import, by name, instead of at a browser row nobody re-derives.
 const PRODUCT_BUDGETS: Record<string, number> = {
   PLAYBACK_ADVANCE_WAIT_MS,
   BOOTSTRAP_REDIRECT_LATENCY_MS,
 };
 for (const [name, budgetMs] of Object.entries(PRODUCT_BUDGETS)) {
-  if (budgetMs >= HANG_BOUND_MS) {
-    throw new Error(
-      `${name} = ${budgetMs}ms must be strictly below HANG_BOUND_MS = ${HANG_BOUND_MS}ms ` +
-        "(a product budget above the hang ceiling is a wait that outlives the bound it fails under)",
-    );
-  }
+  assertBudgetBelowHang(name, budgetMs);
 }
