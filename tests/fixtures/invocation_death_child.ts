@@ -22,8 +22,10 @@
  * the future.
  */
 import {
+  DEFAULT_ESTIMATED_TURN_MS,
   DEFAULT_MARKER_WAIT_MS,
   DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+  ESTIMATED_TURN_MS_ENV,
   MARKER_WAIT_MS_ENV,
   STAGE_DELAY_MS_ENV,
   STAGE_WEDGE_ENV,
@@ -156,6 +158,30 @@ if (!(await metadata.getEpisode("user-1", "episode-1"))) {
   );
 }
 
+/**
+ * Read one non-negative-integer millisecond knob, or exit 2 naming the variable (the shape every
+ * window knob uses: a typo must be a usage error, never a silently-ignored override).
+ */
+function msEnv(name: string, fallback: number): number {
+  const raw = Deno.env.get(name);
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.error(
+      `child: ${name} must be a non-negative integer of milliseconds, got ${JSON.stringify(raw)}`,
+    );
+    Deno.exit(2);
+  }
+  return parsed;
+}
+
+/**
+ * The child's per-turn estimate for the budget preflight (audio-feed-zpyx0). The claim loop breaks
+ * WITHOUT claiming when `remaining < estimate + flushMargin`, which is how a starved host settles a
+ * batch before its put - the condition the survive control's settle-first abort exists for.
+ */
+const estimatedTurnDurationMs = msEnv(ESTIMATED_TURN_MS_ENV, DEFAULT_ESTIMATED_TURN_MS);
+
 const pcm = new Uint8Array(64);
 const wav = pcmToWav(pcm, { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
 let lastProgressAt = Date.now();
@@ -182,7 +208,7 @@ const batchPromise = runSynthesisBatch(ctx, synth, {
   maxClaims: 3,
   maxInvocationDurationMs: mode === "hang" ? 30_000 : 4_000,
   flushMarginMs: 500,
-  estimatedTurnDurationMs: 1,
+  estimatedTurnDurationMs,
   estimatedUploadDurationMs: 5,
   // audio-feed-ga3jd: survive mode's deadline is driven by the controlled clock
   // (declared above); hang/drain stay on the default real clock.
@@ -202,20 +228,7 @@ if (mode === "hang") {
   // INVOCATION_DEATH_MARKER_WAIT_MS overrides it, so the test pins the window
   // explicitly (no ambient-env coupling) and the red-path case sets 0, which
   // skips this loop entirely and stops WITHOUT the marker deterministically.
-  const rawMarkerWaitMs = Deno.env.get(MARKER_WAIT_MS_ENV);
-  let markerWaitMs = DEFAULT_MARKER_WAIT_MS;
-  if (rawMarkerWaitMs !== undefined) {
-    const parsed = Number(rawMarkerWaitMs);
-    if (!Number.isInteger(parsed) || parsed < 0) {
-      console.error(
-        `child: ${MARKER_WAIT_MS_ENV} must be a non-negative integer of milliseconds, got ${
-          JSON.stringify(rawMarkerWaitMs)
-        }`,
-      );
-      Deno.exit(2);
-    }
-    markerWaitMs = parsed;
-  }
+  const markerWaitMs = msEnv(MARKER_WAIT_MS_ENV, DEFAULT_MARKER_WAIT_MS);
   const deadline = Date.now() + markerWaitMs;
   // The give-up is an EVENT first, a clock second: once THIS invocation's batch
   // settles (budget-yield or throw) the claim is released and the marker is
@@ -280,20 +293,7 @@ if (mode === "survive") {
   // (d) The deadline watchdog re-arms whenever observable stage progress occurs (phase/status changes),
   //     so slow forward progress on a starved host never trips the bound, while a genuine
   //     hang (no progress for putStartWaitMs) exits with SURVIVE-FATAL.
-  const rawPutStartWaitMs = Deno.env.get(SURVIVE_PUT_START_WAIT_MS_ENV);
-  let putStartWaitMs = DEFAULT_SURVIVE_PUT_START_WAIT_MS;
-  if (rawPutStartWaitMs !== undefined) {
-    const parsed = Number(rawPutStartWaitMs);
-    if (!Number.isInteger(parsed) || parsed < 0) {
-      console.error(
-        `child: ${SURVIVE_PUT_START_WAIT_MS_ENV} must be a non-negative integer of milliseconds, got ${
-          JSON.stringify(rawPutStartWaitMs)
-        }`,
-      );
-      Deno.exit(2);
-    }
-    putStartWaitMs = parsed;
-  }
+  const putStartWaitMs = msEnv(SURVIVE_PUT_START_WAIT_MS_ENV, DEFAULT_SURVIVE_PUT_START_WAIT_MS);
 
   const batchOutcome = batchPromise.then(
     () => "settled" as const,
@@ -336,8 +336,17 @@ if (mode === "survive") {
   }
 
   if (hangingBlobs.started === 0 && settled !== undefined) {
+    // audio-feed-zpyx0: NAME THE JOB. The old message reported the batch's OUTCOME ("settled") and
+    // nothing about the work it gave up on, so a reader of a gate log could see that the survive
+    // control aborted but not WHICH episode was left un-uploaded - the one fact that ties the red to
+    // a claim in the store, and the reason this abort exists at all. The record is read before the
+    // exit, because the exit is the last thing this process does.
+    const abandoned = await metadata.getEpisode("user-1", "episode-1");
     console.error(
-      `SURVIVE-FATAL: batch settled before the put started (${settled}) - aborting so the parent asserts red`,
+      `SURVIVE-FATAL: batch settled before the put started (${settled}) - the job it abandoned is ` +
+        `episode "episode-1" of user "user-1" (status ${abandoned?.status ?? "missing"}, phase ${
+          abandoned?.phase ?? "none"
+        }, claimedBy ${abandoned?.claimedBy ?? "nobody"}) - aborting so the parent asserts red`,
     );
     Deno.exit(1);
   }

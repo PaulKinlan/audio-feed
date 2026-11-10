@@ -31,6 +31,7 @@ import { KvMetadataStore } from "../src/storage/kv.ts";
 import {
   DEFAULT_MARKER_WAIT_MS,
   DEFAULT_SURVIVE_PUT_START_WAIT_MS,
+  ESTIMATED_TURN_MS_ENV,
   MARKER_WAIT_MS_ENV,
   STAGE_DELAY_MS_ENV,
   STAGE_WEDGE_ENV,
@@ -292,6 +293,15 @@ boundedRow(
       assertEquals(r.failed.length, 0);
       assertEquals(r.episode?.status, "pending", "claim released non-terminally");
       assertEquals(r.episode?.phase, "upload_retry", "phase records the upload retry");
+      // audio-feed-zpyx0: the other half of the settle-first pin. A HEALTHY run must never take
+      // that abort: it claims, starts the put and yields on the budget. The row below drives the
+      // abort on purpose; this one asserts its reason is absent when nothing settled early, so
+      // widening the abort's condition to "any batch that settles" cannot pass unnoticed.
+      assertEquals(
+        err.includes("batch settled before the put started"),
+        false,
+        `the healthy survive control must NOT take the settle-first abort: ${err}`,
+      );
     } finally {
       await Deno.remove(kvPath).catch(() => {});
     }
@@ -344,6 +354,70 @@ boundedRow(
       );
       assertEquals(r.putAborted, 1, "the put must be aborted cleanly");
       assertEquals(r.yielded.length, 1, "delayed survive converts to clean yield");
+    } finally {
+      await Deno.remove(kvPath).catch(() => {});
+    }
+  },
+);
+
+boundedRow(
+  "audio-feed-zpyx0: a batch that SETTLES before the put aborts at once, by name, and names the job",
+  async () => {
+    // THE MUTANT THIS PINS (audio-feed-zpyx0): delete the child's settle-first abort - the
+    // `if (hangingBlobs.started === 0 && settled !== undefined) { ... Deno.exit(1) }` block in
+    // tests/fixtures/invocation_death_child.ts - and nothing in this suite reds: the child falls
+    // through and PRINTS A PASS (`SURVIVE:{"putStarted":0,...}`, exit 0) for a starved batch that
+    // never uploaded. The other regression that must red: keep the condition but wait out the
+    // put-start bound instead of breaking on the settle, and the red arrives seconds later saying
+    // "the put never started", which blames starvation instead of the settled batch that caused it.
+    // Both are why this row asserts the reason STRING and WHEN it arrives, not just exit 1.
+    //
+    // The starved condition is SIMULATED, never slept for: ESTIMATED_TURN_MS_ENV raises the child's
+    // per-turn estimate above its whole 4000ms budget, so the claim loop's preflight
+    // (`remaining < estimate + flushMargin`) breaks WITHOUT claiming and the batch settles in
+    // milliseconds - a faithful model of the starved host whose earlier stages ate the budget. The
+    // put-start bound is INJECTED (10s, ~40x what the abort costs) so "at once" is measured against
+    // a bound this row chose rather than against host luck.
+    const rowName =
+      "audio-feed-zpyx0: a batch that SETTLES before the put aborts at once, by name, and names the job";
+    const boundMs = 10_000;
+    const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-zpyx0-", suffix: ".kv" });
+    try {
+      const startedAt = Date.now();
+      const child = spawnChild(kvPath, "survive", 7, {
+        [ESTIMATED_TURN_MS_ENV]: "60000",
+        [SURVIVE_PUT_START_WAIT_MS_ENV]: String(boundMs),
+      });
+      const output = await childOutputWithin(child, rowName);
+      const elapsed = Date.now() - startedAt;
+      const out = new TextDecoder().decode(output.stdout);
+      const err = new TextDecoder().decode(output.stderr);
+      const status = await child.status;
+
+      assertEquals(
+        status.code,
+        1,
+        `a settled batch must abort the child with exit 1, not return: ${out}${err}`,
+      );
+      // THE REASON, distinguishable from the bound's: same SURVIVE-FATAL prefix, different cause.
+      assertStringIncludes(err, "SURVIVE-FATAL: batch settled before the put started");
+      assertEquals(
+        err.includes("the put never started within"),
+        false,
+        `the abort must be the SETTLE-FIRST one, not the put-start bound firing later: ${err}`,
+      );
+      // WHICH JOB was abandoned: the episode and its owner, not just the batch's outcome.
+      assertStringIncludes(err, 'episode "episode-1" of user "user-1"');
+      // BY ORDER, NOT BY PATIENCE: the settle is the trigger, so the red lands far inside the bound.
+      assert(
+        elapsed < boundMs / 2,
+        `the abort must fire on the SETTLE, not on the ${boundMs}ms bound (took ${elapsed}ms)`,
+      );
+      assertEquals(
+        out.includes("SURVIVE:"),
+        false,
+        "an aborted child must not print a SURVIVE result line - that is the silent pass the abort replaces",
+      );
     } finally {
       await Deno.remove(kvPath).catch(() => {});
     }
