@@ -53,5 +53,9 @@
   ],
   "scripts/bootstrap-refusal-browser-proof.ts": [
     "tests/proof_cdp_test.ts"
+  ],
+  "scripts/source-mask.ts": [
+    "tests/source_mask_test.ts",
+    "tests/fast_check_test.ts"
   ]
 }
