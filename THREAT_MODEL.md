@@ -589,36 +589,75 @@ its concrete code anchor, and the exact command to verify the claim.
 
 Three browser-side helpers take a path instead of a fixed route and hand it straight to `fetch()`:
 
-- `api(path, options = {})` — `src/assets/admin.js:209`, `fetch(path, ...)` at `:210`; 16 call sites in
-  that file.
-- `send(method, path, body)` — `src/routes/account.ts:542`, `fetch(path, ...)` at `:543`; 13 call sites
-  in that file.
-- `post(path, body)` — `src/routes/shell.ts:850`, `fetch(path, ...)` at `:851`; **no call sites**. It is
-  defined and never called (`grep -n 'post(' src/routes/shell.ts` returns only the definition).
+- `api(path, options = {})` — `src/assets/admin.js:209`, `fetch(path, ...)` at `:210`; 16 call sites, all
+  in that file (module-scoped, so the file is the whole population).
+- `send(method, path, body)` — `src/routes/account.ts:542`, `fetch(path, ...)` at `:543`; 13 call sites,
+  all in that file. `send` at `src/assets/cwv.js:80` is a same-name collision with a different signature
+  (`send(metric, value)`), takes no path, and is not in this population.
+- `post(path, body)` — `src/routes/shell.ts:850`, `fetch(path, ...)` at `:851`; 11 call sites, none of
+  them in `shell.ts` (see the enumeration method below).
+
+**How these populations are enumerated (audio-feed-fxeug review correction, `a0f55db1`).** Counting
+call sites for these three needs four steps, not one, and steps 2 and 3 are the ones an earlier
+revision of this note skipped — it recorded `post(` as having **zero** call sites on the strength of
+`grep -n 'post(' src/routes/shell.ts`, a single-file grep that returns only the definition, because
+the call sites are in *different files*:
+
+1. Locate the definition (`grep -rnE 'function (api|send|post)\(' src/`).
+2. For a definition that lives inside a template literal, find which pages splice that literal into
+   their own script: `post` is defined in `PASSKEY_CLIENT` (`src/routes/shell.ts:796`), exported, and
+   interpolated at `src/routes/login.ts:129` and `src/routes/account.ts:473`. Neither page imports the
+   *function* — they import the string that inlines it — so the helper is in scope at runtime while
+   being invisible to any import graph or single-file grep.
+3. Grep the bare name across all of `src/` and `main.ts`, not one file: `grep -rnE '(^|[^.\w])post\('`.
+   The leading guard drops the router method `router.post(` in `src/app.ts` and the same-named method
+   declared in `src/router.ts`; prose and string decoys such as `" post(s) queued"` go with them, and
+   the scope check in step 2 discards unrelated same-name helpers (the test-local `post` at
+   `tests/regenerate_test.ts:99` builds a server-side `Request`; it is not the browser wrapper and is
+   not in `src/`).
+4. Read each surviving site's path argument. All three families were counted this way at `a0f55db1`:
+   16 + 13 + 11 = **40 wrapper call sites**.
 
 Because the helpers accept any string, the guarantee row 6 records is a constraint on the CALL SITES:
 **a path argument must be a same-origin string that begins with a single `/` — `//host/...` or a
 scheme is a protocol-relative or absolute URL to another host and must never appear — and no part of
 it may come from an attacker- or operator-supplied host.** What the row's enumeration actually shows
-at `07d8e60a` (verified 2026-11-10):
+at `a0f55db1` (verified 2026-11-10; the previous revision of this note counted 29 at `07d8e60a`,
+omitting all 11 `post(` sites):
 
-- 29 wrapper call sites: 16 `api(`, 13 `send(`, 0 `post(`.
+- 40 wrapper call sites: 16 `api(`, 13 `send(`, 11 `post(`.
 - **No caller passes a non-literal arbitrary path**, but "all callers pass same-origin literals" is
-  imprecise and is corrected here: 14 pass a pure string literal and 15 build the path by
+  imprecise and is corrected here: 25 pass a pure string literal and 15 build the path by
   concatenating a literal `/api/...` prefix with `encodeURIComponent(...)` segments
-  (e.g. `"/api/account/sources/" + encodeURIComponent(id)`).
-- The one caller-supplied component is `action` in `act(userId, action, button)`
-  (`src/assets/admin.js:297`), appended to `/api/admin/users/<id>/`; both call sites pass a literal
-  (`"approve"` at `:398`, `"suspend"` at `:407`).
+  (e.g. `"/api/account/sources/" + encodeURIComponent(id)`). Per family:
+  - `api(` — 16 = 5 pure literals (`:236`, `:253`, `:513`, `:611`, `:740`) + 11 concatenated
+    (`:300`, `:321`, `:358`, `:815`, `:860`, `:921`, `:970`, `:1057`, `:1093`, `:1143`, `:1203`).
+  - `send(` — 13 = 9 pure literals (`:491`, `:510`, `:529`, `:628`, `:718`, `:739`, `:818`, `:838`,
+    `:854`) + 4 concatenated (`:758`, `:777`, `:797`, `:890`).
+  - `post(` — 11 = **11 pure literals, 0 concatenated**: `/api/auth/login/options`
+    (`src/routes/login.ts:158`, `:201`), `/api/auth/login/verify` (`:162`, `:214`),
+    `/api/auth/bootstrap` (`:270`), `/api/auth/register/options` (`:272`, `:294`, and
+    `src/routes/account.ts:871`), `/api/auth/register/verify` (`:274`, `:312`, and
+    `src/routes/account.ts:873`). Every one is a single-leading-slash same-origin `/api/...` string —
+    no host, no scheme, no `//`, no concatenation, no variable component — so the constraint above
+    holds for all 11 today. The defect this correction fixes is the undercount, not a live violation.
+- **No call site in any family passes anything other than a literal or a literal-plus-
+  `encodeURIComponent` concatenation** — no template-literal paths, no bare variables, no
+  caller-supplied hosts.
+- The one caller-supplied component inside a path is `action` in `act(userId, action, button)`
+  (`src/assets/admin.js:297`), appended to `/api/admin/users/<id>/`. `act(` has exactly two call sites
+  and both pass a literal (`"approve"` at `:398`, `"suspend"` at `:407`), but `action` is
+  caller-supplied by signature rather than fixed by construction, so `:300` counts as concatenation.
 - The direct, non-wrapper calls are `fetch("/api/request-access")`, `fetch("/api/cwv")`,
   `fetch("/api/upload")`, two `ORIGIN + "/listen/..."` calls (`ORIGIN` is the origin the page was
   rendered with), and `fetch(episode.audioUrl)` (a capability URL this server minted).
 
-Residual, stated rather than softened: nothing enforces that constraint today. No test inspects
-these call sites, so a future caller passing a server- or user-influenced absolute URL would issue
-that request from the page — `fetch()` defaults to `credentials: "same-origin"`, so cookies would not
-ride along, but the request, including whatever the caller put in its path or body, would reach that
-origin, and this register would still be citing an enumeration that cannot see the defect. Closing it
-needs enforcement in `src/` — a typed union of literal route strings on the three helpers, or a test
-asserting every `api(`/`send(`/`post(` path argument starts with a single `/` — not another edit to
-this file.
+Residual, stated rather than softened: nothing enforces that constraint today, and the 11 `post(`
+sites are the sharpest evidence of it — they went uncounted in this very note until `a0f55db1`. No
+test inspects these call sites, so a future caller passing a server- or user-influenced absolute URL
+would issue that request from the page — `fetch()` defaults to `credentials: "same-origin"`, so
+cookies would not ride along, but the request, including whatever the caller put in its path or body,
+would reach that origin, and this register would still be citing an enumeration that cannot see the
+defect. Closing it needs enforcement in `src/` — a typed union of literal route strings on the three
+helpers, or a test asserting every `api(`/`send(`/`post(` path argument starts with a single `/` —
+not another edit to this file.
