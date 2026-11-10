@@ -67,6 +67,23 @@ export const DEFAULT_SURVIVE_PUT_START_WAIT_MS = survivePutStartWaitMs(MEASURED_
 export const SURVIVE_PUT_START_WAIT_MS_ENV = "INVOCATION_DEATH_SURVIVE_PUT_START_WAIT_MS";
 
 /**
+ * The child's default per-turn estimate for the batch's budget preflight (1ms).
+ *
+ * audio-feed-zpyx0: this is the child's model of "one TTS turn", which the claim loop compares
+ * against the budget REMAINING when it reaches the claim (`remaining < turnEstimate + flushMargin`
+ * -> break without claiming). One millisecond is the production shape shrunken, kept so every
+ * other row reaches the upload stage. Raising it past the child's `maxInvocationDurationMs` models
+ * the STARVED host the settle-first abort exists for (earlier stages ate the budget, so one more
+ * turn no longer fits) and settles the batch before any put - deterministically, with no sleep.
+ */
+export const DEFAULT_ESTIMATED_TURN_MS = 1;
+
+/**
+ * Env var overriding the child's per-turn estimate in milliseconds (non-negative integer).
+ */
+export const ESTIMATED_TURN_MS_ENV = "INVOCATION_DEATH_ESTIMATED_TURN_MS";
+
+/**
  * Env var introducing an artificial delay in milliseconds before the put starts (for testing).
  */
 export const STAGE_DELAY_MS_ENV = "INVOCATION_DEATH_STAGE_DELAY_MS";
