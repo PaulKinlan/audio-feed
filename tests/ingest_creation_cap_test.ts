@@ -25,6 +25,7 @@ import {
   INGEST_CREATION_RATE,
   INGEST_CREATION_WINDOW,
   ingestCreationLimiter,
+  releaseSourceSlot,
   SOURCE_CEILING_BOUND,
   sourceCeilingFor,
 } from "../src/compose/ingest.ts";
@@ -622,4 +623,172 @@ Deno.test("audio-feed-jgois: source ceiling is code-tied to dailyEpisodeBudgetFo
   assertEquals(personal.limit, 7);
   assertEquals(personal.limit, dailyEpisodeBudgetFor({ dailyEpisodeBudget: 7 }, 15).limit);
   assertEquals(personal.source, "user");
+});
+
+/**
+ * audio-feed-maxxw: the source ceiling is an ADMISSION, not a check-then-insert.
+ *
+ * WHAT WAS BROKEN: `subscribeToFeed` read `listSources`, compared its length to the ceiling, then
+ * paid a network fetch (`loadFeedItems`) before the `putSource`. Two concurrent subscribes at
+ * 49/50 both passed the check and both landed — 51 sources under a documented ceiling of 50, with
+ * neither caller told anything. The fetch between the count and the insert is the whole race, so
+ * the barrier below HOLDS every concurrent caller inside it: all of them are past the count check
+ * before any of them reaches an insert. That is the interleaving, made deterministic.
+ *
+ * THE MUTANT: delete the `admitSourceUnderCeiling` call in `subscribeToFeed` (back to
+ * count-then-insert) and row (a) reds with `S+3` sources instead of `ceiling` — measured, see the
+ * bead. The refusals are then zero rather than three, which is the part a user would notice.
+ */
+
+/** Hold every concurrent subscribe inside the fetch, so they all pass the count check together. */
+function barrierTransport(expected: number): {
+  transport: (url: URL, signal: AbortSignal) => Promise<Response>;
+  /** How many callers reached the barrier — proof the interleaving actually happened. */
+  arrived: () => number;
+} {
+  let arrived = 0;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    arrived: () => arrived,
+    transport: async () => {
+      arrived++;
+      if (arrived >= expected) release();
+      await gate;
+      return new Response(`<rss><channel><title>F</title></channel></rss>`, {
+        headers: { "content-type": "application/rss+xml" },
+      });
+    },
+  };
+}
+
+Deno.test("audio-feed-maxxw: concurrent adds at the ceiling land exactly the ceiling and refuse the rest", async () => {
+  const ceiling = 3;
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID, dailyEpisodeBudget: ceiling }));
+  const ctx: AppContext = { config, stores };
+  const fetchArticle = (url: string) =>
+    Promise.resolve({ url, title: "T", author: null, publishedAt: null, lead: "L", body: "B." });
+
+  // Two sources already held, one slot left: the smallest account that can race for a ceiling.
+  const seeded = {
+    transport: () =>
+      Promise.resolve(
+        new Response(`<rss><channel><title>F</title></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      ),
+    fetchArticle,
+  };
+  for (let i = 0; i < ceiling - 1; i++) {
+    await subscribeToFeed(
+      ctx,
+      { userId: USER_ID, feedUrl: `https://example.com/seed-${i}.xml` },
+      seeded,
+    );
+  }
+  assertEquals((await stores.metadata.listSources(USER_ID)).length, ceiling - 1);
+
+  // THREE concurrent subscribes for ONE free slot, all held inside the fetch (see the block
+  // comment): the count check has passed for every one of them before any insert happens.
+  // Distinct HOSTS, so each racer derives a distinct source id. Same-host URLs collide on the id
+  // generator's per-host base (a separate race), and identical ids would make the racers one source.
+  const racing = 3;
+  const barrier = barrierTransport(racing);
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: racing }, (_, i) =>
+      subscribeToFeed(
+        ctx,
+        { userId: USER_ID, feedUrl: `https://race-${i}.example.org/feed.xml` },
+        { transport: barrier.transport, fetchArticle },
+      )),
+  );
+
+  const sources = await stores.metadata.listSources(USER_ID);
+  // The row that reds on the mutant: count-then-insert stores ceiling-1 + racing.
+  assertEquals(
+    sources.length,
+    ceiling,
+    `exactly ${ceiling} sources must survive the race (count-then-insert lands ${
+      ceiling - 1 + racing
+    })`,
+  );
+  assertEquals(
+    barrier.arrived(),
+    racing,
+    "every racer really was inside the fetch, all past the count check",
+  );
+
+  const admitted = outcomes.filter((o) => o.status === "fulfilled");
+  const refused = outcomes.filter((o): o is PromiseRejectedResult => o.status === "rejected");
+  assertEquals(admitted.length, 1, "one racer takes the last slot");
+  assertEquals(refused.length, racing - 1, "the rest are refused, not silently stored");
+
+  // Row (b): a SEQUENTIAL add at the ceiling still refuses, with the SAME refusal the racers got —
+  // same type, status, limit, and message. A refusal shape that only exists under a race would be
+  // a second ceiling to explain.
+  const sequential = await assertRejects(
+    () =>
+      subscribeToFeed(
+        ctx,
+        { userId: USER_ID, feedUrl: "https://after-race.example.org/feed.xml" },
+        { transport: barrierTransport(1).transport, fetchArticle },
+      ),
+    SubscriptionLimitError,
+  );
+  assertEquals(sequential.status, 429);
+  assertEquals(sequential.limit, ceiling);
+  assertStringIncludes(sequential.message, `at most ${ceiling} sources`);
+
+  for (const outcome of refused) {
+    const err = outcome.reason as SubscriptionLimitError;
+    assert(err instanceof SubscriptionLimitError, "a race loser gets the typed refusal, not a 500");
+    assertEquals(err.status, sequential.status);
+    assertEquals(err.limit, sequential.limit);
+    assertEquals(
+      err.message,
+      sequential.message,
+      "the racing refusal is byte-identical to the sequential one",
+    );
+  }
+});
+
+Deno.test("audio-feed-maxxw: a deleted source gives its ceiling slot back", async () => {
+  const ceiling = 2;
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID, dailyEpisodeBudget: ceiling }));
+  const ctx: AppContext = { config, stores };
+  const deps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(`<rss><channel><title>F</title></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({ url, title: "T", author: null, publishedAt: null, lead: "L", body: "B." }),
+  };
+
+  const first = await subscribeToFeed(ctx, {
+    userId: USER_ID,
+    feedUrl: "https://example.com/a.xml",
+  }, deps);
+  await subscribeToFeed(ctx, { userId: USER_ID, feedUrl: "https://example.com/b.xml" }, deps);
+  await assertRejects(
+    () => subscribeToFeed(ctx, { userId: USER_ID, feedUrl: "https://example.com/c.xml" }, deps),
+    SubscriptionLimitError,
+  );
+
+  // The ceiling counts what the subscriber HOLDS, so removing one frees its slot.
+  await ctx.stores.metadata.deleteSource(USER_ID, first.source.id);
+  await releaseSourceSlot(ctx, USER_ID, first.source.id);
+  const replacement = await subscribeToFeed(
+    ctx,
+    { userId: USER_ID, feedUrl: "https://example.com/d.xml" },
+    deps,
+  );
+  assert(replacement.source.id);
+  assertEquals((await stores.metadata.listSources(USER_ID)).length, ceiling);
 });
