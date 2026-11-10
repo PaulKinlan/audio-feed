@@ -28,7 +28,10 @@ import {
   ingestCreationLimiter,
   releaseSourceSlot,
   SOURCE_CEILING_BOUND,
+  SOURCE_RESERVATION_STALE_MS,
   sourceCeilingFor,
+  type SourceCeilingRow,
+  sourceCeilingRow,
 } from "../src/compose/ingest.ts";
 import {
   DEFAULT_MAX_ITEMS,
@@ -918,5 +921,169 @@ Deno.test("audio-feed-qqa03: a failed source write gives its admitted slot back"
     (await stores.metadata.listSources(USER_ID)).length,
     ceiling,
     "the refund makes the cap-1 subscribe land instead of refusing",
+  );
+});
+
+/**
+ * audio-feed-qqa03 (reconcile row a): a stale held id absent from the listing and older than the
+ * bound is pruned, so the user can subscribe again at cap-1.
+ *
+ * THE CRASH WINDOW: admission reserves a slot by committing the held-source-ids row, then inserts
+ * the source. If the process dies between the two, the reserved id is never inserted and never
+ * refunded. During admission reconciliation, any held id that is absent from the fresh listing AND
+ * older than SOURCE_RESERVATION_STALE_MS is pruned.
+ */
+Deno.test("audio-feed-qqa03 row (a): a stale held id absent from the listing and older than the bound is pruned", async () => {
+  const limit = 2;
+  const t0 = 1_000_000;
+  const staleTime = t0 + SOURCE_RESERVATION_STALE_MS + 5_000;
+
+  // Pure applySourceCeiling:
+  // Row holds "alpha" (stored) and "crashed-beta" (reservation at t0). Stored listing only has "alpha".
+  const rowWithStale = {
+    ids: ["alpha", "crashed-beta"],
+    reservedAt: { "crashed-beta": t0 },
+  };
+  const applied = applySourceCeiling(rowWithStale, ["alpha"], "gamma", limit, staleTime);
+
+  assertEquals(
+    applied.admitted,
+    true,
+    "the subscriber at cap-1 can subscribe because stale id was pruned",
+  );
+  assertEquals(applied.held, 2, "held count is exactly limit (alpha + gamma)");
+  assertEquals(
+    applied.next.ids.includes("crashed-beta"),
+    false,
+    "stale id was pruned from row",
+  );
+  assertEquals(applied.next.ids.includes("gamma"), true, "new source is held in row");
+
+  // End-to-end with subscribeToFeed:
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID, dailyEpisodeBudget: limit }));
+  const ctx: AppContext = { config, stores };
+  const deps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(`<rss><channel><title>F</title></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({ url, title: "T", author: null, publishedAt: null, lead: "L", body: "B." }),
+  };
+
+  // First source is normally subscribed and stored.
+  const first = await subscribeToFeed(ctx, {
+    userId: USER_ID,
+    feedUrl: "https://alpha.example/feed.xml",
+  }, deps);
+  assertEquals(first.source.id, "alpha");
+  assertEquals((await stores.metadata.listSources(USER_ID)).length, 1);
+
+  // Simulate a crashed process: manually inject a leaked reservation older than SOURCE_RESERVATION_STALE_MS
+  await stores.metadata.atomicUpdate<SourceCeilingRow>(
+    sourceCeilingRow(USER_ID),
+    (cur) => ({
+      ids: [...(cur?.ids ?? []), "leaked-crashed-source"],
+      reservedAt: {
+        ...(cur?.reservedAt ?? {}),
+        "leaked-crashed-source": Date.now() - SOURCE_RESERVATION_STALE_MS - 10_000,
+      },
+    }),
+  );
+
+  // Subscribe at cap-1: without reconcile, the user holds 2 ids (cap reached) and this would fail.
+  // With reconcile, the stale reservation is pruned and the new subscription succeeds.
+  const second = await subscribeToFeed(
+    ctx,
+    { userId: USER_ID, feedUrl: "https://gamma.example/feed.xml" },
+    deps,
+  );
+  assertEquals(second.source.id, "gamma");
+  assertEquals((await stores.metadata.listSources(USER_ID)).length, limit);
+});
+
+/**
+ * audio-feed-qqa03 (reconcile row b): a held id absent from the listing but YOUNGER than the bound
+ * is NOT pruned (the in-flight insert is not stolen).
+ *
+ * IN-FLIGHT PROTECTION: between admission commit and putSource, the source id is held in the row
+ * but not yet visible in listSources. It must NOT be pruned while younger than the bound, or a
+ * concurrent request could steal the slot and admit an over-cap source.
+ *
+ * THE MUTANT: remove the age guard in `applySourceCeiling` (e.g. prune any id absent from storedIds
+ * regardless of age). The in-flight reservation is immediately pruned, admission of a 3rd source
+ * succeeds instead of being refused, and row (b) reds.
+ */
+Deno.test("audio-feed-qqa03 row (b): a held id absent from the listing but younger than the bound is not pruned", async () => {
+  const limit = 2;
+  const t0 = 1_000_000;
+  const recentTime = t0 + 2_000; // 2s after reservation, well within SOURCE_RESERVATION_STALE_MS (120s)
+
+  // Pure applySourceCeiling:
+  // Row holds "alpha" (stored) and "inflight-beta" (reserved at t0). Stored listing only has "alpha".
+  const rowWithInFlight = {
+    ids: ["alpha", "inflight-beta"],
+    reservedAt: { "inflight-beta": t0 },
+  };
+  const applied = applySourceCeiling(rowWithInFlight, ["alpha"], "gamma", limit, recentTime);
+
+  assertEquals(
+    applied.admitted,
+    false,
+    "the in-flight insert is not stolen: admission at ceiling is refused",
+  );
+  assertEquals(applied.held, limit, "the in-flight reservation is still counted");
+  assertEquals(
+    applied.next.ids.includes("inflight-beta"),
+    true,
+    "in-flight id is NOT pruned from the row",
+  );
+
+  // End-to-end with subscribeToFeed:
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: USER_ID, dailyEpisodeBudget: limit }));
+  const ctx: AppContext = { config, stores };
+  const deps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(`<rss><channel><title>F</title></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({ url, title: "T", author: null, publishedAt: null, lead: "L", body: "B." }),
+  };
+
+  const first = await subscribeToFeed(ctx, {
+    userId: USER_ID,
+    feedUrl: "https://alpha.example/feed.xml",
+  }, deps);
+  assertEquals(first.source.id, "alpha");
+
+  // Simulate an in-flight reservation that was committed 1 second ago (younger than bound):
+  await stores.metadata.atomicUpdate<SourceCeilingRow>(
+    sourceCeilingRow(USER_ID),
+    (cur) => ({
+      ids: [...(cur?.ids ?? []), "inflight-source"],
+      reservedAt: {
+        ...(cur?.reservedAt ?? {}),
+        "inflight-source": Date.now() - 1000,
+      },
+    }),
+  );
+
+  // Attempting to subscribe to a 3rd source must be refused with SubscriptionLimitError
+  await assertRejects(
+    () =>
+      subscribeToFeed(
+        ctx,
+        { userId: USER_ID, feedUrl: "https://gamma.example/feed.xml" },
+        deps,
+      ),
+    SubscriptionLimitError,
+    "Source limit reached",
   );
 });

@@ -169,10 +169,57 @@ export function sourceCeilingRow(userId: string): string {
  * source the store no longer has; that over-counts, which refuses one subscriber one source they
  * had room for, and never admits a source past the ceiling. See `releaseSourceSlot` for the
  * refund that keeps it exact.
+ *
+ * audio-feed-qqa03: `reservedAt` records the timestamp (epoch ms) each id was admitted. When an
+ * id is absent from the store's `listSources` snapshot AND older than `SOURCE_RESERVATION_STALE_MS`,
+ * it is pruned during admission reconcile — healing the leak from a process crash between admission
+ * and source insert without stealing in-flight inserts younger than the bound.
  */
 export interface SourceCeilingRow {
   ids: string[];
+  reservedAt?: Record<string, number>;
 }
+
+/**
+ * How long a reservation may remain absent from `listSources` before being treated as a leaked slot
+ * from a crashed process and pruned during admission reconciliation (audio-feed-qqa03).
+ *
+ * A PRODUCT CHOICE, NOT AN INHERITED LEASE. There is no 2-minute lease anywhere in the codebase to
+ * align with: the repo's lease is `DEFAULT_CLAIM_LEASE_MS`, 15 minutes (src/types.ts:391), and the
+ * other 2-minute number — the heartbeat-staleness rule that makes a stuck `synthesizing` episode
+ * retryable (src/routes/account.ts:154, src/storage/kv/episodes.ts:712) — is a retry-eligibility
+ * threshold, not a lease. So the bound is sized from the path it guards, `subscribeToFeed`
+ * (src/ingest/feed.ts): the reservation is stamped at admission and `putSource` follows it with no
+ * network call in between, which makes a LIVE reservation one store round trip old — the admission's
+ * own CAS loop, 32 attempts with <=5ms jittered backoff (src/storage/kv.ts:481). The feed fetch in
+ * that request is the codebase's long pole (`TIMEOUT_MS`, 15s, one deadline covering the whole
+ * redirect chain — src/ingest/url.ts:51) and it happens BEFORE the stamp. 2 minutes is 8x the
+ * longest thing the request can do before the insert and orders of magnitude more than the
+ * admission itself, so the age test fires only on a genuinely stalled request — a dead process, a
+ * suspended isolate, a hung store write — which is the leak it exists to clear. The poll AFTER
+ * `putSource` can also take minutes (article fetches, synthesis) and does not bear on this bound: by
+ * then the id is in the store, so a later snapshot sees it as held.
+ *
+ * DELIBERATELY SHORTER THAN THE CLAIM LEASE, because the two numbers fail in opposite directions.
+ * A claim lease errs long because expiring one early bills a synthesis twice. This bound errs short
+ * because an admitted-but-unstored slot burns a subscriber's ceiling until it is reconciled, and
+ * every second past the real request time is capacity that user does not have. Erring short costs
+ * at most a brief over-count, `ceiling + k` where k is the count of admissions reconciling at once,
+ * and refusals resume as soon as those ids reach a snapshot (the row unions `storedIds`, so a
+ * pruned-but-stored id comes back). Erring long means a crashed subscribe keeps a paid-for ceiling
+ * slot indefinitely — permanent capacity loss — which is the leak audio-feed-qqa03 exists to close.
+ *
+ * ONE WINDOW KEEPS THIS FROM BEING TIGHT, and it is why the overshoot is `ceiling + k` rather than
+ * `ceiling + 1`: `storedIds` is captured BEFORE the feed fetch (src/ingest/feed.ts:634) and reused
+ * at admission after it (src/ingest/feed.ts:685), so a slow fetch makes admission reconcile against
+ * a snapshot taken before THIS request's insert — and before any other request's insert that landed
+ * during that fetch. An id stored during the window is absent from both the snapshot and the row's
+ * count, so it is not counted even though it is stored. The window is bounded by the same 15s fetch
+ * deadline, so it can never make a fresh reservation look stale on its own — the age test still has
+ * to pass — but it does widen what one pass can prune: an id whose insert landed inside the window
+ * looks absent too, and each of the k concurrent admissions carries its own window.
+ */
+export const SOURCE_RESERVATION_STALE_MS = 2 * 60 * 1000;
 
 /** One run of the ceiling mutation, pure so the multi-run contract is testable. */
 export interface AppliedSourceCeiling {
@@ -207,20 +254,68 @@ export function applySourceCeiling(
   storedIds: readonly string[],
   sourceId: string,
   limit: number,
+  now = Date.now(),
+  staleMs = SOURCE_RESERVATION_STALE_MS,
 ): AppliedSourceCeiling {
-  const held = new Set(current?.ids ?? []);
-  for (const id of storedIds) held.add(id);
+  const stored = new Set(storedIds);
+  const held = new Set<string>();
+  const nextReservedAt: Record<string, number> = {};
+  const currentReservedAt = current?.reservedAt ?? {};
+
+  for (const id of current?.ids ?? []) {
+    const isStored = stored.has(id);
+    const reservedAt = currentReservedAt[id];
+    // audio-feed-qqa03: prune an id only when it is absent from the fresh listing AND older
+    // than the staleness bound. An in-flight insert is younger than the bound and must not
+    // be pruned. Un-stamped historical holdings are never pruned on a partial snapshot.
+    const isStale = !isStored && typeof reservedAt === "number" && (now - reservedAt) > staleMs;
+    if (!isStale) {
+      held.add(id);
+      if (typeof reservedAt === "number") {
+        nextReservedAt[id] = reservedAt;
+      }
+    }
+  }
+
+  for (const id of storedIds) {
+    held.add(id);
+  }
+
   if (held.has(sourceId)) {
     // The same id IS the same source: a concurrent subscribe racing the same feed, a retry, or a
     // caller re-entering after a partial failure. It already holds a slot, so taking another would
     // charge the subscriber twice for one source.
-    return { next: { ids: [...held] }, admitted: true, held: held.size };
+    if (!nextReservedAt[sourceId] && typeof currentReservedAt[sourceId] === "number") {
+      nextReservedAt[sourceId] = currentReservedAt[sourceId];
+    }
+    return {
+      next: {
+        ids: [...held],
+        ...(Object.keys(nextReservedAt).length > 0 ? { reservedAt: nextReservedAt } : {}),
+      },
+      admitted: true,
+      held: held.size,
+    };
   }
+
   if (held.size >= limit) {
-    return { next: { ids: [...held] }, admitted: false, held: held.size };
+    return {
+      next: {
+        ids: [...held],
+        ...(Object.keys(nextReservedAt).length > 0 ? { reservedAt: nextReservedAt } : {}),
+      },
+      admitted: false,
+      held: held.size,
+    };
   }
+
   held.add(sourceId);
-  return { next: { ids: [...held] }, admitted: true, held: held.size };
+  nextReservedAt[sourceId] = now;
+  return {
+    next: { ids: [...held], reservedAt: nextReservedAt },
+    admitted: true,
+    held: held.size,
+  };
 }
 
 export interface SourceAdmission {
@@ -252,6 +347,8 @@ export async function admitSourceUnderCeiling(
     limit: number;
     /** The caller's snapshot of the ids the store holds; see applySourceCeiling. */
     storedIds: readonly string[];
+    now?: number;
+    staleMs?: number;
   },
 ): Promise<SourceAdmission> {
   // Recomputed by EVERY callback run: the last run is the one the store applied, so a decision
@@ -260,7 +357,14 @@ export async function admitSourceUnderCeiling(
   const write = await ctx.stores.metadata.atomicUpdate<SourceCeilingRow>(
     sourceCeilingRow(input.userId),
     (current) => {
-      last = applySourceCeiling(current, input.storedIds, input.sourceId, input.limit);
+      last = applySourceCeiling(
+        current,
+        input.storedIds,
+        input.sourceId,
+        input.limit,
+        input.now ?? Date.now(),
+        input.staleMs,
+      );
       return last.next;
     },
     // No TTL on purpose: an expiring row would forget held slots and re-open the ceiling.
@@ -305,7 +409,14 @@ export async function releaseSourceSlot(
         // would only look like a refund.
         if (!ids.includes(sourceId)) return null;
         removed = true;
-        return { ids: ids.filter((id) => id !== sourceId) };
+        const reservedAt = current?.reservedAt ? { ...current.reservedAt } : undefined;
+        if (reservedAt) {
+          delete reservedAt[sourceId];
+        }
+        return {
+          ids: ids.filter((id) => id !== sourceId),
+          ...(reservedAt && Object.keys(reservedAt).length > 0 ? { reservedAt } : {}),
+        };
       },
     );
     return write.committed && removed;
