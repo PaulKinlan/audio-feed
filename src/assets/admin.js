@@ -801,7 +801,7 @@ copyManageFeedUrl.addEventListener("click", async () => {
 rotateManageToken.addEventListener("click", async () => {
   if (!currentManagingUser) return;
   const ok = await confirmWith(
-    "Are you sure you want to rotate this subscriber's feed token? All existing podcast app subscriptions will stop working.",
+    "Are you sure you want to rotate this subscriber's feed token? All existing podcast app subscriptions will stop working. Note: previously fetched audio enclosure URLs remain active until account suspension.",
     {
       title: "Rotate Feed Token",
       confirmText: "Rotate Token",
@@ -821,7 +821,11 @@ rotateManageToken.addEventListener("click", async () => {
       encodeURIComponent(res.feedToken) + "/master.xml";
     manageFeedUrl.value = newFeedUrl;
     renderManageDetails(currentManagingUser);
-    say(manageSourcesFeedback, "ok", "Feed token rotated successfully. Old URL revoked.");
+    say(
+      manageSourcesFeedback,
+      "ok",
+      "Feed token rotated successfully. Old URL revoked. Audio enclosure URLs remain active until account suspension.",
+    );
   } catch (error) {
     say(manageSourcesFeedback, "error", messageOf(error));
   } finally {

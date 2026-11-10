@@ -349,6 +349,11 @@ export async function handleAudio(
   // canonicalUserId, and every candidate belongs to that owner (legacy candidates are
   // appended only when their unique owner matches, audio-feed-65lf), so refusing here
   // refuses exactly what they refused — one metadata read instead of store round trips.
+  // Capability lifetime vs rotation (audio-feed-3wenc): /audio routes gate on user
+  // approval status, not on feedToken. Enclosure URLs are bearer capabilities that
+  // intentionally survive feed-token rotation (feed rotation revokes feed XML and
+  // player access, while enclosure URLs remain active). The kill switch for audio
+  // access is account suspension (status !== "approved") or episode deletion.
   const refusal = await checkUserApproval(ctx, canonicalKey, canonicalUserId);
   if (refusal) return refusal;
 

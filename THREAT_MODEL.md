@@ -96,10 +96,22 @@ routes, listed separately because the attacker's position there is different.
     lacking `byteLength`.
   - Capability keys are redacted from logs and error URLs (`src/router.ts`, `redactAudioKey`,
     `sanitizeRequestUrl`).
+  - **Audio enclosure URL lifetime vs rotation (audio-feed-3wenc):** `/audio/:key+` URLs are bearer
+    capabilities that embed the user id and episode id (`audio/<userId>/<mode>/<id>.<ext>`), but do NOT
+    embed the feed token (`src/feed/adapter.ts:70`). Rotating a feed token (`POST /api/account/rotate-token`
+    or `POST /api/admin/users/:id/rotate-token`) invalidates the feed XML (`/feed/:token/...`) and web
+    player (`/listen/:token/...`) with uniform 404 ("Unknown feed"), revoking podcast client updates
+    and web playback. It intentionally does NOT invalidate already-syndicated enclosure URLs: podcast
+    clients poll feeds over months, audio responses are cached `public, immutable`, and the audio route's
+    pre-blob gate (`checkUserApproval`, `src/routes/audio.ts:349-353`) verifies only that the owning user
+    is in `approved` status. The only server-side kill switch for audio enclosure access is account
+    suspension (which marks `user.status` away from "approved", causing `checkUserApproval` to refuse
+    with uniform 404 "Unknown audio object") or episode deletion.
 - **Residual (documented, accepted):** a leaked capability is a bearer credential, valid until
   rotated; rotation is subscriber-initiated (`POST /api/account/rotate-token`) or admin-initiated
   (`POST /api/admin/users/:id/rotate-token`), and neither can reach a device that already downloaded
-  episodes — see the offline-cache section below. The retry ceiling is intentionally small; a
+  episodes — see the offline-cache section below (enclosure URLs already syndicated also survive
+  feed-token rotation until account suspension, audio-feed-3wenc). The retry ceiling is intentionally small; a
   persistently failing episode is an owner problem by design (`src/routes/listen.ts:889-892`).
   Feed reach is bounded by RAW records, not only by publishable ones: `listEpisodePage`'s `limit`
   bounds the underlying scan and the `publishable` filter runs over the page it returns, so once a

@@ -457,7 +457,7 @@ ${sendSection}
 
   <section class="panel danger-zone" aria-labelledby="rotate-h">
     <h2 id="rotate-h">Leaked your feed URL?</h2>
-    <p class="sub">Rotating makes a new feed URL and stops the old one at once. Every podcast app you subscribed needs the new one.</p>
+    <p class="sub">Rotating makes a new feed URL and stops the old one at once. Every podcast app you subscribed needs the new one. Previously fetched audio links remain accessible until account suspension.</p>
     <div class="actions"><button class="btn danger" type="button" id="rotateToken">Rotate feed URL</button></div>
     <p class="feedback" id="rotateFeedback" role="status" aria-live="polite"></p>
   </section>
@@ -845,7 +845,7 @@ ${CONFIRM_DIALOG_CLIENT}
   }
 
   $("rotateToken").addEventListener("click", async () => {
-    const ok = await askConfirm("Make a new feed URL? The current one stops working in every podcast app straight away.", {
+    const ok = await askConfirm("Make a new feed URL? The current one stops working in every podcast app straight away. Previously fetched audio links remain accessible until account suspension.", {
       title: "Rotate Feed URL",
       confirmText: "Make New URL",
     });
