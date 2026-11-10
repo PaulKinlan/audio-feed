@@ -15,7 +15,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
-import { assetBody } from "../src/routes/assets.ts";
+import { assetBody, assetUrl } from "../src/routes/assets.ts";
 import { shippedCss } from "./admin_css.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -84,6 +84,7 @@ Deno.test("the background-runs table keeps a readable width on a phone (audio-fe
   assertStringIncludes(html, '<table class="runs">');
   // Resolved through the link, not the inline <style>: this rule moved to src/assets/admin.css in
   // audio-feed-3xq part 3, and reading the HTML alone would now miss it.
+  assertStringIncludes(html, `<link rel="stylesheet" href="${assetUrl("admin.css")}">`);
   // Whitespace-normalised: deno fmt rewrites the extracted file across lines, and asserting on exact
   // formatting ties a behavioural test to the formatter's opinion rather than to the rule existing.
   const flat = shippedCss(html).replace(/\s+/g, " ");
