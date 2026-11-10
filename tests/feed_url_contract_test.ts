@@ -13,6 +13,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { buildMasterFeed, buildSourceFeed } from "../src/feed/rss.ts";
+import { rotateFeedToken } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -125,3 +126,89 @@ Deno.test("the fixture script's token shape matches the router", () => {
   const xml = buildMasterFeed({ origin: BASE, token: "local-dev-token", episodes: [] });
   assertEquals(selfLink(xml), `${BASE}/feed/local-dev-token/master.xml`);
 });
+
+Deno.test(
+  "audio-feed-3wenc: enclosure URLs survive feed-token rotation while old feed URL fails",
+  async () => {
+    const stores: Stores = memoryStores();
+    await stores.metadata.putUser(
+      makeUser({ id: "user-1", feedToken: TOKEN, status: "approved" }),
+    );
+    await stores.metadata.putSource(
+      makeSource({ id: "stratechery", userId: "user-1" }),
+    );
+    const canonicalKey = "user-1/direct/episode-1.mp3";
+    const audioBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "episode-1",
+        userId: "user-1",
+        sourceId: "stratechery",
+        mode: "direct",
+        status: "ready",
+        audioKey: canonicalKey,
+        byteLength: audioBytes.length,
+        contentType: "audio/mpeg",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        readyAt: "2026-09-01T00:05:00.000Z",
+      }),
+    );
+    await stores.blobs.put(`audio/${canonicalKey}`, audioBytes, {
+      contentType: "audio/mpeg",
+    });
+    const { fetch } = createApp({ config, stores }, createHandlers({ config, stores }));
+
+    // 1. Before rotation: feed XML advertises the canonical enclosure URL.
+    const initialFeedRes = await fetch(new Request(`${BASE}/feed/${TOKEN}/master.xml`));
+    assertEquals(initialFeedRes.status, 200);
+    const initialXml = await initialFeedRes.text();
+    const enclosureMatch = initialXml.match(/<enclosure url="([^"]+)"/);
+    assert(enclosureMatch?.[1], "feed XML must contain an enclosure URL");
+    const oldEnclosureUrl = enclosureMatch[1];
+    assertEquals(oldEnclosureUrl, `${BASE}/audio/${canonicalKey}`);
+
+    // Pre-rotation enclosure fetch succeeds.
+    const preRotateRes = await fetch(new Request(oldEnclosureUrl));
+    assertEquals(preRotateRes.status, 200);
+    assertEquals(new Uint8Array(await preRotateRes.bytes()), audioBytes);
+
+    // 2. Rotate the feed token.
+    const rotatedUser = await rotateFeedToken(stores.metadata, "user-1");
+    const newToken = rotatedUser.feedToken;
+    assert(newToken !== TOKEN, "token must rotate");
+
+    // 3. Stale feed URL fails with uniform 404 (Unknown feed doctrine).
+    const staleFeedRes = await fetch(new Request(`${BASE}/feed/${TOKEN}/master.xml`));
+    assertEquals(staleFeedRes.status, 404);
+    const staleFeedBody = await staleFeedRes.json();
+    assertEquals(staleFeedBody, { error: "Unknown feed" });
+
+    // 4. New feed URL resolves 200 and advertises the enclosure URL.
+    const newFeedRes = await fetch(new Request(`${BASE}/feed/${newToken}/master.xml`));
+    assertEquals(newFeedRes.status, 200);
+    const newXml = await newFeedRes.text();
+    const newEnclosureMatch = newXml.match(/<enclosure url="([^"]+)"/);
+    assert(newEnclosureMatch?.[1], "new feed XML must contain an enclosure URL");
+    const newEnclosureUrl = newEnclosureMatch[1];
+    assertEquals(newEnclosureUrl, oldEnclosureUrl);
+
+    // 5. Observable contract pinned:
+    // After rotation, old enclosure URL does X (200 OK, audio bytes).
+    // New enclosure URL does Y (200 OK, audio bytes).
+    // Mutant: If rotation re-minted or invalidated enclosure URLs (or gated /audio
+    // on the current feedToken), oldEnclosureUrl would 404 instead of 200.
+    const oldAudioRes = await fetch(new Request(oldEnclosureUrl));
+    assertEquals(oldAudioRes.status, 200, "old enclosure URL must survive feed-token rotation");
+    assertEquals(new Uint8Array(await oldAudioRes.bytes()), audioBytes);
+
+    const newAudioRes = await fetch(new Request(newEnclosureUrl));
+    assertEquals(newAudioRes.status, 200, "new enclosure URL must resolve and serve audio");
+    assertEquals(new Uint8Array(await newAudioRes.bytes()), audioBytes);
+
+    // 6. Contrast with suspension: the server-side kill switch for audio access
+    // is account suspension, which halts enclosure serving with 404 "Unknown audio object".
+    await stores.metadata.putUser({ ...rotatedUser, status: "suspended" });
+    const suspendedRes = await fetch(new Request(oldEnclosureUrl));
+    assertEquals(suspendedRes.status, 404, "suspension stops enclosure URL access");
+  },
+);
