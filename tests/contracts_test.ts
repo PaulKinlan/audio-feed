@@ -1,4 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
+import { dirname, join, normalize } from "@std/path";
 
 const CONTRACTS_PATH = new URL("./contracts.json", import.meta.url).pathname;
 
@@ -136,6 +137,117 @@ function loadCoverageContract(): ContractMapping {
   return JSON.parse(content) as ContractMapping;
 }
 
+/**
+ * Strips single-line and multi-line comments from JavaScript/TypeScript source,
+ * preserving strings (including protocol URLs like http://).
+ */
+export function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\r\n]*/g, "$1");
+}
+
+export interface ExerciseResult {
+  exercises: boolean;
+  reason: string;
+}
+
+/**
+ * Validates that a suite genuinely exercises the declared target.
+ *
+ * Genuine exercise requires either:
+ * 1. An import specifier (static or dynamic) that resolves to the target path.
+ * 2. A legitimate text read (e.g. readTextFile / Deno.readTextFile) or subprocess
+ *    execution (Deno.Command) targeting the exact path or relative URL resolving to it.
+ *
+ * Bare substring occurrences (such as a filename mentioned only in a comment or docstring)
+ * are strictly rejected.
+ */
+export function suiteExercisesTarget(
+  suitePath: string,
+  declaredPath: string,
+  customSuiteSource?: string,
+): ExerciseResult {
+  const suiteDir = dirname(suitePath);
+  const suiteSource = customSuiteSource ??
+    Deno.readTextFileSync(new URL(`../${suitePath}`, import.meta.url).pathname);
+  const code = stripComments(suiteSource);
+
+  // 1. Static or dynamic import specifier resolving to declaredPath
+  const importSpecifiers: string[] = [];
+  const staticImportRe = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?from\s+)?['"]([^'"]+)['"]/g;
+  let match: RegExpExecArray | null;
+  while ((match = staticImportRe.exec(code)) !== null) {
+    if (match[1]) importSpecifiers.push(match[1]);
+  }
+  const dynamicImportRe = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  while ((match = dynamicImportRe.exec(code)) !== null) {
+    if (match[1]) importSpecifiers.push(match[1]);
+  }
+
+  for (const spec of importSpecifiers) {
+    const resolved = normalize(join(suiteDir, spec));
+    if (resolved === declaredPath) {
+      return {
+        exercises: true,
+        reason: `import specifier "${spec}" resolves to target`,
+      };
+    }
+  }
+
+  // 2. Legitimate text reads or Command execution of exact path:
+  // Where a suite legitimately reads the file as text (such as browser proofs or assets),
+  // accept readTextFile/Deno.readTextFile or Command execution of the exact path or relative URL.
+  const hasReadTextFile = /\b(?:Deno\.)?readTextFile(?:Sync)?\b/.test(code);
+  const hasCommand = /\b(?:Deno\.)?Command\b/.test(code);
+
+  const directReadRe = /\b(?:Deno\.)?readTextFile(?:Sync)?\s*\(\s*['"]([^'"]+)['"]/g;
+  while ((match = directReadRe.exec(code)) !== null) {
+    const readPath = match[1];
+    if (!readPath) continue;
+    if (
+      readPath === declaredPath ||
+      normalize(join(suiteDir, readPath)) === declaredPath
+    ) {
+      return {
+        exercises: true,
+        reason: `reads target as text via readTextFile("${readPath}")`,
+      };
+    }
+  }
+
+  const urlRe = /new\s+URL\s*\(\s*['"]([^'"]+)['"]\s*,\s*import\.meta\.url\s*\)/g;
+  while ((match = urlRe.exec(code)) !== null) {
+    const urlSpec = match[1];
+    if (!urlSpec) continue;
+    const resolved = normalize(join(suiteDir, urlSpec));
+    if (resolved === declaredPath) {
+      if (hasReadTextFile) {
+        return {
+          exercises: true,
+          reason: `reads target as text via URL "${urlSpec}"`,
+        };
+      }
+      if (hasCommand) {
+        return {
+          exercises: true,
+          reason: `executes target via Deno.Command with URL "${urlSpec}"`,
+        };
+      }
+      return {
+        exercises: true,
+        reason: `resolves target URL "${urlSpec}" in executable code`,
+      };
+    }
+  }
+
+  return {
+    exercises: false,
+    reason:
+      `suite neither imports "${declaredPath}" nor references it in readTextFile/Deno.Command (comment-only mentions do not qualify)`,
+  };
+}
+
 Deno.test("coverage-contract.json is valid, targets real files and suites, and suites genuinely exercise targets (audio-feed-c0oh9)", () => {
   const contract = loadCoverageContract();
   assert(Object.keys(contract).length > 0, "coverage-contract.json must not be empty");
@@ -150,24 +262,99 @@ Deno.test("coverage-contract.json is valid, targets real files and suites, and s
       `declared path ${declaredPath} must map to non-empty suite array`,
     );
 
-    const baseName = declaredPath.split("/").pop() ?? "";
-    const pathWithoutSrc = declaredPath.replace(/^src\//, "");
-
     for (const suite of suites) {
       assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
       const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
       assert(suiteStat.isFile, `suite ${suite} must exist on disk`);
 
-      const suiteSource = Deno.readTextFileSync(new URL(`../${suite}`, import.meta.url).pathname);
-      const exercises = suiteSource.includes(declaredPath) ||
-        suiteSource.includes(baseName) ||
-        suiteSource.includes(pathWithoutSrc);
+      const result = suiteExercisesTarget(suite, declaredPath);
       assert(
-        exercises,
-        `declared mapping for ${declaredPath} points to suite ${suite}, but ${suite} does not import, read, or reference ${declaredPath}`,
+        result.exercises,
+        `declared mapping for ${declaredPath} points to suite ${suite}, but ${suite} does not genuinely exercise ${declaredPath}: ${result.reason}`,
       );
     }
   }
+});
+
+Deno.test("coverage contract validator rejects a suite that merely mentions the target in a comment (audio-feed-c0oh9)", () => {
+  // Real repository case: tests/admin_ui_test.ts merely mentions src/assets/admin.css in a comment:
+  // "Resolved through the link, not the inline <style>: this rule moved to src/assets/admin.css in..."
+  const realCommentMention = suiteExercisesTarget(
+    "tests/admin_ui_test.ts",
+    "src/assets/admin.css",
+  );
+  assertEquals(
+    realCommentMention.exercises,
+    false,
+    "tests/admin_ui_test.ts must be rejected for src/assets/admin.css because it only mentions it in a comment",
+  );
+
+  // Synthetic single-line comment case:
+  const singleLineCommentSource = `
+    import { assert } from "@std/assert";
+    // Manifest mention: src/compose/feeds.ts
+    Deno.test("unrelated test", () => {
+      assert(true);
+    });
+  `;
+  const singleLineResult = suiteExercisesTarget(
+    "tests/unrelated_test.ts",
+    "src/compose/feeds.ts",
+    singleLineCommentSource,
+  );
+  assertEquals(
+    singleLineResult.exercises,
+    false,
+    "a suite with only a single-line comment mention must be rejected",
+  );
+
+  // Synthetic multi-line comment case:
+  const multiLineCommentSource = `
+    /*
+     * Coverage declaration: scripts/proof-latency-budgets.ts
+     * Comment-only mention in block comment
+     */
+    export function helper() { return true; }
+  `;
+  const multiLineResult = suiteExercisesTarget(
+    "tests/another_test.ts",
+    "scripts/proof-latency-budgets.ts",
+    multiLineCommentSource,
+  );
+  assertEquals(
+    multiLineResult.exercises,
+    false,
+    "a suite with only a multi-line comment mention must be rejected",
+  );
+
+  // Positive controls to prove genuine exercise is accepted:
+  const genuineImportSource = `
+    import { createCwvHandler } from "../src/routes/cwv.ts";
+  `;
+  const genuineImportResult = suiteExercisesTarget(
+    "tests/observability_cwv_test.ts",
+    "src/routes/cwv.ts",
+    genuineImportSource,
+  );
+  assertEquals(
+    genuineImportResult.exercises,
+    true,
+    "a suite with a real import specifier must pass",
+  );
+
+  const genuineReadSource = `
+    const css = await Deno.readTextFile("src/assets/admin.css");
+  `;
+  const genuineReadResult = suiteExercisesTarget(
+    "tests/anchor_positioning_test.ts",
+    "src/assets/admin.css",
+    genuineReadSource,
+  );
+  assertEquals(
+    genuineReadResult.exercises,
+    true,
+    "a suite with a genuine Deno.readTextFile call must pass",
+  );
 });
 
 Deno.test("coverage-contract.json covers required browser proof scripts and changed scripts under scripts/ (audio-feed-c0oh9)", async () => {
@@ -191,31 +378,56 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
       `required proof script ${script} must map to a non-empty suite array`,
     );
     for (const suite of suites!) {
+      assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
       const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
       assert(suiteStat.isFile, `suite ${suite} for ${script} must exist on disk`);
+      const result = suiteExercisesTarget(suite, script);
+      assert(
+        result.exercises,
+        `required proof script ${script} mapped to ${suite}, but ${suite} does not genuinely exercise it: ${result.reason}`,
+      );
     }
   }
 
-  // Narrow dynamic check: detect any changed script under scripts/ via git diff
-  let changedFiles: string[] = [];
-  try {
-    const gitDiff = await new Deno.Command("git", {
-      args: ["diff", "--name-only", "origin/main...HEAD"],
-    }).output();
-    if (gitDiff.success) {
-      changedFiles = new TextDecoder().decode(gitDiff.stdout).trim().split("\n").filter(Boolean);
-    } else {
-      const gitDiffHead = await new Deno.Command("git", {
-        args: ["diff", "--name-only", "HEAD"],
-      }).output();
-      if (gitDiffHead.success) {
-        changedFiles = new TextDecoder().decode(gitDiffHead.stdout).trim().split("\n").filter(
-          Boolean,
-        );
-      }
-    }
-  } catch {
-    // git not runnable or outside git repo
+  // Dynamic check: detect any changed or untracked scripts under scripts/ via git status --porcelain and git diff.
+  // Fail loudly on any git failure - never swallow errors or skip silently.
+  const statusOutput = await new Deno.Command("git", {
+    args: ["status", "--porcelain"],
+  }).output();
+  assert(
+    statusOutput.success,
+    `git status --porcelain failed (code ${statusOutput.code}): ${
+      new TextDecoder().decode(statusOutput.stderr)
+    }`,
+  );
+
+  const diffOutput = await new Deno.Command("git", {
+    args: ["diff", "--name-only", "origin/main...HEAD"],
+  }).output();
+  assert(
+    diffOutput.success,
+    `git diff origin/main...HEAD failed (code ${diffOutput.code}): ${
+      new TextDecoder().decode(diffOutput.stderr)
+    }`,
+  );
+
+  const changedFiles = new Set<string>();
+
+  // 1. Files modified/added on branch against origin/main:
+  const diffLines = new TextDecoder().decode(diffOutput.stdout).trim().split("\n").filter(Boolean);
+  for (const file of diffLines) {
+    changedFiles.add(file.trim());
+  }
+
+  // 2. Working tree / index changes including untracked additions (??):
+  const statusLines = new TextDecoder().decode(statusOutput.stdout).trim().split("\n").filter(
+    Boolean,
+  );
+  for (const statusLine of statusLines) {
+    const rawPayload = statusLine.slice(2).trim();
+    const filePath = rawPayload.includes(" -> ") ? rawPayload.split(" -> ")[1]!.trim() : rawPayload;
+    const cleanPath = filePath.replace(/^"(.*)"$/, "$1");
+    if (cleanPath) changedFiles.add(cleanPath);
   }
 
   const contracts = loadContracts();
