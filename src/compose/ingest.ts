@@ -169,10 +169,26 @@ export function sourceCeilingRow(userId: string): string {
  * source the store no longer has; that over-counts, which refuses one subscriber one source they
  * had room for, and never admits a source past the ceiling. See `releaseSourceSlot` for the
  * refund that keeps it exact.
+ *
+ * audio-feed-qqa03: `reservedAt` records the timestamp (epoch ms) each id was admitted. When an
+ * id is absent from the store's `listSources` snapshot AND older than `SOURCE_RESERVATION_STALE_MS`,
+ * it is pruned during admission reconcile — healing the leak from a process crash between admission
+ * and source insert without stealing in-flight inserts younger than the bound.
  */
 export interface SourceCeilingRow {
   ids: string[];
+  reservedAt?: Record<string, number>;
 }
+
+/**
+ * How long a reservation may remain absent from `listSources` before being treated as a leaked slot
+ * from a crashed process and pruned during admission reconciliation (audio-feed-qqa03).
+ *
+ * 2 minutes is 2x-4x longer than any legitimate in-flight HTTP request or store CAS retry loop,
+ * aligning with the 2-minute lease/heartbeat expiry used elsewhere in the codebase
+ * (storage/kv/episodes.ts, routes/account.ts).
+ */
+export const SOURCE_RESERVATION_STALE_MS = 2 * 60 * 1000;
 
 /** One run of the ceiling mutation, pure so the multi-run contract is testable. */
 export interface AppliedSourceCeiling {
@@ -207,20 +223,68 @@ export function applySourceCeiling(
   storedIds: readonly string[],
   sourceId: string,
   limit: number,
+  now = Date.now(),
+  staleMs = SOURCE_RESERVATION_STALE_MS,
 ): AppliedSourceCeiling {
-  const held = new Set(current?.ids ?? []);
-  for (const id of storedIds) held.add(id);
+  const stored = new Set(storedIds);
+  const held = new Set<string>();
+  const nextReservedAt: Record<string, number> = {};
+  const currentReservedAt = current?.reservedAt ?? {};
+
+  for (const id of current?.ids ?? []) {
+    const isStored = stored.has(id);
+    const reservedAt = currentReservedAt[id];
+    // audio-feed-qqa03: prune an id only when it is absent from the fresh listing AND older
+    // than the staleness bound. An in-flight insert is younger than the bound and must not
+    // be pruned. Un-stamped historical holdings are never pruned on a partial snapshot.
+    const isStale = !isStored && typeof reservedAt === "number" && (now - reservedAt) > staleMs;
+    if (!isStale) {
+      held.add(id);
+      if (typeof reservedAt === "number") {
+        nextReservedAt[id] = reservedAt;
+      }
+    }
+  }
+
+  for (const id of storedIds) {
+    held.add(id);
+  }
+
   if (held.has(sourceId)) {
     // The same id IS the same source: a concurrent subscribe racing the same feed, a retry, or a
     // caller re-entering after a partial failure. It already holds a slot, so taking another would
     // charge the subscriber twice for one source.
-    return { next: { ids: [...held] }, admitted: true, held: held.size };
+    if (!nextReservedAt[sourceId] && typeof currentReservedAt[sourceId] === "number") {
+      nextReservedAt[sourceId] = currentReservedAt[sourceId];
+    }
+    return {
+      next: {
+        ids: [...held],
+        ...(Object.keys(nextReservedAt).length > 0 ? { reservedAt: nextReservedAt } : {}),
+      },
+      admitted: true,
+      held: held.size,
+    };
   }
+
   if (held.size >= limit) {
-    return { next: { ids: [...held] }, admitted: false, held: held.size };
+    return {
+      next: {
+        ids: [...held],
+        ...(Object.keys(nextReservedAt).length > 0 ? { reservedAt: nextReservedAt } : {}),
+      },
+      admitted: false,
+      held: held.size,
+    };
   }
+
   held.add(sourceId);
-  return { next: { ids: [...held] }, admitted: true, held: held.size };
+  nextReservedAt[sourceId] = now;
+  return {
+    next: { ids: [...held], reservedAt: nextReservedAt },
+    admitted: true,
+    held: held.size,
+  };
 }
 
 export interface SourceAdmission {
@@ -252,6 +316,8 @@ export async function admitSourceUnderCeiling(
     limit: number;
     /** The caller's snapshot of the ids the store holds; see applySourceCeiling. */
     storedIds: readonly string[];
+    now?: number;
+    staleMs?: number;
   },
 ): Promise<SourceAdmission> {
   // Recomputed by EVERY callback run: the last run is the one the store applied, so a decision
@@ -260,7 +326,14 @@ export async function admitSourceUnderCeiling(
   const write = await ctx.stores.metadata.atomicUpdate<SourceCeilingRow>(
     sourceCeilingRow(input.userId),
     (current) => {
-      last = applySourceCeiling(current, input.storedIds, input.sourceId, input.limit);
+      last = applySourceCeiling(
+        current,
+        input.storedIds,
+        input.sourceId,
+        input.limit,
+        input.now ?? Date.now(),
+        input.staleMs,
+      );
       return last.next;
     },
     // No TTL on purpose: an expiring row would forget held slots and re-open the ceiling.
@@ -305,7 +378,14 @@ export async function releaseSourceSlot(
         // would only look like a refund.
         if (!ids.includes(sourceId)) return null;
         removed = true;
-        return { ids: ids.filter((id) => id !== sourceId) };
+        const reservedAt = current?.reservedAt ? { ...current.reservedAt } : undefined;
+        if (reservedAt) {
+          delete reservedAt[sourceId];
+        }
+        return {
+          ids: ids.filter((id) => id !== sourceId),
+          ...(reservedAt && Object.keys(reservedAt).length > 0 ? { reservedAt } : {}),
+        };
       },
     );
     return write.committed && removed;
