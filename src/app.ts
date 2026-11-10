@@ -125,8 +125,6 @@ export interface AppHandlers {
   adminRegenerateFeed?: Handler<AppContext>;
   /** audio-feed-kxjg — CSP and Browser Reporting API endpoint. */
   cspReports?: Handler<AppContext>;
-  /** Anything a lane needs that is not in the map above. Announce it to coord. */
-  extra?: (router: Router<AppContext>) => void;
 }
 
 /** The admin observability route pattern, named once so the route table and its two consumers agree. */
@@ -411,8 +409,6 @@ export function createRouter(
   // audio-feed-kxjg: CSP and browser reporting endpoint
   router.post("/api/reports/csp", handlers.cspReports ?? handleCspReports);
   router.add("OPTIONS", "/api/reports/csp", handlers.cspReports ?? handleCspReports);
-
-  handlers.extra?.(router);
 
   return router;
 }
