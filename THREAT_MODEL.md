@@ -8,19 +8,21 @@ exhaustive analysis.
 ## Entry-point coverage (index, audio-feed-uclpx)
 
 The route table lives in exactly one file (`src/app.ts`, "Application wiring — the single place
-routes are mounted"), and every entry point is one `router.<method>(...)` registration there. The
-count below is mechanical, re-derivable with:
+routes are mounted"), and every entry point is one `router.<method>(...)` registration there. Routes
+are mounted from that single registration path and nowhere else: `createRouter` registers all 72
+itself, and no callback, hook or extra-registration seam exists through which a caller could mount a
+route this census does not see — the census is the whole population, not a sample of it.
+The count is mechanical, re-derivable with:
 
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts
 
-On the revision that added this section that yields **72 registrations** (35 GET, 32 POST, 3 DELETE,
-1 `add`): 71 literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`,
-`src/app.ts:133`). The `OPTIONS` registration on `/api/reports/csp` (`src/app.ts:413`) shares the POST
-handler, so there are **71 distinct handler endpoints**, of which one (`/__test/throw`,
-`src/app.ts:172`) exists only when an operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
-production attack surface — leaving **70 production entry points**. One seam sits outside the table:
-`handlers.extra?.(router)` at the end of `createRouter`; a route registered through it belongs to a
-boundary below only if its author picks one and records it here.
+Run from the repository root, on the revision this section was last re-derived at (`07d8e60a`,
+2026-11-10), that command yields **72 registrations** (35 GET, 33 POST, 3 DELETE, 1 `add`): 71
+literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`,
+`src/app.ts:131`). The `OPTIONS` registration on `/api/reports/csp` (`src/app.ts:411`) shares the
+POST handler, so there are **71 distinct handler endpoints**, of which one (`/__test/throw`,
+`src/app.ts:170`) exists only when an operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
+production attack surface — leaving **70 production entry points**.
 
 **70 production entry points; all 70 covered by one of the eight boundary sections below**; the three
 pre-existing decision sections (CSP reports, `/health`, offline cache) are cited from inside them.
@@ -43,10 +45,10 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 1 — Public capability URLs: the token in the path is the whole credential
 
 - **Routes:** `GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`
-  (`src/app.ts:270-278`), `GET /listen/:token` + `GET /listen/:token/status` +
-  `POST /listen/:token/episodes/:episodeId/retry` (`src/app.ts:230-236`), `GET /audio/:key+`
-  (`src/app.ts:281`). Podcast clients cannot authenticate, so the path token is the only credential
-  these routes will ever get (`src/app.ts:268-269`).
+  (`src/app.ts:268-276`), `GET /listen/:token` + `GET /listen/:token/status` +
+  `POST /listen/:token/episodes/:episodeId/retry` (`src/app.ts:228-234`), `GET /audio/:key+`
+  (`src/app.ts:279`). Podcast clients cannot authenticate, so the path token is the only credential
+  these routes will ever get (`src/app.ts:266-267`).
 - **Attacker controls:** the path token or key itself — it leaks through browser history, proxy logs
   and pasted links; anyone holding it is, from the server's view, the subscriber.
 - **Mitigations:**
@@ -110,7 +112,7 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 2 — Feed-token APIs (capability-token account surface)
 
 - **Routes:** `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes`
-  (`src/app.ts:284-297`).
+  (`src/app.ts:282-295`).
 - **Attacker controls:** the presented token (`x-feed-token`, `x-user-token`, or `Authorization:
   Bearer`; `src/compose/shared.ts:17-30`) and, on ingest/upload, the URL or document content.
 - **Mitigation:** both ingest and upload resolve through `authorizeIngest`
@@ -169,7 +171,7 @@ routes, listed separately because the attacker's position there is different.
 
 - **Routes:** `POST /api/auth/login/options`, `POST /api/auth/register/options`,
   `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+OPTIONS)
-  (`src/app.ts:289-289`, `:361`, `:378`, `:380`, `:412-413`), plus `GET /share` which only validates
+  (`src/app.ts:287-287`, `:359`, `:376`, `:378`, `:410-411`), plus `GET /share` which only validates
   a shared URL as http/https and redirects signed-in subscribers to the quick-add panel
   (`src/routes/share.ts:11-19`).
 - **Attacker controls:** everything — no credential exists; the only varying input is the client
@@ -194,8 +196,8 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 4 — Session APIs and pages
 
 - **Routes:** `POST /api/auth/logout`, the 9 `/api/account/*` routes, `POST /api/auth/login/verify`,
-  `POST /api/auth/register/verify` (`src/app.ts:378-392`), `GET /account`, `GET /login`, `GET /add`,
-  `GET /listen` bare path (`src/app.ts:183-228`).
+  `POST /api/auth/register/verify` (`src/app.ts:376-390`), `GET /account`, `GET /login`, `GET /add`,
+  `GET /listen` bare path (`src/app.ts:181-226`).
 - **Attacker controls:** a cross-site browser context (CSRF position); a stolen session cookie if
   they have one.
 - **Mitigations:**
@@ -221,7 +223,7 @@ routes, listed separately because the attacker's position there is different.
     a GET. That compatibility cost was bought for no security gain, so the fail-closed change
     (branch `fleet/csrf-absent`) was REJECTED as over-broad.
   - **The one read route with server-side work left the wall instead.** `POST
-    /api/account/discover-feed` (`src/app.ts:387`) fetched a third-party page on the signed-in
+    /api/account/discover-feed` (`src/app.ts:385`) fetched a third-party page on the signed-in
     subscriber's behalf; it is now POST behind `sameOrigin` (`src/routes/account_api.ts:104-107`,
     handler at `:483`) with a per-subscriber rate limit and per-hop SSRF re-validation (23782a1e,
     audio-feed-oq4pz). **Rule for future authors: a cookie-authenticated route that does server-side
@@ -231,7 +233,7 @@ routes, listed separately because the attacker's position there is different.
     reddens when a new `sameSiteRead`-gated route appears unclassified.
   - The `/listen` bare path redirects an approved session to its capability URL with
     `cache-control: no-store` and `referrer-policy: no-referrer`, so the token is never written to
-    localStorage (`src/app.ts:202-228`).
+    localStorage (`src/app.ts:200-226`).
 - **Residual (documented, accepted):** a stolen session cookie is a bearer credential until logout
   or `rotate-token`; nothing in code detects a replayed cookie from a second device.
 - **Residual (documented, accepted):** the read wall's absent-both admission is a standing
@@ -241,10 +243,10 @@ routes, listed separately because the attacker's position there is different.
 
 ### Boundary 5 — Admin surface (console, admin API, break-glass, observability API)
 
-- **Routes:** the 6 `/admin*` pages (`src/app.ts:152-162`), the 19 `/api/admin/*` routes
-  (`src/app.ts:308-370`, `:394-406`), `POST /api/auth/bootstrap` (break-glass,
-  `src/app.ts:382`), and the observability API `GET /api/observability/errors` +
-  `GET /api/observability/summary` (`src/app.ts:300-307`).
+- **Routes:** the 6 `/admin*` pages (`src/app.ts:150-160`), the 19 `/api/admin/*` routes
+  (`src/app.ts:306-368`, `:392-404`), `POST /api/auth/bootstrap` (break-glass,
+  `src/app.ts:380`), and the observability API `GET /api/observability/errors` +
+  `GET /api/observability/summary` (`src/app.ts:298-305`).
 - **Attacker controls:** the whole unauthenticated internet; plus a subscriber session attempting to
   reach admin data.
 - **Mitigations:**
@@ -253,7 +255,7 @@ routes, listed separately because the attacker's position there is different.
     `isActiveAdmin` + strict same-origin on writes / `sameSiteRead` on reads; the break-glass path is
     `x-admin-token`/Bearer checked by `requireAdminToken` (`src/auth/users.ts:65-69`); and an
     unconfigured `ADMIN_TOKEN` fails CLOSED (`src/compose/admin.ts:97-100`). The admin pages render
-    no subscriber data in the shell; data comes only from the gated API routes (`src/app.ts:150-153`).
+    no subscriber data in the shell; data comes only from the gated API routes (`src/app.ts:148-151`).
   - Failed attempts on the header path AND bootstrap share ONE sliding-window lockout limiter
     (audio-feed-bns, store-shared so the bound holds across isolates; `src/compose/admin.ts:60-62`,
     `:118-140`; bootstrap at `src/routes/account_api.ts:354-357`). The lockout gates attempts before
@@ -367,11 +369,11 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 7 — Static, well-known and public pages
 
 - **Routes:** `/`, `/sw.js`, `/manifest.json`, `/robots.txt`, `/icon.svg`, `/assets/:name`,
-  `/.well-known/webauthn`, `/health`, `/assets/voices/:voice` (`src/app.ts:148`, `:229-251`).
+  `/.well-known/webauthn`, `/health`, `/assets/voices/:voice` (`src/app.ts:146`, `:227-249`).
 - **Attacker controls:** nothing credential-bearing; some query parameters and the Asset name.
 - **Mitigations:** HTML responses carry a per-response CSP nonce and the shared security-header set
   (`src/router.ts` `applySecurityHeaders`; `src/routes/csp.ts` `htmlResponse`/`newCspNonce`); assets
-  are content-addressed (audio-feed-3xq, `src/app.ts:229`); voice samples are NOT public — the
+  are content-addressed (audio-feed-3xq, `src/app.ts:227`); voice samples are NOT public — the
   handler runs session → voice allowlist → cache/generate, and nothing before the allowlist check
   reads a blob or pays for generation (`src/routes/voice-samples.ts:14`, `:73`); the service worker
   excludes token-bearing paths from every cache (audio-feed-s3f0, offline-cache section below);
@@ -576,9 +578,47 @@ its concrete code anchor, and the exact command to verify the claim.
 | 3 | Service Worker shell cache prefix refuse list (`SENSITIVE_PREFIXES`) | `SENSITIVE_PREFIXES` is a static constant in worker source code acting as an admission refuse guard in `/sw.js` to exclude capability and authenticated routes from `audio-feed-shell-v2`; it is not mutable database state or user-controlled configuration. | `src/routes/pwa.ts:46`, `src/routes/pwa.ts:137`, `src/routes/pwa.ts:392` | `grep -n -C 1 'SENSITIVE_PREFIXES' src/routes/pwa.ts` (confirms definition array, `/sw.js` template injection, and cache admission check) |
 | 4 | Keyword and pattern hits on documentation, comments, and audit records | Text occurrences of security terminology (e.g. CSRF, SSRF, XSS, tokens, exploits) in markdown files (`docs/`, `THREAT_MODEL.md`, `README.md`) and code comments are architectural documentation, threat model definitions, and audit explanations, not executable runtime code or exposed endpoints. | `docs/**`, `*.md`, `src/routes/pwa.ts:30-36` | `git ls-files 'docs/**' '*.md' | grep -vE '\.(ts|js)$'` (confirms documentation files are non-executable text) and `sed -n '30,36p' src/routes/pwa.ts` (confirms cited code hit is inside JSDoc block comment) |
 | 5 | Static literal regular expression execution on length-bounded inputs (`RegExp.prototype.exec`, `RegExp.prototype.test`, `String.prototype.match`, `matchAll`) | Regular expressions across routing, key parsing, HTTP headers, rate limiting, and synthesis chunking execute static literal patterns without nested quantifiers over short, length-bounded inputs (URL paths, HTTP headers, XML tags from S3, IP addresses, bounded text chunks, model output). The regex execution class is NOT safe by construction: complex multi-line patterns like markdown code block extraction in `src/tts/gemini.ts` exhibited quadratic complexity under measurement and were replaced with a bounded hand-written scanner (`tests/c0gj_linear_complexity_test.ts`). | Whole runtime (`src/`, `main.ts`) | `grep -rnE '\.(exec|match|matchAll)\(' src/ main.ts` (36 matches at `34ae917d`, verified 2026-11-10; 25 static literal regex executions across 14 files, 9 Cache/Client/Storage calls, 2 URLPattern exec calls; 11 regex execution sites sit outside original 7 sampled anchors, 0 unanchored quadratic patterns) |
-| 6 | Client-side browser `fetch()` invocations in frontend scripts | Browser-side `fetch()` calls in frontend assets target same-origin API routes (`/api/request-access`, `/api/cwv`, `/listen/:token/status`) or download capability audio files from the same origin; they do not perform arbitrary cross-origin requests or expose credentialed data to untrusted origins. | `src/assets/admin.js:210`, `src/assets/home.js:113`, `src/assets/listen.js:1283`, `src/assets/cwv.js:99` | `grep -rn 'fetch(' src/assets/` (verifies all asset fetch calls target relative same-origin paths, `ORIGIN + ...`, or `episode.audioUrl`) |
+| 6 | Client-side browser `fetch()` invocations in frontend scripts — the modules under `src/assets/` and the inline scripts embedded in route modules | Every browser-side `fetch()` call in the frontend enumerates to one of: a same-origin `/api/...` path literal, a `/api/...` literal prefix concatenated with `encodeURIComponent()` segments, `ORIGIN + ...` (the origin the page was rendered with), or a capability audio URL this server minted (`episode.audioUrl`). Three wrappers forward a CALLER-supplied path into `fetch()` — `api(path, options)` (`src/assets/admin.js:209`), `send(method, path, body)` (`src/routes/account.ts:542`) and `post(path, body)` (`src/routes/shell.ts:850`) — so the guarantee is a property of their call sites, not of the wrapper signatures; the row 6 note below states the constraint those call sites satisfy today. | `src/assets/admin.js:210`, `src/assets/home.js:113`, `src/assets/cwv.js:99`, `src/assets/listen.js:1245`, `src/assets/listen.js:1283`, `src/assets/listen.js:1838`, `src/routes/account.ts:543`, `src/routes/account.ts:653`, `src/routes/shell.ts:851` | `grep -rn 'fetch(' src/assets/ src/routes/ --exclude=pwa.ts` (15 hits at `07d8e60a`, verified 2026-11-10: 9 `fetch()` call sites — 6 in `src/assets/`, 3 inline in `src/routes/account.ts` and `src/routes/shell.ts` — plus 6 comment lines; the 4 `fetch(request)` service-worker passthroughs in `src/routes/pwa.ts` are row 7) |
 | 7 | Service Worker fetch event listener request passthroughs | The service worker's `fetch` handler uses `fetch(request)` as a standard passthrough for un-cached network requests, navigation requests, and network-first strategies; it does not redirect requests to third-party hosts or bypass security headers. | `src/routes/pwa.ts:319`, `src/routes/pwa.ts:345`, `src/routes/pwa.ts:388`, `src/routes/pwa.ts:427` | `grep -n 'fetch(request)' src/routes/pwa.ts` (verifies all 4 fetch handlers pass through un-cached requests to origin) |
 | 8 | Outbound S3/R2 client storage requests with path-shaped object keys | Storage operations target operator-configured endpoints (`#config.endpoint`) and enforce `assertSafeBlobKey(key)` prior to URL construction and SigV4 signing, preventing path traversal, dot segments (`..`), empty segments, or prefix escapes. | `src/storage/s3.ts:66`, `src/storage/s3.ts:70`, `src/storage/blob_key.ts:38` | `grep -n -C 2 'assertSafeBlobKey' src/storage/s3.ts src/storage/blob_key.ts` (confirms validation is executed in `#encodeKey` before `#objectUrl` builds request) |
 | 9 | Offline evidence capture scripts and artifacts under `docs/evidence/**` | Artifacts under `docs/evidence/` are offline proof outputs (run records, PNG screenshots) committed for build and verification evidence; they are never mounted as static routes or served by the application HTTP server. | Offline directory `docs/evidence/**` | `grep -rn 'docs/evidence' src/ main.ts` (0 matches at `6ca30737`, verified 2026-11-09; confirms path is never referenced in server routing or static serving) |
 | 10 | Dynamic regular expression construction (`new RegExp`) | Dynamic RegExp pattern construction is strictly limited to compile-time boundary constants escaped via `escapeRegExp()` (`src/routes/shell.ts:572-573` for `CONFIRM_SHARED_BEGIN`/`CONFIRM_SHARED_END`) and an internal hardcoded identifier array (`src/worker/script.ts:153` for `FENCE_NAMES`). Arbitrary user input is never interpolated into regular expressions. Dynamic regex construction is not trusted by class; new sites require explicit audit and register entry. | `src/routes/shell.ts:572-573`, `src/worker/script.ts:153` | `grep -rnE 'new RegExp\(' src/ main.ts` (3 matches at `34ae917d`, verified 2026-11-10; 2 in `src/routes/shell.ts`, 1 in `src/worker/script.ts`, 0 unescaped user-input patterns; enforced by `tests/dynamic_regexp_population_test.ts`) |
 
+
+### Register row 6 in detail — the path-forwarding helpers in inline scripts (audio-feed-fxeug)
+
+Three browser-side helpers take a path instead of a fixed route and hand it straight to `fetch()`:
+
+- `api(path, options = {})` — `src/assets/admin.js:209`, `fetch(path, ...)` at `:210`; 16 call sites in
+  that file.
+- `send(method, path, body)` — `src/routes/account.ts:542`, `fetch(path, ...)` at `:543`; 13 call sites
+  in that file.
+- `post(path, body)` — `src/routes/shell.ts:850`, `fetch(path, ...)` at `:851`; **no call sites**. It is
+  defined and never called (`grep -n 'post(' src/routes/shell.ts` returns only the definition).
+
+Because the helpers accept any string, the guarantee row 6 records is a constraint on the CALL SITES:
+**a path argument must be a same-origin string that begins with a single `/` — `//host/...` or a
+scheme is a protocol-relative or absolute URL to another host and must never appear — and no part of
+it may come from an attacker- or operator-supplied host.** What the row's enumeration actually shows
+at `07d8e60a` (verified 2026-11-10):
+
+- 29 wrapper call sites: 16 `api(`, 13 `send(`, 0 `post(`.
+- **No caller passes a non-literal arbitrary path**, but "all callers pass same-origin literals" is
+  imprecise and is corrected here: 14 pass a pure string literal and 15 build the path by
+  concatenating a literal `/api/...` prefix with `encodeURIComponent(...)` segments
+  (e.g. `"/api/account/sources/" + encodeURIComponent(id)`).
+- The one caller-supplied component is `action` in `act(userId, action, button)`
+  (`src/assets/admin.js:297`), appended to `/api/admin/users/<id>/`; both call sites pass a literal
+  (`"approve"` at `:398`, `"suspend"` at `:407`).
+- The direct, non-wrapper calls are `fetch("/api/request-access")`, `fetch("/api/cwv")`,
+  `fetch("/api/upload")`, two `ORIGIN + "/listen/..."` calls (`ORIGIN` is the origin the page was
+  rendered with), and `fetch(episode.audioUrl)` (a capability URL this server minted).
+
+Residual, stated rather than softened: nothing enforces that constraint today. No test inspects
+these call sites, so a future caller passing a server- or user-influenced absolute URL would issue
+that request from the page — `fetch()` defaults to `credentials: "same-origin"`, so cookies would not
+ride along, but the request, including whatever the caller put in its path or body, would reach that
+origin, and this register would still be citing an enumeration that cannot see the defect. Closing it
+needs enforcement in `src/` — a typed union of literal route strings on the three helpers, or a test
+asserting every `api(`/`send(`/`post(` path argument starts with a single `/` — not another edit to
+this file.
