@@ -39,8 +39,33 @@
  * Mutant: adding a registration to `src/app.ts` reddens "the route census total matches src/app.ts"
  * and "the route census per-method split matches src/app.ts" by name; the synthetic form of the
  * same mutant is the last row, so the property is pinned even when nobody is watching.
+ *
+ * WHY THE SOURCE PATH IS A CONSTANT AND NOT AN INLINE LITERAL — the bed this suite has to be AWAKE in.
+ * A passing suite that the gate does not run is a comment with a test runner attached, and this suite
+ * spent its first revision that way. The fast tier selects suites from a DERIVED read relation
+ * (`scripts/test-selection.ts`, consulted by `planTests`), and that relation admits a `.ts` path only
+ * when the path is RESOLVER-PROVEN: it arrived through a module-scope constant the resolver can
+ * resolve (the `add(..., isProvenRead)` branch, audio-feed-tziw). A literal read of the path is an
+ * AUTHORED hint instead — `Deno.readTextFile("src/app.ts")` earns this suite a relation for
+ * `THREAT_MODEL.md` (data) and NONE for the source file, because a `.ts` read is presumed to be the
+ * import graph's job, and a text read never appears in that graph. MEASURED before `APP_SOURCE` existed: a `THREAT_MODEL.md` change
+ * SELECTED this suite, and a `src/app.ts` change selected the graph's suites WITHOUT it (79 suites in
+ * the bare planner, 107 with the real reverse graph) while every row below still passed. That is
+ * backwards from the risk: the route registration these rows exist to catch is added in `src/app.ts`,
+ * so the test was dormant in precisely the change it guards. So the path is DECLARED where the
+ * resolver can see it: keep `APP_SOURCE` a module-scope `const` and keep the reads going through it.
+ * Inlining the literal back into a call silently drops the relation and re-dormants this suite — the
+ * rows cannot see that happen, which is why it is written down here.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+
+/**
+ * The file the census counts, held in a module-scope constant ON PURPOSE — this constant IS the
+ * declared read relation that puts this suite in the fast tier when `src/app.ts` changes (see the
+ * file header). `Deno.readTextFile(APP_SOURCE)` is resolver-proven; a literal argument is not, and a
+ * literal argument selects this suite for no change to the file the census is about.
+ */
+const APP_SOURCE = "src/app.ts";
 
 /**
  * The command `THREAT_MODEL.md` publishes beside the census figure ("Entry-point coverage").
@@ -150,7 +175,7 @@ function censusMismatchMessage(doc: string, registrations: RouteRegistration[]):
 }
 
 Deno.test("audio-feed-q2cf5: the route census total matches src/app.ts", async () => {
-  const source = await Deno.readTextFile("src/app.ts");
+  const source = await Deno.readTextFile(APP_SOURCE);
   const doc = await Deno.readTextFile("THREAT_MODEL.md");
   const registrations = enumerateRouteRegistrations(source);
   assertEquals(
@@ -161,7 +186,7 @@ Deno.test("audio-feed-q2cf5: the route census total matches src/app.ts", async (
 });
 
 Deno.test("audio-feed-q2cf5: the route census per-method split matches src/app.ts", async () => {
-  const source = await Deno.readTextFile("src/app.ts");
+  const source = await Deno.readTextFile(APP_SOURCE);
   const doc = await Deno.readTextFile("THREAT_MODEL.md");
   const registrations = enumerateRouteRegistrations(source);
   const counts = countByMethod(registrations);
@@ -205,7 +230,7 @@ Deno.test("audio-feed-q2cf5: THREAT_MODEL.md publishes the pinned census and the
 });
 
 Deno.test("audio-feed-q2cf5: mutant adding a registration moves the enumerated count off the pin", async () => {
-  const source = await Deno.readTextFile("src/app.ts");
+  const source = await Deno.readTextFile(APP_SOURCE);
   const mutant = `${source}\nrouter.get("/mutant-census-route", () => new Response("mutant"));\n`;
   const mutantRegistrations = enumerateRouteRegistrations(mutant);
   // The comparison in the rows above is what has to red. Proven here rather than asserted: the same
