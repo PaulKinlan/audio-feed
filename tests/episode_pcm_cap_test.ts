@@ -1,8 +1,15 @@
-import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import {
   GeminiTtsClient,
+  invocationPcmBudget,
   MAX_NEW_PCM_BYTES_PER_INVOCATION,
   MAX_NEW_PCM_SECONDS_PER_INVOCATION,
   MAX_PUBLICATION_PCM_BYTES,
@@ -215,4 +222,128 @@ Deno.test("audio-feed-zxv2k: resumed WAV PCM must be complete before the next pa
   assert(error instanceof Error);
   assertStringIncludes(error.message, "incomplete PCM data");
   assertEquals(paid.length, 0, "invalid cached audio never reaches a paid or published turn");
+});
+
+Deno.test("audio-feed-votua: continuation run that would cross publication ceiling rejects before committing over-cap turn", async () => {
+  const makeAudio = (len: number): DecodedAudioResult => {
+    const rawBytes = new Uint8Array(len);
+    return {
+      rawBytes,
+      format: "pcm",
+      mimeType: "audio/pcm",
+      sampleRate: WAV_SAMPLE_RATE,
+      channels: WAV_CHANNELS,
+      bitsPerSample: WAV_BITS_PER_SAMPLE,
+      durationSeconds: len / (WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_BITS_PER_SAMPLE / 8),
+      truncated: false,
+      toWav: () => pcmToWav(rawBytes),
+    };
+  };
+
+  // 1. Unit test of invocationPcmBudget with small bounds:
+  // maxInvocation = 100, maxPublication = 250
+  const budget = invocationPcmBudget(100, 250);
+  budget.stored(makeAudio(90));
+  assertEquals(budget.getStoredBytes(), 90);
+  budget.stored(makeAudio(90));
+  assertEquals(budget.getStoredBytes(), 180);
+
+  // New turn pushes total to 180 + 80 = 260 > 250: throws terminal GeminiTtsError
+  const err = assertThrows(
+    () => budget.produced(makeAudio(80), 2, 3),
+    Error,
+    "Episode exceeds the RIFF WAV publication limit",
+  );
+  assert(
+    !(err instanceof SynthesisYieldError),
+    "exceeding publication limit is a terminal failure, not a retryable yield",
+  );
+  assertEquals(budget.getNewlyProduced(), 0, "rejected turn was not counted in newly produced");
+
+  // Replay of stored segments alone crossing publication ceiling rejects
+  const budget2 = invocationPcmBudget(100, 250);
+  budget2.stored(makeAudio(90));
+  budget2.stored(makeAudio(90));
+  assertThrows(
+    () => budget2.stored(makeAudio(80)),
+    Error,
+    "Episode exceeds the RIFF WAV publication limit",
+  );
+
+  // 2. Integration test through synthesizeNarration:
+  // Stored turn is 90 bytes. Next turn is 80 bytes. Budget ceiling is 150.
+  // Must reject and NEVER call commit for the over-ceiling turn.
+  const paid: number[] = [];
+  const client = new GeminiTtsClient({ apiKey: "fixture" });
+  client.sendRequest = () => {
+    paid.push(paid.length);
+    return Promise.resolve(makeAudio(80));
+  };
+  let committed = 0;
+  let prepared = 0;
+  const storedWav = pcmToWav(new Uint8Array(90));
+  const narrationErr = await assertRejects(
+    () =>
+      client.synthesizeNarration(article, {
+        pcmBudget: invocationPcmBudget(100, 150),
+        resume: {
+          prepare: () => {
+            prepared++;
+            return Promise.resolve(prepared === 1 ? { wav: storedWav } : "synthesize");
+          },
+          commit: () => {
+            committed++;
+            return Promise.resolve();
+          },
+        },
+      }),
+    Error,
+    "Episode exceeds the RIFF WAV publication limit",
+  );
+  assert(narrationErr instanceof Error);
+  assertEquals(committed, 0, "no turn crossing the publication ceiling may be committed");
+});
+
+Deno.test("audio-feed-votua: publication duration is unbounded above 60-min invocation limit; normal multi-tick continuation succeeds", async () => {
+  // A continuation run whose total audio exceeds 60 minutes across ticks (e.g. 90 bytes + 80 bytes = 170 bytes)
+  // succeeds when publication limit (e.g. 250 bytes) is respected.
+  const makeAudio = (len: number): DecodedAudioResult => {
+    const rawBytes = new Uint8Array(len);
+    return {
+      rawBytes,
+      format: "pcm",
+      mimeType: "audio/pcm",
+      sampleRate: WAV_SAMPLE_RATE,
+      channels: WAV_CHANNELS,
+      bitsPerSample: WAV_BITS_PER_SAMPLE,
+      durationSeconds: len / (WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_BITS_PER_SAMPLE / 8),
+      truncated: false,
+      toWav: () => pcmToWav(rawBytes),
+    };
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "fixture" });
+  client.sendRequest = () => Promise.resolve(makeAudio(80));
+  let committed = 0;
+  let prepared = 0;
+  const storedWav = pcmToWav(new Uint8Array(90));
+  const result = await client.synthesizeNarration(article, {
+    pcmBudget: invocationPcmBudget(100, 250),
+    resume: {
+      prepare: () => {
+        prepared++;
+        return Promise.resolve(prepared === 1 ? { wav: storedWav } : "synthesize");
+      },
+      commit: () => {
+        committed++;
+        return Promise.resolve();
+      },
+    },
+  });
+  assertEquals(committed, 1, "under-ceiling continuation turn commits normally");
+  assertEquals(
+    result.rawBytes.byteLength,
+    170,
+    "stitched audio combines stored and newly produced turns",
+  );
 });

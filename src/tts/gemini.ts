@@ -106,11 +106,41 @@ export const MAX_TTS_OUTPUT_TOKENS = 16_384;
  * (MAX_NARRATION_BYTES, src/ingest/upload.ts).
  */
 export const MAX_TTS_SEGMENTS = 64;
-/** audio-feed-zxv2k: This bounds only NEW decoded PCM produced in one synthesis invocation.
- * Stored segments were paid for on earlier ticks and are validated on replay, not charged again.
- * Overage yields after durable segment commits; the final continuous episode may exceed 60 minutes.
- * Paul's per-episode wording conflicts with his no-truncation, one-episode continuation request;
- * the residual published duration needs confirmation. */
+/** audio-feed-zxv2k, audio-feed-votua:
+ * DISPOSITION: The 60-minute limit applies per invocation, NOT per published episode.
+ *
+ * WHY: Paul's ruling required overage to continue across scheduled turns into a single unified
+ * episode rather than refusing or creating disjoint separate files. Legitimate long documents
+ * up to MAX_NARRATION_BYTES (192,000 bytes = 64 segments x 3,000 bytes) narrate to ~3.5 to 4.4 hours
+ * at 145 words/min. Enforcing a 60-minute ceiling per episode would refuse or truncate legitimate
+ * long-form content, contradicting the 64-segment capacity landed in audio-feed-cco6g.
+ *
+ * CEILINGS AND ARITHMETIC:
+ * 1. Per-invocation PCM cap: 60 minutes (3,600s * 24,000 * 1 * 2 = 172,800,000 bytes = 172.8 MB).
+ *    Newly produced audio exceeding 60 minutes in a single invocation yields cleanly after durable
+ *    commits; uncommitted overage is replayed next tick.
+ * 2. Input/plan ceiling:
+ *    - Narration: MAX_NARRATION_BYTES = 192,000 text bytes (src/ingest/upload.ts:16), MAX_TTS_SEGMENTS = 64.
+ *      At 145 words/min (~5 chars/word = 725 chars/min), 192,000 bytes narrates to ~264.8 minutes (~4.41 hours).
+ *    - Dialogue: DEFAULT_MAX_BODY_CHARS = 12,000 chars (src/worker/script.ts:49), max 32 turns (default 14),
+ *      narrating to ~16.5 minutes.
+ * 3. Max claims: DEFAULT_MAX_CLAIMS = 3 (src/worker/synthesis.ts:289). Durable progress (committing >= 1
+ *    finalized segment) resets attempts to 0 on clean yield (src/storage/kv/episodes.ts:615-620), so claims
+ *    bound zero-progress livelocks but do NOT limit progressful multi-tick continuation.
+ * 4. Publication container ceiling (MAX_PUBLICATION_PCM_BYTES):
+ *    RIFF WAV 32-bit chunk size field bounds the final stitched audio file:
+ *    Math.floor((0xffff_ffff - 36) / 2) * 2 = 4,294,967,258 bytes (~4.29 GB).
+ *    At 24,000 Hz 16-bit mono PCM (48,000 bytes/sec):
+ *    4,294,967,258 / 48,000 = 89,478.48 seconds = 1,491.31 minutes (~24.855 hours).
+ *    The continuation path tracks total accumulated PCM (stored + newly produced) against this ceiling;
+ *    any continuation run crossing it refuses with GeminiTtsError 400 before committing.
+ *
+ * USER EXPERIENCE & COSTS:
+ * - Playback: Modern podcast players (Apple Podcasts, Overcast, Pocket Casts) handle multi-hour episodes
+ *   (up to ~4-5 hours) seamlessly with standard range requests, seeking, and variable-speed playback.
+ * - Storage: 48 KB/s in Cloudflare R2 (~172.8 MB/hr). A 4.4-hour episode is ~760 MB (~$0.011/month at
+ *   $0.015/GB-month with zero egress fees). Intermediate segment blobs are swept upon completion.
+ */
 export const MAX_NEW_PCM_SECONDS_PER_INVOCATION = 60 * 60;
 /** The defaults used by writeWavHeader; cap arithmetic must track the actual output format. */
 export const WAV_SAMPLE_RATE = 24_000;
@@ -362,6 +392,8 @@ export interface SynthesisOptions {
       signal?: AbortSignal,
     ) => Promise<void>;
   };
+  /** audio-feed-votua: injected budget for testability without allocating gigabytes of PCM. */
+  pcmBudget?: ReturnType<typeof invocationPcmBudget>;
   /**
    * Which failures may be retried. "transient" (default) covers only statuses that mean the API
    * definitively did not process the request (429, 503). "all" also retries other 5xx and network
@@ -1729,21 +1761,35 @@ function canonicalDurationBytes(audio: DecodedAudioResult): number {
   return actualBytes * (WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_BITS_PER_SAMPLE) / rate;
 }
 
-function invocationPcmBudget() {
+export function invocationPcmBudget(
+  maxInvocationBytes = MAX_NEW_PCM_BYTES_PER_INVOCATION,
+  maxPublicationBytes = MAX_PUBLICATION_PCM_BYTES,
+) {
+  let storedBytes = 0;
   let newlyProduced = 0;
   return {
+    getStoredBytes: () => storedBytes,
+    getNewlyProduced: () => newlyProduced,
     stored(audio: DecodedAudioResult) {
-      if (canonicalDurationBytes(audio) > MAX_NEW_PCM_BYTES_PER_INVOCATION) {
+      const bytes = canonicalDurationBytes(audio);
+      if (bytes > maxInvocationBytes) {
         throw new GeminiTtsError("Stored TTS segment exceeds the invocation PCM limit", 400);
+      }
+      storedBytes += bytes;
+      if (storedBytes > maxPublicationBytes) {
+        throw new GeminiTtsError("Episode exceeds the RIFF WAV publication limit", 400);
       }
       return audio;
     },
     produced(audio: DecodedAudioResult, completed: number, total: number) {
       const bytes = canonicalDurationBytes(audio);
-      if (bytes > MAX_NEW_PCM_BYTES_PER_INVOCATION) {
+      if (bytes > maxInvocationBytes) {
         throw new GeminiTtsError("One TTS segment exceeds the invocation PCM limit", 400);
       }
-      if (newlyProduced + bytes > MAX_NEW_PCM_BYTES_PER_INVOCATION) {
+      if (storedBytes + newlyProduced + bytes > maxPublicationBytes) {
+        throw new GeminiTtsError("Episode exceeds the RIFF WAV publication limit", 400);
+      }
+      if (newlyProduced + bytes > maxInvocationBytes) {
         // No incomplete segment is committed. Previously committed turns are replayed next tick.
         throw new SynthesisYieldError(
           completed,
@@ -2039,7 +2085,7 @@ export class GeminiTtsClient {
       );
     }
     assertTextSeams(prompt, segments);
-    const pcmBudget = invocationPcmBudget();
+    const pcmBudget = options.pcmBudget ?? invocationPcmBudget();
     try {
       return await runManagedTurns<string, DecodedAudioResult>({
         segments,
@@ -2141,7 +2187,7 @@ export class GeminiTtsClient {
     const sourceText = turns.map((turn) => turn.text).join("");
     const batchText = () => batches.flatMap((part) => part.map((turn) => turn.text));
     assertTextSeams(sourceText, batchText());
-    const pcmBudget = invocationPcmBudget();
+    const pcmBudget = options.pcmBudget ?? invocationPcmBudget();
     try {
       return await runManagedTurns<DialogueTurn[], DecodedAudioResult>({
         segments: batches,
