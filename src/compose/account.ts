@@ -10,7 +10,7 @@ import { isOutdated } from "../tts/prompt_version.ts";
 import type { MetadataStore } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { forbidden, notFound } from "./shared.ts";
-import { countEpisodeScan, episodeScan } from "./ingest.ts";
+import { countEpisodeScan, episodeScan, releaseSourceSlot } from "./ingest.ts";
 import type { AppContext } from "../app.ts";
 import { type AudioMode } from "../types.ts";
 
@@ -279,6 +279,10 @@ export async function deleteUserSource(
     }
 
     await ctx.stores.metadata.deleteSource(userId, sourceId);
+    // audio-feed-maxxw: the ceiling counts sources the subscriber HOLDS, so the slot goes back
+    // with the source. Without this a subscriber at the ceiling could never replace a source
+    // they removed — the row would keep counting the id that no longer exists.
+    await releaseSourceSlot(ctx, userId, sourceId);
     return Response.json(
       cascade
         ? {

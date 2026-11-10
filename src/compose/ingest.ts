@@ -152,6 +152,174 @@ export function sourceCeilingFor(
 }
 
 /**
+ * The row one subscriber's source ceiling is adjudicated on.
+ *
+ * Per subscriber, not global: the ceiling is a per-account bound.
+ */
+export function sourceCeilingRow(userId: string): string {
+  return `source_ceiling:${userId}`;
+}
+
+/**
+ * The ids a subscriber holds a source slot for.
+ *
+ * A SET OF IDS, not a number (audio-feed-maxxw). The ceiling counts sources a subscriber HOLDS,
+ * and holding is reversible — deleting a source must free its slot, which a monotone counter
+ * cannot express without also making the ceiling lifetime. The row is also allowed to name a
+ * source the store no longer has; that over-counts, which refuses one subscriber one source they
+ * had room for, and never admits a source past the ceiling. See `releaseSourceSlot` for the
+ * refund that keeps it exact.
+ */
+export interface SourceCeilingRow {
+  ids: string[];
+}
+
+/** One run of the ceiling mutation, pure so the multi-run contract is testable. */
+export interface AppliedSourceCeiling {
+  next: SourceCeilingRow;
+  /** The source may be stored: the row moved and left the account within the ceiling. */
+  admitted: boolean;
+  /** How many sources the ceiling counted at this decision (`row ∪ stored`). */
+  held: number;
+}
+
+/**
+ * Decide one source admission inside the ceiling as ONE atomic row update.
+ *
+ * The shape is the one this codebase already uses for a ceiling: admission is decided INSIDE the
+ * mutation and the store's CAS loop re-runs it until it commits, the way `applyRetryCeiling`
+ * (src/routes/listen.ts) decides a retry ceiling and `SlidingWindowRateLimiter.check`
+ * (src/auth/rate_limit.ts) decides a window — never read-outside, decide, then write.
+ *
+ * WHY IT IS NOT A COUNTER: `storedIds` is the caller's snapshot of what the store holds, and a
+ * snapshot read outside the CAS cannot be trusted for a count. Unioning it into the row makes the
+ * row the authority and the snapshot only a way to learn ids the row has not seen (sources created
+ * before the row existed, or by an operator path that is exempt from the ceiling). The union only
+ * grows, so a stale snapshot can never lower the count: the failure direction is a refusal, never
+ * an over-cap insert.
+ *
+ * A refusal writes the row back UNCHANGED rather than returning `null`, because both stores report
+ * `null` as `committed: false` — the same value a lost CAS race produces — and a deterministic
+ * refusal must stay distinguishable from a write that could not commit (audio-feed-dqjf2).
+ */
+export function applySourceCeiling(
+  current: SourceCeilingRow | null,
+  storedIds: readonly string[],
+  sourceId: string,
+  limit: number,
+): AppliedSourceCeiling {
+  const held = new Set(current?.ids ?? []);
+  for (const id of storedIds) held.add(id);
+  if (held.has(sourceId)) {
+    // The same id IS the same source: a concurrent subscribe racing the same feed, a retry, or a
+    // caller re-entering after a partial failure. It already holds a slot, so taking another would
+    // charge the subscriber twice for one source.
+    return { next: { ids: [...held] }, admitted: true, held: held.size };
+  }
+  if (held.size >= limit) {
+    return { next: { ids: [...held] }, admitted: false, held: held.size };
+  }
+  held.add(sourceId);
+  return { next: { ids: [...held] }, admitted: true, held: held.size };
+}
+
+export interface SourceAdmission {
+  admitted: boolean;
+  /** Sources counted at the decision — the `actual` an over-cap refusal reports. */
+  held: number;
+  /** True only when the store confirmed the admission write. */
+  committed: boolean;
+}
+
+/**
+ * Take a source slot under the per-subscriber ceiling, or report the refusal (audio-feed-maxxw).
+ *
+ * The ceiling used to be check-then-insert: `listSources` -> count check -> `loadFeedItems` (a
+ * network fetch) -> `putSource`. Two concurrent subscribes at 49/50 both passed the check and both
+ * landed, leaving 51 sources under a documented ceiling of 50. Deciding the admission through this
+ * row means the loser's mutation sees the winner's committed slot, so the refusal is decided by the
+ * count the account will actually have.
+ *
+ * FAILS CLOSED (audio-feed-2zvc review): a mutation that could not commit was never counted, so an
+ * admission is never reported for it. The store already retries a lost race 32 times with jittered
+ * backoff; a caller that still gets `committed: false` is refused rather than allowed uncounted.
+ */
+export async function admitSourceUnderCeiling(
+  ctx: AppContext,
+  input: {
+    userId: string;
+    sourceId: string;
+    limit: number;
+    /** The caller's snapshot of the ids the store holds; see applySourceCeiling. */
+    storedIds: readonly string[];
+  },
+): Promise<SourceAdmission> {
+  // Recomputed by EVERY callback run: the last run is the one the store applied, so a decision
+  // captured inside a lost attempt must never classify the caller (audio-feed-dqjf2).
+  let last: AppliedSourceCeiling | null = null;
+  const write = await ctx.stores.metadata.atomicUpdate<SourceCeilingRow>(
+    sourceCeilingRow(input.userId),
+    (current) => {
+      last = applySourceCeiling(current, input.storedIds, input.sourceId, input.limit);
+      return last.next;
+    },
+    // No TTL on purpose: an expiring row would forget held slots and re-open the ceiling.
+  );
+  const applied = last!; // the store always runs the callback at least once
+  if (!write.committed) {
+    console.warn(
+      `[audio-feed] source ceiling: admission for user "${input.userId}" failed CLOSED on a lost CAS race (store contention, not exhaustion)`,
+    );
+  }
+  return {
+    admitted: applied.admitted && write.committed,
+    held: applied.held,
+    committed: write.committed,
+  };
+}
+
+/**
+ * Give back the slot an admission took when the source never landed (audio-feed-maxxw).
+ *
+ * The refund counterpart of `admitSourceUnderCeiling`, the same reserve-then-refund relation
+ * audio-feed-ukuka established for a creation credit: a slot held for a subscription that failed
+ * to store is spent capacity the subscriber never used.
+ *
+ * Also the release path for a DELETED source, because the ceiling counts holdings: without it, a
+ * subscriber at the ceiling could never replace a source they removed. Best-effort and never
+ * throws — a refund is not worth failing a delete for — and it removes only this id.
+ */
+export async function releaseSourceSlot(
+  ctx: AppContext,
+  userId: string,
+  sourceId: string,
+): Promise<boolean> {
+  try {
+    let removed = false;
+    const write = await ctx.stores.metadata.atomicUpdate<SourceCeilingRow>(
+      sourceCeilingRow(userId),
+      (current) => {
+        removed = false;
+        const ids = current?.ids ?? [];
+        // Nothing held under that id: leave the row untouched rather than rewriting a value that
+        // would only look like a refund.
+        if (!ids.includes(sourceId)) return null;
+        removed = true;
+        return { ids: ids.filter((id) => id !== sourceId) };
+      },
+    );
+    return write.committed && removed;
+  } catch (error) {
+    console.error(
+      `[audio-feed] could not release a source slot for user "${userId}": ${
+        String((error as Error)?.message ?? error)
+      }`,
+    );
+    return false;
+  }
+}
+
+/**
  * Count one accepted episode creation against `user`, or return the refusal.
  *
  * The limiter is keyed on the USER, not the client address: one subscriber may hold

@@ -35,7 +35,12 @@ import {
   plainText,
 } from "./url.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
-import { ingestCreationLimiter, sourceCeilingFor } from "../compose/ingest.ts";
+import {
+  admitSourceUnderCeiling,
+  ingestCreationLimiter,
+  releaseSourceSlot,
+  sourceCeilingFor,
+} from "../compose/ingest.ts";
 import type { RateLimitResult } from "../auth/rate_limit.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
@@ -665,7 +670,38 @@ export async function subscribeToFeed(
   // host should be told, not left with a dead subscription that silently never
   // produces audio. `feedUrl` is set on the source constructed just above.
   const items = await loadFeedItems(source.feedUrl!, deps);
-  await ctx.stores.metadata.putSource(source);
+  // audio-feed-maxxw: the count check above is a COURTESY — it refuses an over-cap caller before
+  // this fetch costs anyone anything — and it is not the ceiling. It and the insert were separated
+  // by this network fetch, so two concurrent subscribes at 49/50 both passed it and both landed:
+  // 51 sources under a documented ceiling of 50, with no refusal to either caller. The admission
+  // below decides the slot atomically right before the insert, so the loser of that race sees the
+  // winner's slot and gets the same refusal a sequential caller gets.
+  let admittedSlot: { userId: string; sourceId: string } | null = null;
+  if (!deps.ignoreSourceLimit) {
+    const admission = await admitSourceUnderCeiling(ctx, {
+      userId: input.userId,
+      sourceId: source.id,
+      limit: maxSources,
+      storedIds: existing.map((s) => s.id),
+    });
+    if (!admission.admitted) {
+      throw new SubscriptionLimitError(
+        `Source limit reached: at most ${maxSources} sources allowed for this account.`,
+        { limit: maxSources, actual: admission.held },
+      );
+    }
+    admittedSlot = { userId: input.userId, sourceId: source.id };
+  }
+  try {
+    await ctx.stores.metadata.putSource(source);
+  } catch (error) {
+    // A reservation that ends in no stored source is refunded, or a failed write would spend a
+    // slot the subscriber never used (the audio-feed-ukuka refund relation).
+    if (admittedSlot) {
+      await releaseSourceSlot(ctx, admittedSlot.userId, admittedSlot.sourceId);
+    }
+    throw error;
+  }
   // audio-feed-jgois: initial subscription polls consume the shared rolling 24h creation limiter.
   // When the allowance is spent, new items are deferred (held at offset 0, neither fetched nor marked seen),
   // exactly as periodic polls do under audio-feed-ukuka, while the subscription itself succeeds.
