@@ -184,9 +184,40 @@ export interface SourceCeilingRow {
  * How long a reservation may remain absent from `listSources` before being treated as a leaked slot
  * from a crashed process and pruned during admission reconciliation (audio-feed-qqa03).
  *
- * 2 minutes is 2x-4x longer than any legitimate in-flight HTTP request or store CAS retry loop,
- * aligning with the 2-minute lease/heartbeat expiry used elsewhere in the codebase
- * (storage/kv/episodes.ts, routes/account.ts).
+ * A PRODUCT CHOICE, NOT AN INHERITED LEASE. There is no 2-minute lease anywhere in the codebase to
+ * align with: the repo's lease is `DEFAULT_CLAIM_LEASE_MS`, 15 minutes (src/types.ts:391), and the
+ * other 2-minute number — the heartbeat-staleness rule that makes a stuck `synthesizing` episode
+ * retryable (src/routes/account.ts:154, src/storage/kv/episodes.ts:712) — is a retry-eligibility
+ * threshold, not a lease. So the bound is sized from the path it guards, `subscribeToFeed`
+ * (src/ingest/feed.ts): the reservation is stamped at admission and `putSource` follows it with no
+ * network call in between, which makes a LIVE reservation one store round trip old — the admission's
+ * own CAS loop, 32 attempts with <=5ms jittered backoff (src/storage/kv.ts:481). The feed fetch in
+ * that request is the codebase's long pole (`TIMEOUT_MS`, 15s, one deadline covering the whole
+ * redirect chain — src/ingest/url.ts:51) and it happens BEFORE the stamp. 2 minutes is 8x the
+ * longest thing the request can do before the insert and orders of magnitude more than the
+ * admission itself, so the age test fires only on a genuinely stalled request — a dead process, a
+ * suspended isolate, a hung store write — which is the leak it exists to clear. The poll AFTER
+ * `putSource` can also take minutes (article fetches, synthesis) and does not bear on this bound: by
+ * then the id is in the store, so a later snapshot sees it as held.
+ *
+ * DELIBERATELY SHORTER THAN THE CLAIM LEASE, because the two numbers fail in opposite directions.
+ * A claim lease errs long because expiring one early bills a synthesis twice. This bound errs short
+ * because an admitted-but-unstored slot burns a subscriber's ceiling until it is reconciled, and
+ * every second past the real request time is capacity that user does not have. Erring short costs
+ * at most a brief over-count, `ceiling + k` where k is the count of admissions reconciling at once,
+ * and refusals resume as soon as those ids reach a snapshot (the row unions `storedIds`, so a
+ * pruned-but-stored id comes back). Erring long means a crashed subscribe keeps a paid-for ceiling
+ * slot indefinitely — permanent capacity loss — which is the leak audio-feed-qqa03 exists to close.
+ *
+ * ONE WINDOW KEEPS THIS FROM BEING TIGHT, and it is why the overshoot is `ceiling + k` rather than
+ * `ceiling + 1`: `storedIds` is captured BEFORE the feed fetch (src/ingest/feed.ts:634) and reused
+ * at admission after it (src/ingest/feed.ts:685), so a slow fetch makes admission reconcile against
+ * a snapshot taken before THIS request's insert — and before any other request's insert that landed
+ * during that fetch. An id stored during the window is absent from both the snapshot and the row's
+ * count, so it is not counted even though it is stored. The window is bounded by the same 15s fetch
+ * deadline, so it can never make a fresh reservation look stale on its own — the age test still has
+ * to pass — but it does widen what one pass can prune: an id whose insert landed inside the window
+ * looks absent too, and each of the k concurrent admissions carries its own window.
  */
 export const SOURCE_RESERVATION_STALE_MS = 2 * 60 * 1000;
 
