@@ -461,6 +461,16 @@ export function createCreateSourceHandler(
       // key, a bucket path or a provider message, so it is screened into the log seam (the
       // same screen src/server.ts applies to an unhandled error) and answered with a fixed
       // detail instead of the throw.
+      //
+      // The sibling site is `addSource` in src/routes/account_api.ts (POST
+      // /api/account/sources). Do NOT tidy it away as a duplicate of this one, or this one as
+      // a duplicate of it: the callers are disjoint - this route reads a feed token and
+      // ignores a session cookie, that one requires a session and ignores the token - so
+      // deleting either leaves a real caller with no guard. What must stay identical in both
+      // is the rule: an IngestError keeps its own message AND status, everything else is the
+      // fixed detail plus 502, and the throw reaches the log only through
+      // screenErrorForLogging. audio-feed-hoodo drives both routes so a drift reds a test
+      // rather than reaching a user.
       if (error instanceof IngestError) {
         return Response.json(
           { error: error.message },
