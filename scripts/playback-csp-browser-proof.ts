@@ -34,20 +34,18 @@ import { audioBlobKey } from "../src/types.ts";
 import { wav } from "./listen-harness.ts";
 import { runProof, startInProcessServer, withChrome } from "./proof-helper.ts";
 import { connectCdp, HANG_BOUND_MS } from "./proof-cdp.ts";
+import { PLAYBACK_ADVANCE_WAIT_MS } from "./proof-latency-budgets.ts";
 
 const TOKEN = "playback-proof-token";
 const EPISODE_ID = "ep-1";
 /**
  * How long the play press is given to START playback, sampled between polls.
  *
- * 15s is NOT a second magic number: it is `HANG_BOUND_MS / 8` (120s / 8), derived from the
- * same measured 8s starved-poll floor every other wait in this file uses. It is deliberately
- * NOT the hang bound: this wait is a LATENCY budget for a press that has already been sent,
- * and the assertion that actually judges playback is the pair of `currentTime` samples below
- * (a second sample 1.2s later must have MOVED), so a press that never starts is reported as a
- * failed check with the sampled state, not thrown as a hang (audio-feed-go4le).
+ * A LATENCY budget, not a hang bound: it lives in proof-latency-budgets.ts with its derivation
+ * (one measured starved poll plus the 1.2s advance sample window below). It used to be written as
+ * a fraction of HANG_BOUND_MS, which meant the 15s product budget silently moved whenever the
+ * starved-poll floor moved (audio-feed-c0l7b).
  */
-const PLAYBACK_ADVANCE_WAIT_MS = HANG_BOUND_MS / 8;
 /** Six seconds of real PCM: long enough that currentTime must move, short enough to stay fast. */
 const AUDIO: Uint8Array<ArrayBuffer> = wav(6) as Uint8Array<ArrayBuffer>;
 
@@ -344,11 +342,12 @@ await runProof("playback-proof", async (checker) => {
         );
 
         check(
-          "the audio element reached a PLAYING state: currentTime advanced and readyState >= 2",
-          currentTimeAdvanced && second.readyState >= 2,
-          `currentTime ${first.currentTime.toFixed(3)}s -> ${second.currentTime.toFixed(3)}s (+${
-            (second.currentTime - first.currentTime).toFixed(3)
-          }s), readyState ${first.readyState} -> ${second.readyState}, networkState ${second.networkState}, paused ${second.paused}`,
+          "the audio element reached a PLAYING state: playback started inside the latency budget, currentTime advanced and readyState >= 2",
+          advanced && currentTimeAdvanced && second.readyState >= 2,
+          `start observed inside ${PLAYBACK_ADVANCE_WAIT_MS}ms: ${advanced}; ` +
+            `currentTime ${first.currentTime.toFixed(3)}s -> ${second.currentTime.toFixed(3)}s (+${
+              (second.currentTime - first.currentTime).toFixed(3)
+            }s), readyState ${first.readyState} -> ${second.readyState}, networkState ${second.networkState}, paused ${second.paused}`,
         );
 
         // Printed unconditionally so the failing mutation run carries the same evidence.

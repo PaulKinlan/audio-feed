@@ -586,13 +586,37 @@ Four fixes exist and are the pattern to copy, not a complaint to file:
   `10000` literal at each file's `/admin` redirect wait went with them.
   `playback-csp-browser-proof.ts` had two load waits at a bare `15_000` and now passes
   `HANG_BOUND_MS`; its playback-start loop keeps 15 s because that wait is a LATENCY budget for a
-  press already sent, not a hang bound, and it is now spelled `HANG_BOUND_MS / 8` (120 s / 8) so it
-  is derived from the same measured floor instead of being a second magic number. The row that keeps
+  press already sent, not a hang bound (corrected in `fleet/latency-budgets` below, which took that
+  wait off the ceiling entirely). The row that keeps
   it: `tests/proof_cdp_test.ts` row 13 drives a bare `js()` (no third argument) on the fake clock and
   requires it to settle as `CdpHangBoundExceeded` at exactly `HANG_BOUND_MS`, and row 14 pins that the
   two bootstrap proofs declare no private `js()`/`until()`. The mutant — delete the timer race in
   `scripts/proof-cdp.ts`'s `js()` — reds rows 10 and 13 ("the evaluate was never answered … still
   pending after the bound elapsed") instead of passing.
+
+- **`fleet/latency-budgets` (`audio-feed-c0l7b`)** corrects what `fleet/until-4` did to the LATENCY
+  budgets, which are a different quantity from the ceiling. A census of the waits derived from
+  `HANG_BOUND_MS` across `scripts/` and `tests/` (204 `until(` call sites carry an explicit numeric
+  or hang-derived budget, `scripts/call-arity.ts until` filters the rest) buckets into two kinds.
+  **Hang bounds (a), not changed here:** every wait for a page to load, a row to render, a dialog to
+  open or data to appear — where the only question is "the page gets there or the host starved" —
+  plus the three aliases that are the hang bound spelled again (`LOAD_AND_RENDER_WAIT_MS`,
+  `FADE_SAMPLES_WAIT_MS`, `PLAYER_LOAD_WAIT_MS`, each 15 × the starved floor), so nothing was
+  narrowed there to begin with. **Product budgets (b), fixed here:** the `/admin` redirect wait in
+  each bootstrap proof (widened 12x, 10 s → 120 s) and the playback-start wait in
+  `playback-csp-browser-proof.ts` (15 s → `HANG_BOUND_MS / 8`, so the product budget moved whenever
+  the starved-poll floor moved). They live in `scripts/proof-latency-budgets.ts`, each derived from
+  the behaviour it measures and each asserted strictly below `HANG_BOUND_MS` at import:
+  `PLAYBACK_ADVANCE_WAIT_MS` = one measured starved poll (8 s) + the 1.2 s advance sample window the
+  playback assertion already uses = 9_200 ms, and `BOOTSTRAP_REDIRECT_LATENCY_MS` = the 10_000 ms
+  literal both bootstrap proofs carried before the sweep. Both are FLOORS, not proven bounds: this
+  repository measures no time-to-first-audio and no bootstrap POST → redirect latency. Rows:
+  `tests/proof_cdp_test.ts` row 15 pins the derivation, the ordering under the ceiling and the
+  call-site wiring; the playback check now also requires the start to have been OBSERVED inside the
+  budget (`advanced` was computed and never judged, so the budget changed nothing at all). Mutant:
+  `PLAYBACK_ADVANCE_WAIT_MS = 1` reds that check with `start observed inside 1ms: false` while the
+  `currentTime` samples alone (0.005 s → 1.176 s) still passed; at 9_200 ms the same row is green
+  with `start observed inside 9200ms: true`.
 
 The derivation, stated honestly wherever the constant appears: **120 s = 15 × the measured
 starved-poll floor** — an 8s `document.readyState` wait was observed to legitimately exceed 8s under
