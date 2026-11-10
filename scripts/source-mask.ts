@@ -60,13 +60,67 @@
  * which is the silent direction), and a template literal nested inside another
  * template's `${...}` is treated as code. Neither shape appears in this
  * repository's scripts, and both are named here rather than assumed away.
+ *
+ * THIS IS THE `blankLiterals: true` ARM of blankedSource(). audio-feed-anqjk
+ * needed the other arm - comments blanked, literal BODIES kept - and one walk
+ * with two outputs is what stops the two from drifting on quote state, which is
+ * the part that took a bug to get right.
  */
 export function maskNonCode(source: string): string {
+  return blankedSource(source, true);
+}
+
+/**
+ * The source with COMMENTS blanked and every string, template literal and
+ * `${...}` expression left EXACTLY as written, at identical offsets (newlines are
+ * kept, so line numbers survive).
+ *
+ * WHY THIS IS NOT maskNonCode(): maskNonCode() blanks literal BODIES as well, and
+ * a route path IS a literal body - `new Request("https://host/login")` carries the
+ * `/login` the route classifier is looking for inside a double-quoted string, so
+ * masking that string erases the very token being classified. The two functions
+ * disagree only on literal bodies; they must agree on everything else, which is
+ * why they are the two arms of one walk rather than two implementations.
+ *
+ * WHAT IT IS FOR (audio-feed-anqjk): a whole-file comment strip with no quote
+ * state - `replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*$/g, "")`, the shape this replaces -
+ * reads the `//` in `https://` as a comment start and deletes the rest of the
+ * line, INCLUDING the route path on it. tests/login_conditional_mediation_test.ts:269
+ * dispatches `/login` as `app.fetch(new Request("https://audio.example.com/login"))`
+ * and was classified mention-only for that reason alone.
+ *
+ * COMMENTS ARE BLANKED, NOT DELETED, so offsets and line structure survive and a
+ * caller may still split on newlines or slice against the original. The DELIMITERS
+ * themselves are left in place - `//` and `/*` `*\/` still read as a marker with
+ * nothing after them, exactly as in maskNonCode() - and that is why a commented-out
+ * dispatch stays out of the result: its text is spaces.
+ *
+ * DECLARED LIMITS, shared with maskNonCode() because it is the same walk: a REGEX
+ * LITERAL is not recognised (a `//` inside one would be read as a comment start -
+ * the miss direction for a classifier), a template literal nested inside another
+ * template's `${...}` is treated as code, and an unterminated literal stops at the
+ * newline.
+ */
+export function blankCommentsOnly(source: string): string {
+  return blankedSource(source, false);
+}
+
+/**
+ * ONE walk over the source that knows which of code / line comment / block
+ * comment / string / template it is in, and blanks only what the caller asked to
+ * lose. `blankLiterals` is the whole difference between maskNonCode() and
+ * blankCommentsOnly(); nothing else about the scan may depend on it.
+ */
+function blankedSource(source: string, blankLiterals: boolean): string {
   const out = source.split("");
   const mask = (from: number, to: number) => {
     for (let k = Math.max(0, from); k < Math.min(to, source.length); k++) {
       if (out[k] !== "\n") out[k] = " ";
     }
+  };
+  // A literal BODY: blanked by maskNonCode(), kept verbatim by blankCommentsOnly().
+  const body = (from: number, to: number) => {
+    if (blankLiterals) mask(from, to);
   };
   const endOfQuoted = (start: number, quote: string): number => {
     for (let j = start + 1; j < source.length; j++) {
@@ -98,7 +152,7 @@ export function maskNonCode(source: string): string {
     }
     if (ch === '"' || ch === "'") {
       const stop = endOfQuoted(i, ch);
-      mask(i + 1, stop);
+      body(i + 1, stop);
       i = stop + 1;
       continue;
     }
@@ -109,7 +163,7 @@ export function maskNonCode(source: string): string {
       while (j < source.length) {
         const d = source[j]!;
         if (d === "\\") {
-          mask(j, j + 1);
+          body(j, j + 1);
           j += 2;
           continue;
         }
@@ -122,7 +176,7 @@ export function maskNonCode(source: string): string {
         if (depth > 0) {
           if (d === '"' || d === "'") {
             const stop = endOfQuoted(j, d);
-            mask(j + 1, stop);
+            body(j + 1, stop);
             j = stop + 1;
             continue;
           }
@@ -131,7 +185,7 @@ export function maskNonCode(source: string): string {
           j++;
           continue;
         }
-        mask(j, j + 1);
+        body(j, j + 1);
         j++;
       }
       i = j + 1;

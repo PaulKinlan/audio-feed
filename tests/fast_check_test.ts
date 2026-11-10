@@ -13,7 +13,7 @@ import { assert, assertEquals, assertMatch } from "@std/assert";
 import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
 // audio-feed-v527x: the one place that knows quote and comment state. Comment-stripping and
 // literal-masking cannot be two ordered regex passes, either way round.
-import { maskNonCode } from "../scripts/source-mask.ts";
+import { blankCommentsOnly, maskNonCode } from "../scripts/source-mask.ts";
 import {
   allTestFiles,
   changedFiles,
@@ -458,12 +458,14 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     paths: readonly string[],
     isLogin = false,
   ): boolean => {
-    // audio-feed-anqjk (not fixed here, filed): this strip has no quote state, so a `//` inside a
-    // string or template truncates the rest of the line - and a route URL carrying its protocol
-    // (`new Request("https://host/login")`, tests/login_conditional_mediation_test.ts:269) loses
-    // the path this classifier is looking for. maskNonCode is not a drop-in: it blanks literal
-    // BODIES, and a route path IS a literal. The CLASSIFIER_ROWS below therefore omit protocols.
-    let stripped = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+    // audio-feed-anqjk: the strip is scripts/source-mask.ts blankCommentsOnly(), NOT a chain of
+    // regexes and NOT maskNonCode(). A whole-file `//`-to-end-of-line strip has no quote state, so
+    // a `//` INSIDE a string truncated the rest of that line - and a route URL carrying its
+    // protocol (`new Request("https://host/login")`, tests/login_conditional_mediation_test.ts:269)
+    // lost the very path this classifier looks for. maskNonCode() is not a drop-in for the
+    // opposite reason: it blanks literal BODIES and a route path IS a literal body. The two
+    // policies are the two arms of one walk in that module, so they cannot drift on quote state.
+    let stripped = blankCommentsOnly(source);
     stripped = stripped.replace(
       /Deno\.test\s*\(\s*(?:"[^"]*"|`[^`]*`|'[^']*')\s*,/g,
       "Deno.test('',",
@@ -490,14 +492,44 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   // The classifier's own falsification rows: each one is a shape that must be classified the
   // stated way. They go red if the classifier collapses to "anything naming the path" (the
   // promotion direction) or to "anything with a helper-shaped call" (the anchoring direction).
-  const CLASSIFIER_ROWS: { why: string; source: string; exercising: boolean }[] = [
+  const CLASSIFIER_ROWS: {
+    why: string;
+    source: string;
+    exercising: boolean;
+    // Defaults to the login route, which is the one with a path-shape regex.
+    paths?: string[];
+    isLogin?: boolean;
+  }[] = [
     {
       why: "dispatches through the app fetch with a constructed Request",
-      // audio-feed-anqjk: no protocol prefix in this row. exercisesRoute still strips //-comments
-      // before any quote state, so `https://` would truncate the line before the path and make
-      // this row prove nothing. Restore it when that strip becomes quote-aware.
       source: 'await fetch(new Request("/login"));',
       exercising: true,
+    },
+    {
+      why: "dispatches through the app fetch with a Request whose URL carries its protocol",
+      // audio-feed-anqjk: the protocol prefix is the point of this row - `https://` must not
+      // truncate the line before the path (tests/login_conditional_mediation_test.ts:269).
+      source: 'await fetch(new Request("https://audio.example.com/login"));',
+      exercising: true,
+    },
+    {
+      why: "dispatches a route whose host and path share a URL literal",
+      // The live passkeys shape: `app.fetch(new Request("https://victim.com/.well-known/webauthn"))`
+      // (tests/passkeys_test.ts:188, :196). Classified separately from /login because that row's
+      // path test is the login-specific regex.
+      paths: ["/.well-known/webauthn"],
+      isLogin: false,
+      source: 'const res = await fetch(new Request("https://victim.com/.well-known/webauthn", {\n' +
+        '  headers: { host: "victim.com" },\n' +
+        "}));",
+      exercising: true,
+    },
+    {
+      why: "only names the route in a comment that follows a protocol URL",
+      // audio-feed-anqjk, the other direction: a quote-aware strip must not turn a commented-out
+      // dispatch into an exerciser, and the `//` in the URL must not licence reading past it.
+      source: '// await fetch(new Request("https://audio.example.com/login"));',
+      exercising: false,
     },
     {
       why: "hands the app's fetch to a local helper",
@@ -540,7 +572,12 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   ];
   for (const row of CLASSIFIER_ROWS) {
     assertEquals(
-      exercisesRoute("tests/synthetic.ts", row.source, ["/login"], true),
+      exercisesRoute(
+        "tests/synthetic.ts",
+        row.source,
+        row.paths ?? ["/login"],
+        row.isLogin ?? true,
+      ),
       row.exercising,
       `classifier row must be ${row.exercising ? "exercising" : "mention-only"}: ${row.why}`,
     );
@@ -711,6 +748,10 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     "src/routes/login.ts": {
       exercises: [
         "tests/account_pages_test.ts",
+        // audio-feed-anqjk: the suite whose `app.fetch(new Request("https://…/login"))` at :269 the
+        // old quote-free comment strip truncated to `new Request("https:`. Pinned as EXERCISING so
+        // that strip cannot come back unnoticed.
+        "tests/login_conditional_mediation_test.ts",
         "tests/security_audit_test.ts",
         "tests/speculation_rules_test.ts",
       ],
