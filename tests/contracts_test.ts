@@ -159,6 +159,8 @@ export interface ExerciseResult {
  * 1. An import specifier (static or dynamic) that resolves to the target path.
  * 2. A legitimate text read (e.g. readTextFile / Deno.readTextFile) or subprocess
  *    execution (Deno.Command) targeting the exact path or relative URL resolving to it.
+ * 3. An asset helper call (e.g. assetUrl / assetBody / namedStylesheet) referencing
+ *    the asset, or a link-tag / exact string reference in executable code naming the asset path.
  *
  * Bare substring occurrences (such as a filename mentioned only in a comment or docstring)
  * are strictly rejected.
@@ -241,10 +243,51 @@ export function suiteExercisesTarget(
     }
   }
 
+  // 3. Asset helper calls and link-tag / exact string references:
+  // Accept asset helpers (assetUrl("..."), assetBody("..."), namedStylesheet("..."))
+  // as well as link tags or string literals naming the asset in executable code.
+  const baseName = declaredPath.split("/").pop() ?? "";
+  const isAsset = declaredPath.startsWith("src/assets/") || declaredPath.startsWith("assets/");
+
+  const assetHelperRe =
+    /\b(?:(?:[a-zA-Z0-9_$]+\.)?assetUrl|assetBody|namedStylesheet)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  while ((match = assetHelperRe.exec(code)) !== null) {
+    const assetSpec = match[1];
+    if (assetSpec === baseName || assetSpec === declaredPath) {
+      return {
+        exercises: true,
+        reason: `references target asset via helper call: ${match[0]}`,
+      };
+    }
+  }
+
+  if (isAsset) {
+    const escapedBaseName = baseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const linkTagRe = new RegExp(
+      `<link\\b[^>]*href=['"\`][^'"\`]*${escapedBaseName}[^'"\`]*['"\`]`,
+      "i",
+    );
+    if (linkTagRe.test(code)) {
+      return {
+        exercises: true,
+        reason: `references target asset via link tag in code`,
+      };
+    }
+
+    const escapedDeclared = declaredPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const exactPathRe = new RegExp(`['"\`](?:\\.\\./)?${escapedDeclared}['"\`]`);
+    if (exactPathRe.test(code)) {
+      return {
+        exercises: true,
+        reason: `references exact asset path "${declaredPath}" in string literal`,
+      };
+    }
+  }
+
   return {
     exercises: false,
     reason:
-      `suite neither imports "${declaredPath}" nor references it in readTextFile/Deno.Command (comment-only mentions do not qualify)`,
+      `suite neither imports "${declaredPath}" nor references it in readTextFile/Deno.Command/asset helpers (comment-only mentions do not qualify)`,
   };
 }
 
@@ -277,54 +320,66 @@ Deno.test("coverage-contract.json is valid, targets real files and suites, and s
 });
 
 Deno.test("coverage contract validator rejects a suite that merely mentions the target in a comment (audio-feed-c0oh9)", () => {
-  // Real repository case: tests/admin_ui_test.ts merely mentions src/assets/admin.css in a comment:
-  // "Resolved through the link, not the inline <style>: this rule moved to src/assets/admin.css in..."
-  const realCommentMention = suiteExercisesTarget(
-    "tests/admin_ui_test.ts",
-    "src/assets/admin.css",
-  );
-  assertEquals(
-    realCommentMention.exercises,
-    false,
-    "tests/admin_ui_test.ts must be rejected for src/assets/admin.css because it only mentions it in a comment",
-  );
+  // Load-bearing negative tests:
+  // Note: the matchers in suiteExercisesTarget are syntax-anchored (requiring import/read/call syntax).
+  // Therefore, a prose mention inside a comment (e.g. "// rule moved to src/assets/admin.css")
+  // evaluates to false even if comment stripping were completely deleted.
+  // To make comment stripping genuinely load-bearing, the negative assertions must test
+  // syntax-bearing comments (commented-out imports, reads, or assetUrl calls) that WOULD pass
+  // the syntax matchers if comment stripping were omitted or buggy, but are correctly rejected
+  // when comments are stripped.
 
-  // Synthetic single-line comment case:
-  const singleLineCommentSource = `
+  // 1. Commented-out import (would pass import regex without comment stripping):
+  const commentedImportSource = `
     import { assert } from "@std/assert";
-    // Manifest mention: src/compose/feeds.ts
+    // import { createCwvHandler } from "../src/routes/cwv.ts";
     Deno.test("unrelated test", () => {
       assert(true);
     });
   `;
-  const singleLineResult = suiteExercisesTarget(
+  const commentedImportResult = suiteExercisesTarget(
     "tests/unrelated_test.ts",
-    "src/compose/feeds.ts",
-    singleLineCommentSource,
+    "src/routes/cwv.ts",
+    commentedImportSource,
   );
   assertEquals(
-    singleLineResult.exercises,
+    commentedImportResult.exercises,
     false,
-    "a suite with only a single-line comment mention must be rejected",
+    "a suite with only a commented-out import specifier must be rejected (load-bearing)",
   );
 
-  // Synthetic multi-line comment case:
-  const multiLineCommentSource = `
+  // 2. Commented-out multi-line Deno.readTextFile (would pass readTextFile regex without comment stripping):
+  const commentedReadSource = `
     /*
-     * Coverage declaration: scripts/proof-latency-budgets.ts
-     * Comment-only mention in block comment
+     * const css = await Deno.readTextFile("src/assets/admin.css");
      */
     export function helper() { return true; }
   `;
-  const multiLineResult = suiteExercisesTarget(
+  const commentedReadResult = suiteExercisesTarget(
     "tests/another_test.ts",
-    "scripts/proof-latency-budgets.ts",
-    multiLineCommentSource,
+    "src/assets/admin.css",
+    commentedReadSource,
   );
   assertEquals(
-    multiLineResult.exercises,
+    commentedReadResult.exercises,
     false,
-    "a suite with only a multi-line comment mention must be rejected",
+    "a suite with only a block-commented readTextFile must be rejected (load-bearing)",
+  );
+
+  // 3. Commented-out assetUrl call (would pass assetUrl regex without comment stripping):
+  const commentedAssetSource = `
+    // const url = assetUrl("admin.css");
+    export function dummy() { return false; }
+  `;
+  const commentedAssetResult = suiteExercisesTarget(
+    "tests/asset_dummy_test.ts",
+    "src/assets/admin.css",
+    commentedAssetSource,
+  );
+  assertEquals(
+    commentedAssetResult.exercises,
+    false,
+    "a suite with only a commented-out assetUrl call must be rejected (load-bearing)",
   );
 
   // Positive controls to prove genuine exercise is accepted:
@@ -354,6 +409,34 @@ Deno.test("coverage contract validator rejects a suite that merely mentions the 
     genuineReadResult.exercises,
     true,
     "a suite with a genuine Deno.readTextFile call must pass",
+  );
+
+  const genuineAssetSource = `
+    const url = assetUrl("admin.css");
+  `;
+  const genuineAssetResult = suiteExercisesTarget(
+    "tests/admin_asset_test.ts",
+    "src/assets/admin.css",
+    genuineAssetSource,
+  );
+  assertEquals(
+    genuineAssetResult.exercises,
+    true,
+    "a suite with a genuine assetUrl helper call must pass",
+  );
+
+  const genuineLinkTagSource = `
+    assertStringIncludes(html, \`<link rel="stylesheet" href="\${assetUrl("admin.css")}">\`);
+  `;
+  const genuineLinkTagResult = suiteExercisesTarget(
+    "tests/admin_ui_test.ts",
+    "src/assets/admin.css",
+    genuineLinkTagSource,
+  );
+  assertEquals(
+    genuineLinkTagResult.exercises,
+    true,
+    "a suite with a genuine link tag reference must pass",
   );
 });
 
@@ -401,15 +484,29 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     }`,
   );
 
-  const diffOutput = await new Deno.Command("git", {
+  // Fleet-break vector: `git diff origin/main...HEAD` requires `origin/main` to exist locally.
+  // In an unfetched repository or shallow/isolated checkout where `origin/main` is missing,
+  // this would red the whole contracts suite unless handled.
+  // We attempt `origin/main...HEAD` first to detect branch changes against upstream main.
+  // If `origin/main...HEAD` fails (e.g. missing remote ref), we fall back to diffing against `HEAD`
+  // (which always exists locally) and state loudly in the failure message that running
+  // `git fetch origin main` heals the upstream comparison.
+  let diffOutput = await new Deno.Command("git", {
     args: ["diff", "--name-only", "origin/main...HEAD"],
   }).output();
-  assert(
-    diffOutput.success,
-    `git diff origin/main...HEAD failed (code ${diffOutput.code}): ${
-      new TextDecoder().decode(diffOutput.stderr)
-    }`,
-  );
+
+  if (!diffOutput.success) {
+    const originErr = new TextDecoder().decode(diffOutput.stderr).trim();
+    diffOutput = await new Deno.Command("git", {
+      args: ["diff", "--name-only", "HEAD"],
+    }).output();
+    assert(
+      diffOutput.success,
+      `git diff origin/main...HEAD failed (${originErr}; run "git fetch origin main" to heal) and fallback git diff HEAD also failed: ${
+        new TextDecoder().decode(diffOutput.stderr)
+      }`,
+    );
+  }
 
   const changedFiles = new Set<string>();
 

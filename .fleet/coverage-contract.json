@@ -38,7 +38,9 @@
     "tests/share_test.ts"
   ],
   "src/assets/admin.css": [
-    "tests/anchor_positioning_test.ts"
+    "tests/anchor_positioning_test.ts",
+    "tests/admin_asset_test.ts",
+    "tests/admin_ui_test.ts"
   ],
   "scripts/proof-latency-budgets.ts": [
     "tests/proof_cdp_test.ts"
