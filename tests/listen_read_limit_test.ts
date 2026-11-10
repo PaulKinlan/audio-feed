@@ -23,6 +23,10 @@
  * first row that touched these stores": at 60 page loads per window the sixty-first load of a
  * RUN is indistinguishable from a limiter defect, and which rows are affected would depend on
  * how many requests earlier rows made (audio-feed-chpka).
+ *
+ * Rows 1-5 take their LOOP COUNTS from the constants, which is right — they test behaviour AT the
+ * bound — but it left the width of the bound itself unowned, so three more rows pin it by LITERAL
+ * (audio-feed-cfogj, "the bound's width" below).
  */
 import { assert, assertEquals } from "@std/assert";
 import { createApp } from "../src/app.ts";
@@ -49,6 +53,16 @@ const CLIENT = { remoteAddr: { hostname: CLIENT_ADDR } };
 
 /** The player's poll cadence, quoted from `src/assets/listen.js:1057` ("a 15s poll"). */
 const POLL_MS = 15_000;
+
+/**
+ * The two bounds as the code comment states them (audio-feed-cfogj).
+ *
+ * LITERALS on purpose: these are the only place in the suite the widths are written down, so a
+ * widened `LISTEN_PAGE_RATE`/`LISTEN_STATUS_RATE` cannot move them with it. The comment above
+ * `LISTEN_PAGE_RATE` in `src/routes/listen.ts` states both ("PAGE 60/5min", "STATUS 120/5min").
+ */
+const DOCUMENTED_PAGE_BOUND = { maxRequests: 60, windowMs: 5 * 60 * 1000 };
+const DOCUMENTED_STATUS_BOUND = { maxRequests: 120, windowMs: 5 * 60 * 1000 };
 
 function app(stores: Stores) {
   const ctx = { config: CONFIG, stores };
@@ -337,4 +351,160 @@ Deno.test("without the seam the bound still holds across groups, so the reset ca
   });
   assertEquals(untouched.status, 200, "the exhausted window must not spill onto another address");
   await drain(untouched);
+});
+
+/**
+ * The bound's width (audio-feed-cfogj) — the three rows that make each limit load-bearing on its
+ * own numbers rather than on the constant under test.
+ *
+ * Every row above drills `LISTEN_PAGE_RATE.maxRequests` / `LISTEN_STATUS_RATE.maxRequests` times,
+ * which is the correct input for a behaviour row at the bound but is also why the bound could be
+ * widened with the whole suite staying green: measured on fleet/listen-ratetest, `maxRequests: 60`
+ * -> `6000` left 5 passed / 0 failed, because the rows simply drilled 6000 requests. The public,
+ * unauthenticated `/listen` surface would then have lost its protection by a one-word edit with
+ * nothing failing, and the seam rows above would have been clearing a budget nobody enforced.
+ *
+ * The invariants here are the operator-facing ones: 60 page loads and 120 polls per five minutes
+ * per client address; a request past either is refused with `429`, a JSON `too_many_requests` body
+ * and a `retry-after` in seconds; the refused request does NO tenant work; the two bounds are
+ * separate windows (a page reload does not eat the polls a player already has open); and the
+ * recording seam is the ONLY way back in, because a retry with no clock moved stays refused.
+ *
+ * Mutants, each run by hand on this commit, each verified to have LANDED by diffing
+ * `src/routes/listen.ts` before its result was believed:
+ *  - `LISTEN_PAGE_RATE` widened to `{ maxRequests: 6000, windowMs: 5 * 60 * 1000 }` (the exact
+ *    loosening that stayed green on the earlier branch): the documented-numbers row reddens, and
+ *    so does the page row, on "the sixty-first load must be refused" — 6000 admits it.
+ *  - `LISTEN_STATUS_RATE` widened to `{ maxRequests: 12000, ... }`: the documented-numbers row
+ *    reddens, and so does the status row, on the poll past 120.
+ *  - the `refuseListenRead` call deleted from `handleListen`: the page row reddens at load 61, and
+ *    its read counter shows the load doing tenant work again.
+ *  - `refuseListenRead` deleted from `handleListenStatus`: the status row reddens at poll 121.
+ *  - `resetListenReadWindows` reduced to a no-op: the page row reddens on "the seam is what
+ *    reopens the window", so the way back in is the seam and nothing else.
+ */
+Deno.test("the listen read bounds are the documented numbers, written as literals (audio-feed-cfogj)", () => {
+  assertEquals(
+    LISTEN_PAGE_RATE,
+    DOCUMENTED_PAGE_BOUND,
+    "the page bound is 60 loads per five minutes (src/routes/listen.ts: 'PAGE 60/5min')",
+  );
+  assertEquals(
+    LISTEN_STATUS_RATE,
+    DOCUMENTED_STATUS_BOUND,
+    "the poll bound is 120 requests per five minutes (src/routes/listen.ts: 'STATUS 120/5min')",
+  );
+});
+
+Deno.test("listen page: sixty loads are served, the sixty-first is refused and spends no tenant read (audio-feed-cfogj)", async () => {
+  const inner = memoryStores();
+  await seed(inner, 1);
+  const { store, reads } = counting(inner.metadata);
+  const stores: Stores = { ...inner, metadata: store };
+  const { fetch } = app(stores);
+  await resetWindows(stores);
+
+  for (let i = 0; i < DOCUMENTED_PAGE_BOUND.maxRequests; i++) {
+    const res = await fetch(new Request(`${BASE}/listen/${TOKEN}`), CLIENT);
+    assertEquals(res.status, 200, `page load ${i + 1} of 60 must be within the bound`);
+    await drain(res);
+  }
+  const readsBeforeRefusal = reads();
+  assert(readsBeforeRefusal > 0, "the sixty admitted loads must have done real store work");
+
+  const refused = await fetch(new Request(`${BASE}/listen/${TOKEN}`), CLIENT);
+  assertEquals(refused.status, 429, "the sixty-first load in a five-minute window must be refused");
+  const retryAfter = refused.headers.get("retry-after");
+  assert(
+    retryAfter !== null && Number(retryAfter) >= 1,
+    "the page refusal must carry a retry-after of at least one second",
+  );
+  const body = await refused.json();
+  assertEquals(body.error, "too_many_requests", "the refusal names the machine-readable reason");
+  assertEquals(
+    reads(),
+    readsBeforeRefusal,
+    "a refused page load must not resolve a token or scan a single episode",
+  );
+
+  // The seam is the ONLY way back in. No clock moves between these two lines, so a retry that was
+  // admitted here would mean the bound was advisory and the window healed itself.
+  const retryWithoutSeam = await fetch(new Request(`${BASE}/listen/${TOKEN}`), CLIENT);
+  assertEquals(
+    retryWithoutSeam.status,
+    429,
+    "a retry with no seam and no clock movement must still be refused",
+  );
+  await drain(retryWithoutSeam);
+  assertEquals(reads(), readsBeforeRefusal, "and that retry spends no tenant read either");
+
+  // Separate windows: a refused page load does not close the poll a player already has open.
+  const pollWhilePageRefused = await fetch(new Request(`${BASE}/listen/${TOKEN}/status`), CLIENT);
+  assertEquals(
+    pollWhilePageRefused.status,
+    200,
+    "the page and the poll have separate windows, so an exhausted page bound leaves polling served",
+  );
+  await drain(pollWhilePageRefused);
+
+  await resetWindows(stores);
+  const afterSeam = await fetch(new Request(`${BASE}/listen/${TOKEN}`), CLIENT);
+  assertEquals(
+    afterSeam.status,
+    200,
+    "the reset seam is what reopens the page window, and it does",
+  );
+  await drain(afterSeam);
+});
+
+Deno.test("listen status: one hundred and twenty polls are served, the hundred-and-twenty-first is refused (audio-feed-cfogj)", async () => {
+  const inner = memoryStores();
+  await seed(inner, 2);
+  const { store, reads } = counting(inner.metadata);
+  const stores: Stores = { ...inner, metadata: store };
+  const { fetch } = app(stores);
+  await resetWindows(stores);
+
+  for (let i = 0; i < DOCUMENTED_STATUS_BOUND.maxRequests; i++) {
+    const res = await fetch(new Request(`${BASE}/listen/${TOKEN}/status`), CLIENT);
+    assertEquals(res.status, 200, `poll ${i + 1} of 120 must be within the bound`);
+    const payload = await res.json();
+    assertEquals(payload.playable, 2, `poll ${i + 1} must still answer with the real panel`);
+  }
+  const readsBeforeRefusal = reads();
+  assert(readsBeforeRefusal > 0, "the hundred and twenty polls must have done real store work");
+
+  const refused = await fetch(new Request(`${BASE}/listen/${TOKEN}/status`), CLIENT);
+  assertEquals(
+    refused.status,
+    429,
+    "the hundred-and-twenty-first poll in a five-minute window must be refused",
+  );
+  const retryAfter = refused.headers.get("retry-after");
+  assert(
+    retryAfter !== null && Number(retryAfter) >= 1,
+    "the poll refusal must carry a retry-after of at least one second",
+  );
+  const body = await refused.json();
+  assertEquals(body.error, "too_many_requests", "the refusal names the machine-readable reason");
+  assertEquals(
+    reads(),
+    readsBeforeRefusal,
+    "a refused poll must not resolve a token or scan a single episode",
+  );
+
+  // 120 polls spent NONE of the 60 page loads: the two namespaces are separate buckets, so a
+  // player hammering its poll cannot lock the subscriber out of the page itself.
+  const pageAfterPollRefusal = await fetch(new Request(`${BASE}/listen/${TOKEN}`), CLIENT);
+  assertEquals(
+    pageAfterPollRefusal.status,
+    200,
+    "the poll bound is its own window: it must not spend the page's allowance",
+  );
+  await drain(pageAfterPollRefusal);
+
+  await resetWindows(stores);
+  const afterSeam = await fetch(new Request(`${BASE}/listen/${TOKEN}/status`), CLIENT);
+  assertEquals(afterSeam.status, 200, "the reset seam reopens the poll window, and it does");
+  await drain(afterSeam);
 });
