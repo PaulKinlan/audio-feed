@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { dirname, join, normalize } from "@std/path";
+import { deriveReadRelationReport, isFastGateSelectable } from "../scripts/test-selection.ts";
 
 const CONTRACTS_PATH = new URL("./contracts.json", import.meta.url).pathname;
 
@@ -152,6 +153,165 @@ export interface ExerciseResult {
   reason: string;
 }
 
+interface SourceSpan {
+  start: number;
+  end: number;
+}
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Index just past the string or template literal that opens at `at` (a quote character). Template
+ * substitutions are treated as opaque text: this scanner walks past a literal, it never evaluates one.
+ */
+function skipQuotedLiteral(code: string, at: number): number {
+  const quote = code[at];
+  let index = at + 1;
+  while (index < code.length) {
+    const char = code[index];
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char === quote) return index + 1;
+    index++;
+  }
+  return code.length;
+}
+
+/**
+ * End of the statement-level expression starting at `start`: the first `;`, or a closing bracket that
+ * belongs to an enclosing scope, outside brackets and literals.
+ */
+function expressionEnd(code: string, start: number): number {
+  let depth = 0;
+  let index = start;
+  while (index < code.length) {
+    const char = code[index]!;
+    if (char === '"' || char === "'" || char === "`") {
+      index = skipQuotedLiteral(code, index);
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      depth++;
+    } else if (char === ")" || char === "]" || char === "}") {
+      if (depth === 0) return index;
+      depth--;
+    } else if (char === ";" && depth === 0) {
+      return index;
+    }
+    index++;
+  }
+  return code.length;
+}
+
+/**
+ * The span of a function defined IN THIS SUITE (arrow/`function`/`const` binding), or null when the
+ * name resolves to an import - a callee this file does not define cannot be inspected for a read.
+ */
+function functionDefinitionSpan(code: string, name: string): SourceSpan | null {
+  const escaped = escapeRegExp(name);
+  const binding = new RegExp(`\\b(?:const|let|var)\\s+${escaped}\\s*(?::[^=;]+)?=`).exec(code);
+  if (binding) {
+    return {
+      start: binding.index,
+      end: expressionEnd(code, binding.index + binding[0].length),
+    };
+  }
+  const declaration = new RegExp(`\\bfunction\\s+${escaped}\\s*(?:<[^>(]*>)?\\(`).exec(code);
+  if (declaration) {
+    const bodyStart = code.indexOf("{", declaration.index + declaration[0].length);
+    if (bodyStart !== -1) {
+      return { start: declaration.index, end: expressionEnd(code, bodyStart) };
+    }
+  }
+  return null;
+}
+
+interface CallSite extends SourceSpan {
+  callee: string;
+  argsStart: number;
+  argsEnd: number;
+}
+
+/** Every `name( ... )` call with a plain identifier callee, with the span of its argument list. */
+function callSites(code: string): CallSite[] {
+  const sites: CallSite[] = [];
+  const callRe = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = callRe.exec(code)) !== null) {
+    const argsStart = match.index + match[0].length;
+    const argsEnd = expressionEnd(code, argsStart);
+    sites.push({ callee: match[1]!, start: match.index, end: argsEnd, argsStart, argsEnd });
+  }
+  return sites;
+}
+
+/** The trimmed top-level arguments of one call. */
+function callArguments(code: string, site: CallSite): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let argStart = site.argsStart;
+  let index = site.argsStart;
+  while (index < site.argsEnd) {
+    const char = code[index]!;
+    if (char === '"' || char === "'" || char === "`") {
+      index = skipQuotedLiteral(code, index);
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      depth++;
+    } else if (char === ")" || char === "]" || char === "}") {
+      depth--;
+    } else if (char === "," && depth === 0) {
+      args.push(code.slice(argStart, index).trim());
+      argStart = index + 1;
+    }
+    index++;
+  }
+  const last = code.slice(argStart, site.argsEnd).trim();
+  if (last.length > 0) args.push(last);
+  return args;
+}
+
+/**
+ * The stem half of the parameterised-read rule (audio-feed-ami7x round 2): the declared fixture's stem
+ * counts only when it is passed as an ARGUMENT to a call that also carries the fixture's URL template -
+ * either in the same argument list, or in the definition body of the callee being called. A stem
+ * literal sitting in an unrelated string (`assertStringIncludes(body, "article")`) is a coincidental
+ * mention, not a use: it names no file the suite reads.
+ */
+function stemArgumentFeedsFixtureTemplate(
+  code: string,
+  stem: string,
+  templates: (SourceSpan & { text: string })[],
+): { template: string; via: string } | null {
+  const stemLiterals = new Set([`"${stem}"`, `'${stem}'`, `\`${stem}\``]);
+  for (const site of callSites(code)) {
+    if (!callArguments(code, site).some((arg) => stemLiterals.has(arg))) continue;
+    const sameCall = templates.find((t) => t.start >= site.argsStart && t.end <= site.argsEnd);
+    if (sameCall) {
+      return {
+        template: sameCall.text,
+        via: `as an argument of ${site.callee}(...) beside the read of that template`,
+      };
+    }
+    const definition = functionDefinitionSpan(code, site.callee);
+    if (!definition) continue;
+    const inDefinition = templates.find(
+      (t) => t.start >= definition.start && t.end <= definition.end,
+    );
+    if (inDefinition) {
+      return {
+        template: inDefinition.text,
+        via:
+          `as the argument of ${site.callee}("${stem}"), whose own definition reads that template`,
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Validates that a suite genuinely exercises the declared target.
  *
@@ -244,6 +404,57 @@ export function suiteExercisesTarget(
       return {
         exercises: true,
         reason: `resolves target URL "${urlSpec}" in executable code`,
+      };
+    }
+  }
+
+  // 2b. A PARAMETERISED read helper (audio-feed-ami7x): a fixture whose name is substituted into ONE
+  // helper never spells its exact path as a literal, so every branch above is blind to the read.
+  // `tests/ingest_test.ts` holds
+  //   const fixture = (name: string) => Deno.readTextFile(new URL(`./fixtures/${name}.html`, import.meta.url));
+  // and calls it as `fixture("hero-figure")`.
+  //
+  // Accepted only when BOTH halves carry a use, because either alone names no file (audio-feed-jdvgt):
+  //   (i)  a text read or a Deno.Command call over a template URL whose literal prefix resolves to the
+  //        declared file's DIRECTORY and whose literal suffix is its EXTENSION, and
+  //   (ii) the declared file's STEM passed as an ARGUMENT to a call whose argument list or whose own
+  //        definition body carries that template - the parameter the helper substitutes.
+  // A template over another directory, a template with another extension, or a stem literal with no
+  // such read is rejected: a name is not a use, and a template with no stem names nothing in particular.
+  // The stem must be an ARGUMENT, not any literal anywhere (audio-feed-ami7x round 2): a file-global
+  // search accepted `assertStringIncludes(body, "article")` as proof that article.html was read, so a
+  // suite that loaded its fixtures through a helper plus any stray mention of the name validated.
+  const declaredBase = declaredPath.split("/").pop() ?? "";
+  const declaredStem = declaredBase.replace(/\.[^./]+$/, "");
+  const declaredExt = declaredBase.slice(declaredStem.length);
+  const declaredDir = normalize(dirname(declaredPath)).replace(/\/+$/, "");
+  const templateReadRe = /new\s+URL\s*\(\s*`([^`]*)`\s*,\s*import\.meta\.url\s*\)/g;
+  const fixtureTemplates: (SourceSpan & { text: string })[] = [];
+  if (hasReadTextFile || hasCommand) {
+    while ((match = templateReadRe.exec(code)) !== null) {
+      const template = match[1] ?? "";
+      const interpolationAt = template.indexOf("${");
+      if (interpolationAt === -1) continue;
+      const interpolationEnd = template.indexOf("}", interpolationAt);
+      if (interpolationEnd === -1) continue;
+      const literalPrefix = template.slice(0, interpolationAt);
+      const literalSuffix = template.slice(interpolationEnd + 1);
+      if (normalize(join(suiteDir, literalPrefix)).replace(/\/+$/, "") !== declaredDir) continue;
+      if (literalSuffix !== declaredExt) continue;
+      fixtureTemplates.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        text: template,
+      });
+    }
+  }
+  if (fixtureTemplates.length > 0) {
+    const linked = stemArgumentFeedsFixtureTemplate(code, declaredStem, fixtureTemplates);
+    if (linked) {
+      return {
+        exercises: true,
+        reason:
+          `reads target through the parameterised URL template \`${linked.template}\` (literal prefix resolves to ${declaredDir}, suffix ${declaredExt}) with the stem "${declaredStem}" passed ${linked.via}`,
       };
     }
   }
@@ -642,6 +853,275 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     );
   }
 });
+
+Deno.test("fixture coverage: the template-read rule needs a read over the fixture directory AND the stem as a call argument feeding that template (audio-feed-ami7x)", () => {
+  // The rule this pins is the one that lets tests/ingest_test.ts validate against
+  // tests/fixtures/hero-figure.html, so each half is load-bearing on its own and is tested that way.
+  // Every NEGATIVE row below is a shape that a file-global stem search (round 1) wrongly accepted.
+  const template = (body: string) =>
+    `const fixture = (name: string) =>\n  Deno.readTextFile(new URL(\`./fixtures/\${name}.html\`, import.meta.url));\n${body}`;
+
+  // NEGATIVE: the template read with no stem literal - the suite substitutes SOME fixture name and
+  // says nothing about which one, so it cannot be evidence for a particular file.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      template(`const other = await fixture(await pickName());`),
+    ).exercises,
+    false,
+    "a template read with no stem literal must not validate a fixture",
+  );
+
+  // NEGATIVE: the stem as a lone literal with no template read over the fixture directory.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      `const template = "./fixtures/\${name}.html"; const name = "hero-figure";`,
+    ).exercises,
+    false,
+    "a stem literal with no read call must not validate a fixture",
+  );
+
+  // NEGATIVE: the template resolves under a DIFFERENT directory, so the read names another tree.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      `const fixture = (name: string) =>\n  Deno.readTextFile(new URL(\`./elsewhere/\${name}.html\`, import.meta.url));\n` +
+        `const page = await fixture("hero-figure");`,
+    ).exercises,
+    false,
+    "a template read outside the fixture directory must not validate a fixture",
+  );
+
+  // POSITIVE: the shape tests/ingest_test.ts really has - one helper, the stem passed to it.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      template(`const page = await fixture("hero-figure");`),
+    ).exercises,
+    true,
+    "a template read over tests/fixtures plus the stem literal must validate",
+  );
+
+  // NEGATIVE (audio-feed-ami7x round 2): the suite reads its fixtures through the helper, and the
+  // declared stem appears ONLY inside an unrelated string - an assertion message here. A file-global
+  // search for the stem accepted exactly this as proof that article.html had been read.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/article.html",
+      template(
+        `const page = await fixture("paywall");\nassertStringIncludes(page, "article");`,
+      ),
+    ).exercises,
+    false,
+    "a stem literal appearing only in an unrelated string must not validate a fixture",
+  );
+
+  // NEGATIVE: the stem IS a call argument, but the callee's own definition reads another tree - the
+  // argument position is only load-bearing when the template it feeds is the declared one.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      template(
+        `const loadJson = (name: string) =>\n  Deno.readTextFile(new URL(\`./data/\${name}.json\`, import.meta.url));\n` +
+          `const page = await loadJson("hero-figure");`,
+      ),
+    ).exercises,
+    false,
+    "a stem passed to a helper that reads another template must not validate",
+  );
+
+  // POSITIVE: argument-position matching on ONE call - the template and the stem are arguments of the
+  // same call, so no helper definition has to be inspected.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      template(
+        `const readFixture = (url: URL, name: string) => Deno.readTextFile(url);\n` +
+          `const page = await readFixture(new URL(\`./fixtures/\${name}.html\`, import.meta.url), "hero-figure");`,
+      ),
+    ).exercises,
+    true,
+    "the template and the stem as arguments of one call must validate",
+  );
+});
+
+Deno.test("a changed fixture that no longer exists is a deletion, not an unhandled stat throw (audio-feed-ami7x)", () => {
+  // `Deno.statSync` THROWS NotFound for a deleted path instead of returning `isFile: false`, so the
+  // deletion exemption has to read the throw as absence. Before (audio-feed-ami7x round 2) deleting any
+  // fixture reddened the whole contracts suite with `error: NotFound` instead of being exempt.
+  // The present case names THIS file, not a fixture: deleting a fixture is the very operation under
+  // test, so a fixture here would make the proof impossible to run on the fixture it names.
+  assertEquals(
+    existsOnDisk("tests/contracts_test.ts"),
+    true,
+    "a path that exists must read as present",
+  );
+  assertEquals(
+    existsOnDisk("tests/fixtures/deleted-fixture-probe.html"),
+    false,
+    "a deleted fixture must read as absent, not throw",
+  );
+  assertEquals(existsOnDisk("tests/fixtures"), false, "a directory is not a file");
+});
+
+/**
+ * audio-feed-ami7x: fixtures are where behaviour several suites SPAWN lives, and the coverage contract
+ * mapped scripts/ and assets but nothing under tests/fixtures. The host gate's independent oracle
+ * (`remote/check-coverage.py`, `find_candidate_tests_for_file`) has no import edge to follow into a child
+ * process: it matches by test-name stem, by an import reference, by an execute-shaped call naming a
+ * LITERAL, or by a contract entry. tests/fixtures/invocation_death_child.ts matched none of those, so a
+ * run that executed the very suite spawning it still reported the changed fixture as "unmapped"
+ * (measured on fleet/starve-abort, audio-feed-zpyx0: "2 unmapped changed file(s):
+ * tests/fixtures/invocation_death_child.ts, tests/fixtures/invocation_death_window.ts"). The contract
+ * entry is the only declared edge that oracle reads, so a changed fixture must carry one.
+ *
+ * THE CENSUS, and how it is kept from going stale: `report.executedRelations` is the same derivation the
+ * fast gate's selector uses ("which suites SPAWN which paths"), printed per fixture by
+ *   deno run --allow-read --allow-run=git /tmp/fixture-census/census.ts
+ * (16 fixtures on disk: 5 executed and derived - the four checker/chrome children and
+ * invocation_death_child.ts - 2 executed in shapes the derivation cannot follow, 6 read as data by one
+ * suite, invocation_clock.ts imported by five, ingest-browser.html read only by a manual harness).
+ * Deriving the executed half rather than listing it means a NEW spawned fixture reds here without anyone
+ * remembering this file.
+ */
+const SPAWN_FORMS_THE_RESOLVER_CANNOT_FOLLOW: Record<string, { suites: string[]; why: string }> = {
+  "tests/fixtures/fake_chrome.sh": {
+    suites: ["tests/proof_helper_test.ts"],
+    why:
+      "passed as launchChrome's `binary:` option (tests/proof_helper_test.ts:1357,1364), not as a Deno.Command args element, so no execute relation is derived",
+  },
+  "tests/fixtures/bd_stub.sh": {
+    suites: ["tests/bd_durability_check_test.ts"],
+    why:
+      "Deno.copyFile'd into a scratch dir as `bd` and run there (tests/bd_durability_check_test.ts:22,61), so the copy is a READ of the source and the spawn happens on the copy",
+  },
+};
+
+/**
+ * Fixtures whose ONLY reader is a harness `deno test` never discovers. Naming a suite here would be a
+ * claim the gate cannot keep, so the gap is declared and PROVED instead: the harness must exist, must
+ * read the fixture, and must not be selectable by the fast gate.
+ */
+const NO_GATED_SUITE_READS: Record<string, { harness: string; why: string }> = {
+  "tests/fixtures/ingest-browser.html": {
+    harness: "tests/ingest_browser.ts",
+    why:
+      "only tests/ingest_browser.ts reads it - a manual acceptance harness started by hand (docs/ingest.md) that deno test never discovers",
+  },
+};
+
+Deno.test("every fixture a suite spawns is declared in .fleet/coverage-contract.json, and every changed fixture is mapped (audio-feed-ami7x)", async () => {
+  const coverageContract = loadCoverageContract();
+  const report = await deriveReadRelationReport();
+
+  // (a) THE EXECUTED CENSUS: derived spawns plus the two shapes the derivation cannot follow.
+  const executed = new Map<string, string[]>();
+  for (const [path, suites] of report.executedRelations) {
+    if (path.startsWith("tests/fixtures/")) executed.set(path, suites);
+  }
+  for (const [path, form] of Object.entries(SPAWN_FORMS_THE_RESOLVER_CANNOT_FOLLOW)) {
+    assert(
+      !executed.has(path),
+      `${path} IS now derived as executed, so its hand-written entry in SPAWN_FORMS_THE_RESOLVER_CANNOT_FOLLOW is stale: delete it and let the derivation speak (${form.why})`,
+    );
+    executed.set(path, form.suites);
+  }
+  assert(
+    executed.size >= 7,
+    `the executed-fixture census found ${executed.size} fixture(s), fewer than the 7 the census measured - ` +
+      `a spawned fixture has dropped out of BOTH the derivation and the hand list: ${
+        [...executed.keys()].join(", ")
+      }`,
+  );
+  for (const [path, suites] of executed) {
+    const declared = coverageContract[path];
+    assert(
+      declared !== undefined,
+      `fixture ${path} is EXECUTED by ${
+        suites.join(", ")
+      } but has no entry in .fleet/coverage-contract.json, so a change to it is reported unmapped unless a suite happens to mention it (audio-feed-ami7x)`,
+    );
+    for (const suite of suites) {
+      assert(
+        declared!.includes(suite),
+        `fixture ${path} is executed by ${suite}, but the contract maps it to ${
+          declared!.join(", ")
+        } - the entry must name the suite that spawns it`,
+      );
+    }
+  }
+
+  // (b) A CHANGED FIXTURE MUST BE DECLARED. A fixture that no longer exists is a deletion: its entry is
+  // removed, not required, and demanding one would make deleting a fixture impossible. The absence is
+  // read from the disk, and `Deno.statSync` THROWS NotFound rather than returning a false `isFile` for a
+  // deleted path - so the stat must be guarded, or deleting any fixture reds this suite with an
+  // unhandled throw instead of being exempt (audio-feed-ami7x round 2).
+  const { changedFiles } = await collectChangedFiles();
+  for (const file of changedFiles) {
+    if (!file.startsWith("tests/fixtures/")) continue;
+    if (!existsOnDisk(file)) continue;
+    const excluded = NO_GATED_SUITE_READS[file];
+    if (excluded) {
+      assert(
+        !report.relations.has(file) && !report.executedRelations.has(file),
+        `${file} is declared as having NO gated reader, but the derived relation names one: relations=${
+          (report.relations.get(file) ?? []).join(", ") || "none"
+        }, executed=${
+          (report.executedRelations.get(file) ?? []).join(", ") || "none"
+        } - map it in the contract instead of excluding it`,
+      );
+      continue;
+    }
+    assert(
+      file in coverageContract,
+      `changed fixture ${file} has no entry in .fleet/coverage-contract.json (audio-feed-ami7x): the host gate's oracle cannot follow a spawn, so an undeclared fixture change is reported unmapped even when its suite ran. Map it to the suite(s) that genuinely spawn or read it, or declare its lack of a gated reader in NO_GATED_SUITE_READS with the harness that owns it`,
+    );
+  }
+
+  // (c) EACH DECLARED GAP IS PROVED, not merely asserted: the harness exists, really reads the fixture,
+  // and is a file the fast gate cannot select (so no contract entry could name it honestly).
+  for (const [path, { harness, why }] of Object.entries(NO_GATED_SUITE_READS)) {
+    assert(
+      !(path in coverageContract),
+      `${path} declares no gated reader but has a contract entry`,
+    );
+    assert(
+      Deno.statSync(new URL(`../${harness}`, import.meta.url)).isFile,
+      `the harness named for ${path} must exist on disk: ${harness}`,
+    );
+    assert(
+      !isFastGateSelectable(harness),
+      `${harness} IS selectable by the fast gate, so ${path} can be mapped honestly - remove the exclusion (${why})`,
+    );
+    const reads = suiteExercisesTarget(harness, path);
+    assert(
+      reads.exercises,
+      `the harness named for ${path} does not read it either: ${reads.reason} - the fixture then has no reader at all and the exclusion is not the reason`,
+    );
+  }
+});
+
+/**
+ * Whether a repo-relative path is a file on disk. A missing path is `false` - the throw `statSync`
+ * raises for it IS the deletion signal - while any other error (a permission or a broken checkout)
+ * propagates, so an unreadable tree cannot be mistaken for a deletion and quietly exempted.
+ */
+function existsOnDisk(relativePath: string): boolean {
+  try {
+    return Deno.statSync(new URL(`../${relativePath}`, import.meta.url)).isFile;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
+}
 
 function fakeGit(byArgs: Record<string, GitResult>): GitRunner {
   return (args) => {

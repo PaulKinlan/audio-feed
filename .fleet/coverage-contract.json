@@ -57,5 +57,51 @@
   "scripts/source-mask.ts": [
     "tests/source_mask_test.ts",
     "tests/fast_check_test.ts"
+  ],
+  "tests/fixtures/checker_fail_return_child.ts": [
+    "tests/proof_helper_test.ts"
+  ],
+  "tests/fixtures/checker_pass_child.ts": [
+    "tests/proof_helper_test.ts"
+  ],
+  "tests/fixtures/checker_run_proof_child.ts": [
+    "tests/proof_helper_test.ts"
+  ],
+  "tests/fixtures/chrome_discovery_failure_child.ts": [
+    "tests/proof_helper_test.ts"
+  ],
+  "tests/fixtures/fake_chrome.sh": [
+    "tests/proof_helper_test.ts"
+  ],
+  "tests/fixtures/invocation_death_child.ts": [
+    "tests/synthesis_invocation_death_test.ts"
+  ],
+  "tests/fixtures/invocation_death_window.ts": [
+    "tests/synthesis_invocation_death_test.ts"
+  ],
+  "tests/fixtures/row_watchdog.ts": [
+    "tests/synthesis_invocation_death_test.ts"
+  ],
+  "tests/fixtures/invocation_clock.ts": [
+    "tests/synthesis_claim_lifecycle_test.ts",
+    "tests/synthesis_global_budget_test.ts",
+    "tests/synthesis_preturn_refusal_test.ts",
+    "tests/synthesis_upload_budget_test.ts",
+    "tests/synthesis_worker_test.ts"
+  ],
+  "tests/fixtures/article.html": [
+    "tests/ingest_test.ts"
+  ],
+  "tests/fixtures/hero-figure.html": [
+    "tests/ingest_test.ts"
+  ],
+  "tests/fixtures/paywall.html": [
+    "tests/ingest_test.ts"
+  ],
+  "tests/fixtures/structured-article.html": [
+    "tests/ingest_test.ts"
+  ],
+  "tests/fixtures/exww-band-floor-control.png": [
+    "tests/exww_band_floor_test.ts"
   ]
 }
