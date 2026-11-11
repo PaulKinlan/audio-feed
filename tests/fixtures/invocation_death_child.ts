@@ -20,6 +20,14 @@
  * but the ORDER of events is production-faithful: claim -> checkpoint
  * uploading_audio -> await put -> death with the wrapper's deadline timer still in
  * the future.
+ *
+ * NOTHING IN THIS FILE MAY ASSUME ITS READERS IMPORT IT. It is EXECUTED as a child
+ * process, never imported by the suite that runs it, so a change here is invisible to
+ * every import edge in the repo. `.fleet/coverage-contract.json` carries the declared
+ * edge (this fixture -> tests/synthesis_invocation_death_test.ts); without it the host
+ * gate reported a run that executed the spawner as having an unmapped changed file
+ * (audio-feed-ami7x, measured on fleet/starve-abort). The line above is also this
+ * contract's own proof: changing this file is what selects the suite that spawns it.
  */
 import {
   DEFAULT_ESTIMATED_TURN_MS,

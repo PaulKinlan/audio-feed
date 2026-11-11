@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { dirname, join, normalize } from "@std/path";
+import { deriveReadRelationReport, isFastGateSelectable } from "../scripts/test-selection.ts";
 
 const CONTRACTS_PATH = new URL("./contracts.json", import.meta.url).pathname;
 
@@ -244,6 +245,46 @@ export function suiteExercisesTarget(
       return {
         exercises: true,
         reason: `resolves target URL "${urlSpec}" in executable code`,
+      };
+    }
+  }
+
+  // 2b. A PARAMETERISED read helper (audio-feed-ami7x): a fixture whose name is substituted into ONE
+  // helper never spells its exact path as a literal, so every branch above is blind to the read.
+  // `tests/ingest_test.ts` holds
+  //   const fixture = (name: string) => Deno.readTextFile(new URL(`./fixtures/${name}.html`, import.meta.url));
+  // and calls it as `fixture("hero-figure")`.
+  //
+  // Accepted only when BOTH halves carry a use, because either alone names no file (audio-feed-jdvgt):
+  //   (i)  a text read or a Deno.Command call over a template URL whose literal prefix resolves to the
+  //        declared file's DIRECTORY and whose literal suffix is its EXTENSION, and
+  //   (ii) the declared file's STEM passed as a string literal in the same suite - the argument the
+  //        helper substitutes.
+  // A template over another directory, a template with another extension, or a stem literal with no
+  // such read is rejected: a name is not a use, and a template with no stem names nothing in particular.
+  const declaredBase = declaredPath.split("/").pop() ?? "";
+  const declaredStem = declaredBase.replace(/\.[^./]+$/, "");
+  const declaredExt = declaredBase.slice(declaredStem.length);
+  const declaredDir = normalize(dirname(declaredPath)).replace(/\/+$/, "");
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const templateReadRe = /new\s+URL\s*\(\s*`([^`]*)`\s*,\s*import\.meta\.url\s*\)/g;
+  if (hasReadTextFile || hasCommand) {
+    while ((match = templateReadRe.exec(code)) !== null) {
+      const template = match[1] ?? "";
+      const interpolationAt = template.indexOf("${");
+      if (interpolationAt === -1) continue;
+      const interpolationEnd = template.indexOf("}", interpolationAt);
+      if (interpolationEnd === -1) continue;
+      const literalPrefix = template.slice(0, interpolationAt);
+      const literalSuffix = template.slice(interpolationEnd + 1);
+      if (normalize(join(suiteDir, literalPrefix)).replace(/\/+$/, "") !== declaredDir) continue;
+      if (literalSuffix !== declaredExt) continue;
+      const stemLiteralRe = new RegExp(`['"\`]${escapeRegExp(declaredStem)}['"\`]`);
+      if (!stemLiteralRe.test(code)) continue;
+      return {
+        exercises: true,
+        reason:
+          `reads target through the parameterised URL template \`${template}\` (literal prefix resolves to ${declaredDir}, suffix ${declaredExt}) with the stem "${declaredStem}" passed as a string literal`,
       };
     }
   }
@@ -639,6 +680,194 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     assert(
       hasDirectTest || hasContractEntry,
       `changed file ${file} under scripts/ has no direct test and no entry in .fleet/coverage-contract.json (audio-feed-c0oh9)`,
+    );
+  }
+});
+
+Deno.test("fixture coverage: the template-read rule needs a read over the fixture directory AND the stem as a literal (audio-feed-ami7x)", () => {
+  // The rule this pins is the one that lets tests/ingest_test.ts validate against
+  // tests/fixtures/hero-figure.html, so each half is load-bearing on its own and is tested that way.
+  const template = (body: string) =>
+    `const fixture = (name: string) =>\n  Deno.readTextFile(new URL(\`./fixtures/\${name}.html\`, import.meta.url));\n${body}`;
+
+  // NEGATIVE: the template read with no stem literal - the suite substitutes SOME fixture name and
+  // says nothing about which one, so it cannot be evidence for a particular file.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      template(`const other = await fixture(await pickName());`),
+    ).exercises,
+    false,
+    "a template read with no stem literal must not validate a fixture",
+  );
+
+  // NEGATIVE: the stem as a lone literal with no template read over the fixture directory.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      `const template = "./fixtures/\${name}.html"; const name = "hero-figure";`,
+    ).exercises,
+    false,
+    "a stem literal with no read call must not validate a fixture",
+  );
+
+  // NEGATIVE: the template resolves under a DIFFERENT directory, so the read names another tree.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      `const fixture = (name: string) =>\n  Deno.readTextFile(new URL(\`./elsewhere/\${name}.html\`, import.meta.url));\n` +
+        `const page = await fixture("hero-figure");`,
+    ).exercises,
+    false,
+    "a template read outside the fixture directory must not validate a fixture",
+  );
+
+  // POSITIVE: the shape tests/ingest_test.ts really has - one helper, the stem passed to it.
+  assertEquals(
+    suiteExercisesTarget(
+      "tests/ingest_test.ts",
+      "tests/fixtures/hero-figure.html",
+      template(`const page = await fixture("hero-figure");`),
+    ).exercises,
+    true,
+    "a template read over tests/fixtures plus the stem literal must validate",
+  );
+});
+
+/**
+ * audio-feed-ami7x: fixtures are where behaviour several suites SPAWN lives, and the coverage contract
+ * mapped scripts/ and assets but nothing under tests/fixtures. The host gate's independent oracle
+ * (`remote/check-coverage.py`, `find_candidate_tests_for_file`) has no import edge to follow into a child
+ * process: it matches by test-name stem, by an import reference, by an execute-shaped call naming a
+ * LITERAL, or by a contract entry. tests/fixtures/invocation_death_child.ts matched none of those, so a
+ * run that executed the very suite spawning it still reported the changed fixture as "unmapped"
+ * (measured on fleet/starve-abort, audio-feed-zpyx0: "2 unmapped changed file(s):
+ * tests/fixtures/invocation_death_child.ts, tests/fixtures/invocation_death_window.ts"). The contract
+ * entry is the only declared edge that oracle reads, so a changed fixture must carry one.
+ *
+ * THE CENSUS, and how it is kept from going stale: `report.executedRelations` is the same derivation the
+ * fast gate's selector uses ("which suites SPAWN which paths"), printed per fixture by
+ *   deno run --allow-read --allow-run=git /tmp/fixture-census/census.ts
+ * (16 fixtures on disk: 5 executed and derived - the four checker/chrome children and
+ * invocation_death_child.ts - 2 executed in shapes the derivation cannot follow, 6 read as data by one
+ * suite, invocation_clock.ts imported by five, ingest-browser.html read only by a manual harness).
+ * Deriving the executed half rather than listing it means a NEW spawned fixture reds here without anyone
+ * remembering this file.
+ */
+const SPAWN_FORMS_THE_RESOLVER_CANNOT_FOLLOW: Record<string, { suites: string[]; why: string }> = {
+  "tests/fixtures/fake_chrome.sh": {
+    suites: ["tests/proof_helper_test.ts"],
+    why:
+      "passed as launchChrome's `binary:` option (tests/proof_helper_test.ts:1357,1364), not as a Deno.Command args element, so no execute relation is derived",
+  },
+  "tests/fixtures/bd_stub.sh": {
+    suites: ["tests/bd_durability_check_test.ts"],
+    why:
+      "Deno.copyFile'd into a scratch dir as `bd` and run there (tests/bd_durability_check_test.ts:22,61), so the copy is a READ of the source and the spawn happens on the copy",
+  },
+};
+
+/**
+ * Fixtures whose ONLY reader is a harness `deno test` never discovers. Naming a suite here would be a
+ * claim the gate cannot keep, so the gap is declared and PROVED instead: the harness must exist, must
+ * read the fixture, and must not be selectable by the fast gate.
+ */
+const NO_GATED_SUITE_READS: Record<string, { harness: string; why: string }> = {
+  "tests/fixtures/ingest-browser.html": {
+    harness: "tests/ingest_browser.ts",
+    why:
+      "only tests/ingest_browser.ts reads it - a manual acceptance harness started by hand (docs/ingest.md) that deno test never discovers",
+  },
+};
+
+Deno.test("every fixture a suite spawns is declared in .fleet/coverage-contract.json, and every changed fixture is mapped (audio-feed-ami7x)", async () => {
+  const coverageContract = loadCoverageContract();
+  const report = await deriveReadRelationReport();
+
+  // (a) THE EXECUTED CENSUS: derived spawns plus the two shapes the derivation cannot follow.
+  const executed = new Map<string, string[]>();
+  for (const [path, suites] of report.executedRelations) {
+    if (path.startsWith("tests/fixtures/")) executed.set(path, suites);
+  }
+  for (const [path, form] of Object.entries(SPAWN_FORMS_THE_RESOLVER_CANNOT_FOLLOW)) {
+    assert(
+      !executed.has(path),
+      `${path} IS now derived as executed, so its hand-written entry in SPAWN_FORMS_THE_RESOLVER_CANNOT_FOLLOW is stale: delete it and let the derivation speak (${form.why})`,
+    );
+    executed.set(path, form.suites);
+  }
+  assert(
+    executed.size >= 7,
+    `the executed-fixture census found ${executed.size} fixture(s), fewer than the 7 the census measured - ` +
+      `a spawned fixture has dropped out of BOTH the derivation and the hand list: ${
+        [...executed.keys()].join(", ")
+      }`,
+  );
+  for (const [path, suites] of executed) {
+    const declared = coverageContract[path];
+    assert(
+      declared !== undefined,
+      `fixture ${path} is EXECUTED by ${
+        suites.join(", ")
+      } but has no entry in .fleet/coverage-contract.json, so a change to it is reported unmapped unless a suite happens to mention it (audio-feed-ami7x)`,
+    );
+    for (const suite of suites) {
+      assert(
+        declared!.includes(suite),
+        `fixture ${path} is executed by ${suite}, but the contract maps it to ${
+          declared!.join(", ")
+        } - the entry must name the suite that spawns it`,
+      );
+    }
+  }
+
+  // (b) A CHANGED FIXTURE MUST BE DECLARED. A fixture that no longer exists is a deletion: its entry is
+  // removed, not required, and demanding one would make deleting a fixture impossible.
+  const { changedFiles } = await collectChangedFiles();
+  for (const file of changedFiles) {
+    if (!file.startsWith("tests/fixtures/")) continue;
+    const exists = Deno.statSync(new URL(`../${file}`, import.meta.url)).isFile;
+    if (!exists) continue;
+    const excluded = NO_GATED_SUITE_READS[file];
+    if (excluded) {
+      assert(
+        !report.relations.has(file) && !report.executedRelations.has(file),
+        `${file} is declared as having NO gated reader, but the derived relation names one: relations=${
+          (report.relations.get(file) ?? []).join(", ") || "none"
+        }, executed=${
+          (report.executedRelations.get(file) ?? []).join(", ") || "none"
+        } - map it in the contract instead of excluding it`,
+      );
+      continue;
+    }
+    assert(
+      file in coverageContract,
+      `changed fixture ${file} has no entry in .fleet/coverage-contract.json (audio-feed-ami7x): the host gate's oracle cannot follow a spawn, so an undeclared fixture change is reported unmapped even when its suite ran. Map it to the suite(s) that genuinely spawn or read it, or declare its lack of a gated reader in NO_GATED_SUITE_READS with the harness that owns it`,
+    );
+  }
+
+  // (c) EACH DECLARED GAP IS PROVED, not merely asserted: the harness exists, really reads the fixture,
+  // and is a file the fast gate cannot select (so no contract entry could name it honestly).
+  for (const [path, { harness, why }] of Object.entries(NO_GATED_SUITE_READS)) {
+    assert(
+      !(path in coverageContract),
+      `${path} declares no gated reader but has a contract entry`,
+    );
+    assert(
+      Deno.statSync(new URL(`../${harness}`, import.meta.url)).isFile,
+      `the harness named for ${path} must exist on disk: ${harness}`,
+    );
+    assert(
+      !isFastGateSelectable(harness),
+      `${harness} IS selectable by the fast gate, so ${path} can be mapped honestly - remove the exclusion (${why})`,
+    );
+    const reads = suiteExercisesTarget(harness, path);
+    assert(
+      reads.exercises,
+      `the harness named for ${path} does not read it either: ${reads.reason} - the fixture then has no reader at all and the exclusion is not the reason`,
     );
   }
 });
