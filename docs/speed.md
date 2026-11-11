@@ -179,21 +179,29 @@ suite set tells you about the host. This does not license a wider budget — the
 above still derives the bound from observed maxima, which is the one thing wall-time data is good
 for.
 
-### A 2x wall move on an unchanged suite set, and the cost signal that does not move (audio-feed-t7ri4)
+### A 2x wall move on an unchanged suite set, and the per-suite sum that diagnoses it (audio-feed-t7ri4)
 
 `ea3d6311` gated at 583 s with `2766 passed / 0 failed / 2 ignored (9m37s)`, thirteen minutes after a
 287 s run whose tree carried **the same 198 modules**, so the doubling had to be explained before it
-became the next baseline. It is host load, not this repo's cost. Five runs; one row each; the two
-time columns are the two SCOPES of that run (Deno's own summary line for the `deno test` phase, and
-`run_s` for the whole `deno task gate` command):
+became the next baseline. The evidence diagnoses host contention, not a cost increase in this repo.
+Five runs; one row each; the two time columns are the two SCOPES of that run (Deno's own summary line
+for the `deno test` phase, and `run_s` for the whole `deno task gate` command):
 
 | `deno test` phase, s (run's own summary line) | `run_s`, s (whole gate) | modules / tests | Record or log, sha, `wait_s`                                                                                                                                                                                                           |
 | --------------------------------------------- | ----------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 4m43s (283)                                   |                     287 | 198 / 2763      | `~/.fleet/checks/6726e40ceba210db064ea59aaab3efa2be04d345.json` (`d0db901d`, 2026-11-10T09:02:55Z, `wait_s=0`)                                                                                                                         |
-| 9m37s (577)                                   |                     583 | 198 / 2766      | `~/.fleet/checks/0c7786467bd9bec0e8f84c9a0d4272282012bc17.json` (`d9e119fb` = `ea3d6311`, 09:09:05Z, `wait_s=0`)                                                                                                                       |
+| 9m37s (577)                                   |                     583 | 198 / 2766      | `~/.fleet/checks/0c7786467bd9bec0e8f84c9a0d4272282012bc17.json` (`d9e119fb`, 09:09:05Z, `wait_s=0`)                                                                                                                                    |
 | 13m58s (838)                                  |                     845 | 198 / 2768      | `~/.fleet/checks/7fba07ef855d8365dc6d057add958060f886750e.json` (`c1a3a5c6`, 09:38:25Z, `wait_s=0`)                                                                                                                                    |
 | 5m17s (317)                                   |                     349 | 199 / 2780      | `fleet-gate gate-wall-full` log `/tmp/gate-wall-gate-wall-full.log` (host tmp, not durable — the durable record for that same tree is the last row), HEAD `56e2272c`, 2026-11-11T04:32:48Z on a quiet slot (load average 0.72, 8 vCPU) |
 | 4m47s (287)                                   |                     291 | 199 / 2780      | `~/.fleet/checks/fb3895911eb66d0250e6f99e437eff993ce85cef.json` (`56ef22ac`, same tree as `56e2272c`, 11:47:24Z, `wait_s=0`)                                                                                                           |
+
+The 583 s row cites the record's own `sha` (`d9e119fb`) while the prose above names `ea3d6311`, and
+the join is the record's `tree` field: it holds `0c7786467bd9bec0e8f84c9a0d4272282012bc17`, which is
+also what `git rev-parse ea3d6311^{tree}` prints on `main`, so the record measured the content of the
+merge the prose names while its `sha` names a second merge commit over that identical tree which no ref
+in this clone reaches. That record's `.log` field names the same run's log,
+`~/.fleet/checks/0c7786467bd9bec0e8f84c9a0d4272282012bc17.log`, whose last line is the
+`2766 passed (36 steps)` / `9m37s` summary quoted above.
 
 The test count is not the cause: `2763 -> 2766` is three tests, and the module count is 198 on both
 the 287 s and the 583 s run. What separates them is visible per suite. Summing each suite's own
@@ -209,7 +217,13 @@ there, so there is no suite to name.
 The 2x therefore sits in the part of a gate that is no suite's measured body — 80 s of in-body work
 inside a 283 s `deno test` phase (287 s of wall) on the fast run, and inside 577 s (583 s of wall)
 on the slow one: step startup, module load/transpile and teardown across 36 concurrent steps, which
-tracks the host and not the tree.
+tracks the host and not the tree. That is a diagnosis and not a proof: the ~500 s remainder (583 s
+minus the 80 s in-test sum) is attributed to the host, not measured on it — no step-level timing of
+startup, module load/transpile or teardown was taken — and the exact slow tree was never re-gated in
+a quiet slot, so what the evidence establishes is that no suite got slower, while where the
+remainder went rests on the flat sum, the three faster suites, `wait_s=0` and the hourly clustering;
+measuring it directly, if it ever matters, means timing one step's startup-to-first-test and
+teardown on a quiet host, or re-gating that tree in a quiet slot.
 Neither slow run waited for the heavy slot (`wait_s=0`), so this is not queueing. What is provable
 is that the box was shared: a `coord` fast gate on `audio-feed-sr` started 09:14:45 and ran 89 s
 **inside** the 583 s run, inbox traffic carries lane messages across 09:01-09:52, and `/tmp` holds
