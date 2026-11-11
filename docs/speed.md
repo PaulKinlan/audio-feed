@@ -179,6 +179,53 @@ suite set tells you about the host. This does not license a wider budget — the
 above still derives the bound from observed maxima, which is the one thing wall-time data is good
 for.
 
+### A 2x wall move on an unchanged suite set, and the cost signal that does not move (audio-feed-t7ri4)
+
+`ea3d6311` gated at 583 s with `2766 passed / 0 failed / 2 ignored (9m37s)`, thirteen minutes after a
+287 s run whose tree carried **the same 198 modules**, so the doubling had to be explained before it
+became the next baseline. It is host load, not this repo's cost. Five runs; one row each; the two
+time columns are the two SCOPES of that run (Deno's own summary line for the `deno test` phase, and
+`run_s` for the whole `deno task gate` command):
+
+| `deno test` phase, s (run's own summary line) | `run_s`, s (whole gate) | modules / tests | Record or log, sha, `wait_s`                                                                                                                                                                                                           |
+| --------------------------------------------- | ----------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4m43s (283)                                   |                     287 | 198 / 2763      | `~/.fleet/checks/6726e40ceba210db064ea59aaab3efa2be04d345.json` (`d0db901d`, 2026-11-10T09:02:55Z, `wait_s=0`)                                                                                                                         |
+| 9m37s (577)                                   |                     583 | 198 / 2766      | `~/.fleet/checks/0c7786467bd9bec0e8f84c9a0d4272282012bc17.json` (`d9e119fb` = `ea3d6311`, 09:09:05Z, `wait_s=0`)                                                                                                                       |
+| 13m58s (838)                                  |                     845 | 198 / 2768      | `~/.fleet/checks/7fba07ef855d8365dc6d057add958060f886750e.json` (`c1a3a5c6`, 09:38:25Z, `wait_s=0`)                                                                                                                                    |
+| 5m17s (317)                                   |                     349 | 199 / 2780      | `fleet-gate gate-wall-full` log `/tmp/gate-wall-gate-wall-full.log` (host tmp, not durable — the durable record for that same tree is the last row), HEAD `56e2272c`, 2026-11-11T04:32:48Z on a quiet slot (load average 0.72, 8 vCPU) |
+| 4m47s (287)                                   |                     291 | 199 / 2780      | `~/.fleet/checks/fb3895911eb66d0250e6f99e437eff993ce85cef.json` (`56ef22ac`, same tree as `56e2272c`, 11:47:24Z, `wait_s=0`)                                                                                                           |
+
+The test count is not the cause: `2763 -> 2766` is three tests, and the module count is 198 on both
+the 287 s and the 583 s run. What separates them is visible per suite. Summing each suite's own
+in-test milliseconds out of the two logs (`... ok (<N>ms)` lines) gives **80.1 s for the 287 s run
+and 79.8 s for the 583 s run** — the same in-body work, 0.4% apart, while the wall moved 2.0x. The
+quiet re-run sums to 84.2 s for its one extra module. No suite moved materially: the widest single
+step from the 287 s run to the 583 s run is +2.6 s (`observability_agent_poll_test`, 318 -> 2947
+ms), and three suites were FASTER in the slower run (`pre_push_hook_test` 4199 -> 2383 ms,
+`fast_check_test` 4330 -> 3471 ms, `synthesis_invocation_death_test` 1928 -> 1089 ms). A widened
+wait, a browser proof run serially or a new `Deno.Command` would each show up in that sum; none is
+there, so there is no suite to name.
+
+The 2x therefore sits in the part of a gate that is no suite's measured body — 80 s of in-body work
+inside a 283 s `deno test` phase (287 s of wall) on the fast run, and inside 577 s (583 s of wall)
+on the slow one: step startup, module load/transpile and teardown across 36 concurrent steps, which
+tracks the host and not the tree.
+Neither slow run waited for the heavy slot (`wait_s=0`), so this is not queueing. What is provable
+is that the box was shared: a `coord` fast gate on `audio-feed-sr` started 09:14:45 and ran 89 s
+**inside** the 583 s run, inbox traffic carries lane messages across 09:01-09:52, and `/tmp` holds
+Chrome profile directories and `audiofeed-proof-exww-*` / `cfsg-cli-*` fixture directories created in
+both slow windows (09:09-09:10, 09:38-09:52) — consistent with another lane's browser work, not by
+itself proof of it. The slow runs also cluster by hour: over 9-11 November the 26 PASS full gates
+**outside** 09:00-09:59Z span 275-354 s, while the four **inside** that hour are 287, 583, 777 and 845
+s (`f55c2b27` 777 s at 2026-11-09T09:36:39Z is the previous day's member of the same cluster).
+
+The reading rule this row adds (not a budget): a re-gate that comes back 2-3x slower with an
+unchanged module count is answered by summing the per-suite milliseconds in the two logs, not by
+blaming a suite. It also refreshes the 4x figure above rather than contradicting it: 2026-11-10 alone
+spans 277-845 s (3.0x) over 198-199 modules, so the host still dominates in the current, much smaller
+regime, and **9m37s is not what this repo's full gate costs** — on a quiet slot the same suite set
+lands at 5m17s/349 s on the current tree and 4m47s/291 s on the merger's run of that same tree.
+
 ### Fast-gate bound: `CHECK_FAST_TIMEOUT` is 1800 s
 
 The runner's fast default is `CHECK_FAST_TIMEOUT=${CHECK_FAST_TIMEOUT:-1800}`
