@@ -649,11 +649,16 @@ const SUBSTANTIAL_PARAGRAPH_CHARS = 40;
  * A link whose entire visible text is a URL or bare path is navigation chrome, not
  * prose (audio-feed-sa4g): spelled aloud it becomes "slash show dash keystrokes".
  * Domain-only text ("example.com") is kept — "example dot com" is how it is said.
+ *
+ * The protocol-relative test spells its two slashes as `[/]{2}` rather than as an
+ * escaped slash pair: `\/\/` immediately before the closing delimiter puts two
+ * slashes adjacent, and the shared source walk reads that as a comment start and
+ * blanks the rest of the line (audio-feed-naplt). Same match, no adjacency.
  */
 export function isBareUrlText(text: string | null | undefined): boolean {
   const value = clean(text);
   if (!value || /\s/.test(value)) return false;
-  return /^(?:https?:)?\/\//i.test(value) ||
+  return /^(?:https?:)?[/]{2}/i.test(value) ||
     /^www\./i.test(value) ||
     value.startsWith("/") ||
     /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\/\S+/i.test(value);
