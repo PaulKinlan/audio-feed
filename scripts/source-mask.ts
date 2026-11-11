@@ -55,11 +55,18 @@
  * of this file: the same lesson from the other side.
  *
  * DECLARED LIMITS, because a masker with unstated holes is worse than none: a
- * REGEX LITERAL is not masked (telling `/` as regex from division needs a
+ * REGEX LITERAL is not recognised (telling `/` as regex from division needs a
  * previous-token rule, and a wrong guess would mask real code and LOSE a write,
  * which is the silent direction), and a template literal nested inside another
- * template's `${...}` is treated as code. Neither shape appears in this
- * repository's scripts, and both are named here rather than assumed away.
+ * template's `${...}` is treated as code. The regex limit has a measured SHAPE
+ * rather than a hypothesis (audio-feed-naplt): a pattern that ENDS in an escaped
+ * slash pair - `\/` immediately followed by the closing delimiter - puts two
+ * slashes adjacent, so the walk reads `//` as a comment start and blanks the REST
+ * OF THAT LINE. The line this limit was MEASURED on (`src/ingest/url.ts`'s
+ * protocol-relative test) was rewritten to spell the pair as `[/]{2}`, which matches
+ * the same strings with no adjacency, and tests/source_mask_test.ts pins the misread
+ * itself under a name that says DECLARED LIMIT. Both limits are named here rather
+ * than assumed away.
  *
  * THIS IS THE `blankLiterals: true` ARM of blankedSource(). audio-feed-anqjk
  * needed the other arm - comments blanked, literal BODIES kept - and one walk
@@ -99,7 +106,8 @@ export function maskNonCode(source: string): string {
  * LITERAL is not recognised (a `//` inside one would be read as a comment start -
  * the miss direction for a classifier), a template literal nested inside another
  * template's `${...}` is treated as code, and an unterminated literal stops at the
- * newline.
+ * newline. The measured instance of the regex limit is an escaped slash pair before
+ * the closing delimiter, which blanks the rest of its line (audio-feed-naplt).
  */
 export function blankCommentsOnly(source: string): string {
   return blankedSource(source, false);

@@ -116,3 +116,51 @@ Deno.test("blankCommentsOnly is idempotent", () => {
   assertEquals(blankCommentsOnly(once), once, "a second pass must change nothing");
   assertEquals(once.split("\n")[0]!.trimEnd(), 'const a = "https://h/books/1"; //');
 });
+
+Deno.test("DECLARED LIMIT (audio-feed-naplt): a regex literal with an escaped slash pair blanks its line", () => {
+  // THIS ROW PINS BEHAVIOUR THAT IS WRONG, AND THE NAME SAYS SO. It is not a
+  // correctness assertion: the walk cannot tell a regex literal from division
+  // without a previous-token rule, and a wrong guess masks real code and loses a
+  // write (the silent direction), so it does not guess. What it does instead is
+  // read the two slashes of an escaped slash pair before the closing delimiter as a
+  // comment start - and that must be VISIBLE rather than discovered, because a
+  // census that counts constructs on such a line counts a truncated line. The line
+  // this limit was measured on (the protocol-relative test in src/ingest/url.ts) is
+  // rewritten to `[/]{2}`, pinned at the end of this row; if
+  // the walk ever learns regex literals, this row SHOULD go red and be replaced.
+  const rawLine = "  return /^(?:https?:)?\\/\\//i.test(value) ||";
+  assert(
+    rawLine.includes("\\/\\//"),
+    "the input shape: an escaped slash pair immediately followed by the closing delimiter",
+  );
+  const source = `${rawLine}\n  next();`;
+  const maskedLine = blankCommentsOnly(source).split("\n")[0]!;
+  assertEquals(
+    maskedLine,
+    rawLine.slice(0, rawLine.indexOf("i.test")) +
+      " ".repeat(rawLine.length - rawLine.indexOf("i.test")),
+    "the adjacency reads as `//` and `i.test(value) ||` is blanked - WRONG, pinned as the limit",
+  );
+  assertEquals(
+    maskedLine.length,
+    rawLine.length,
+    "it blanks rather than deletes, so offsets and line structure survive the miss",
+  );
+  assertEquals(
+    maskNonCode(source).split("\n")[0],
+    maskedLine,
+    "one walk, two arms: the limit is shared by maskNonCode too, as the module says",
+  );
+  assertEquals(
+    blankCommentsOnly(source).split("\n")[1],
+    "  next();",
+    "only the REST OF THAT LINE is lost; the following line is untouched",
+  );
+  // The form the live line uses instead: a character class for the two slashes.
+  const rewritten = "  return /^(?:https?:)?[/]{2}/i.test(value) ||\n  next();";
+  assertEquals(
+    blankCommentsOnly(rewritten),
+    rewritten,
+    "`[/]{2}` matches the same strings with no slash adjacency, so the walk keeps the line",
+  );
+});
