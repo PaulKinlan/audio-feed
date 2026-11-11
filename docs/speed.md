@@ -179,6 +179,65 @@ suite set tells you about the host. This does not license a wider budget — the
 above still derives the bound from observed maxima, which is the one thing wall-time data is good
 for.
 
+### A 2x wall move on an unchanged suite set (audio-feed-t7ri4)
+
+`ea3d6311` gated at 583 s with `2766 passed / 0 failed / 2 ignored (9m37s)`, thirteen minutes after a
+287 s run whose tree carried **the same 198 modules**, so the doubling had to be investigated before it
+became the next baseline. Six runs; one row each; the two time columns are the two SCOPES of that run
+(Deno's own summary line for the `deno test` phase, and `run_s` for the whole `deno task gate` command):
+
+| `deno test` phase, s (run's own summary line) | `run_s`, s (whole gate) | modules / tests | Record or log, sha, `wait_s`                                                                                                                                                                                                           |
+| --------------------------------------------- | ----------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4m43s (283)                                   |                     287 | 198 / 2763      | `~/.fleet/checks/6726e40ceba210db064ea59aaab3efa2be04d345.json` (`d0db901d`, 2026-11-10T09:02:55Z, `wait_s=0`)                                                                                                                         |
+| 9m37s (577)                                   |                     583 | 198 / 2766      | `~/.fleet/checks/0c7786467bd9bec0e8f84c9a0d4272282012bc17.json` (`d9e119fb`, 09:09:05Z, `wait_s=0`)                                                                                                                                    |
+| 13m58s (838)                                  |                     845 | 198 / 2768      | `~/.fleet/checks/7fba07ef855d8365dc6d057add958060f886750e.json` (`c1a3a5c6`, 09:38:25Z, `wait_s=0`)                                                                                                                                    |
+| 5m12s (312)                                   |                     338 | 198 / 2766      | `fleet-gate gate-ea3d` log `/tmp/coord-gate-ea3d.log`, HEAD `ea3d6311`, 2026-11-11T05:06:17Z on a quiet slot (load average 0.85, 8 vCPU). What is durable for this row is the log file alone — `/tmp/coord-gate-ea3d.log`, 664,144 bytes, mtime 2026-11-11T05:06:17Z — and what is not durable is any check record: it carries no commit banner and no `~/.fleet/checks/` record has `run_s=338` (and none names `ea3d6311`), so the figure is only as good as that file surviving and its HEAD binding rests on the launch record plus that mtime, not on a `sha` field |
+| 5m17s (317)                                   |                     349 | 199 / 2780      | `fleet-gate gate-wall-full` log `/tmp/gate-wall-gate-wall-full.log` (host tmp, not durable — the durable record for that same tree is the last row), HEAD `56e2272c`, 2026-11-11T04:32:48Z on a quiet slot (load average 0.72, 8 vCPU) |
+| 4m47s (287)                                   |                     291 | 199 / 2780      | `~/.fleet/checks/fb3895911eb66d0250e6f99e437eff993ce85cef.json` (`56ef22ac`, same tree as `56e2272c`, 11:47:24Z, `wait_s=0`)                                                                                                           |
+
+The 583 s row cites the record's own `sha` (`d9e119fb`) while the prose above names `ea3d6311`, and
+the join is the record's `tree` field: it holds `0c7786467bd9bec0e8f84c9a0d4272282012bc17`, which is
+also what `git rev-parse ea3d6311^{tree}` prints on `main`, so the record measured the content of the
+merge the prose names while its `sha` names a second merge commit over that identical tree which no ref
+in this clone reaches. That record's `.log` field names the same run's log,
+`~/.fleet/checks/0c7786467bd9bec0e8f84c9a0d4272282012bc17.log`, whose last line is the
+`2766 passed (36 steps)` / `9m37s` summary quoted above.
+
+The test count is not the cause: `2763 -> 2766` is three tests, and the module count is 198 on both
+the 287 s and the 583 s run. To see what happened inside test bodies, sum every per-test result line
+(`<name> ... ok (<dur>)`) out of the two logs under the reproducible full-class extraction rule: ANSI
+escape sequences stripped, both milliseconds and seconds formats included, failed and ignored tests
+excluded, and lines that `deno test --parallel` frames inside `------- output -------` capture blocks
+included. That sum gives **205.1 s for the 287 s log and 478.8 s for the 583 s log** (matching the
+independent micro-fix extraction of 205.2 s / 479.9 s). The previously quoted flat sum (80.1 s vs
+79.8 s) omitted the captured output blocks and is withdrawn.
+
+Under that rule, in-body duration grew roughly with the wall (2.3x vs 2.0x), so this evidence does
+NOT establish that the difference sat outside suite bodies or that no suite got slower. Nor does it
+separate host contention from a real cost increase: under `deno test --parallel`, a linear sum of test
+durations is not a wall-time model, so neither number proves either story. What is provable is that the
+machine was shared: a `coord` fast gate on `audio-feed-sr` started 09:14:45Z and ran 89 s inside the
+583 s run, and `/tmp` holds Chrome profile directories and fixture directories created in both slow
+windows (09:09-09:10, 09:38-09:52), consistent with concurrent lane activity. The slow runs also
+cluster by hour: over 9-11 November the 26 PASS full gates outside 09:00-09:59Z span 275-354 s, while
+the four inside that hour are 287, 583, 777, and 845 s (`f55c2b27` 777 s at 2026-11-09T09:36:39Z is
+the previous day's member of the same cluster). This hourly clustering is a correlation worth noting,
+and is explicitly labelled as such — not a proof of causation.
+
+The decisive measurement is re-gating that exact tree (`ea3d6311`, tree `0c778646`) in a quiet slot.
+Run through `fleet-gate gate-ea3d` on 2026-11-11T05:06:17Z (load average 0.85), that exact tree gated at
+**338 s wall time (5m12s / 312 s in `deno test`, 2766 passed / 0 failed / 2 ignored)**, dropping 245 s
+of wall time and 265 s of test phase compared to the 583 s / 9m37s run. Under the same extraction rule,
+its per-test duration sum also dropped to 221.0 s. This confirms that the 583 s gate was host
+contention during the 09:00Z cluster, and that 9m37s is not what this tree costs.
+
+The reading rule this row adds (not a budget): a re-gate that comes back 2-3x slower with an unchanged
+module count cannot be diagnosed by a duration sum alone under `--parallel`. It also refreshes the 4x
+figure above rather than contradicting it: 2026-11-10 alone spans 277-845 s (3.0x) over 198-199
+modules, so host load still creates wide swings, and on a quiet slot the same suite set lands at
+5m12s / 338 s on `ea3d6311`, 5m17s / 349 s on HEAD (`56e2272c`), and 4m47s / 291 s on the merger's run
+of that same tree.
+
 ### Fast-gate bound: `CHECK_FAST_TIMEOUT` is 1800 s
 
 The runner's fast default is `CHECK_FAST_TIMEOUT=${CHECK_FAST_TIMEOUT:-1800}`
