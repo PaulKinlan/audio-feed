@@ -57,7 +57,7 @@ routes, listed separately because the attacker's position there is different.
     every user-scoped route shares `approvedUserFor` (`src/compose/shared.ts:69-90`) so the approval
     gate cannot be forgotten on a new route.
   - `/listen` refusals are uniform 404s with no status detail distinguishing unknown token, unapproved
-    owner or missing episode (audio-feed-se8s8; `src/routes/listen.ts:723`, `:850`, `:1007`). The
+    owner or missing episode (audio-feed-se8s8; `src/routes/listen.ts:753-763`, `:880-887`, `:1037-1050`). The
     `/audio` precedent is approval-before-blob (audio-feed-7kdhb): the owner's approval is checked on
     the key that actually resolved, failing closed, BEFORE any blob read or cache spend, so a refusal
     cannot confirm blob existence (`src/routes/audio.ts:221-244`).
@@ -77,11 +77,21 @@ routes, listed separately because the attacker's position there is different.
     absent email shape and the present title/author. Dropping the display name as well was left as a
     PRODUCT decision rather than a leak fix: clients render `<itunes:author>` as the show's author, so
     removing it changes what every subscriber sees in their player.
-  - The retry POST is a PAID mutation behind the weaker credential, walled three ways (audio-feed-8jzgl):
-    a same-origin wall, two sliding windows (10/10 min per token+address, 30/10 min per token) and a
-    durable lifetime ceiling of 5 retries per episode (`src/routes/listen.ts:882-901`).
-  - The listen page and its status poll are rate-limited before ANY store work: 60 per 5 min per
-    (route, address) (audio-feed-l11jx; `src/routes/listen.ts:641`, `:714-715`).
+  - The retry POST (`POST /listen/:token/episodes/:episodeId/retry`) is a PAID mutation behind the
+    weaker credential, walled three ways (audio-feed-8jzgl): a same-origin wall, two sliding windows
+    (10/10 min per token+address via `LISTEN_RETRY_ADDR_RATE`, 30/10 min per token via
+    `LISTEN_RETRY_TOKEN_RATE`) and a durable lifetime ceiling of 5 retries per episode via
+    `LISTEN_RETRY_CEILING` (`src/routes/listen.ts:938-940`).
+  - The listen page (`GET /listen/:token`) and its status poll (`GET /listen/:token/status`) are
+    rate-limited before ANY store work: 60 page loads and 120 status polls per 5 min per
+    (route, address) across independent sliding windows (audio-feed-l11jx, audio-feed-cfogj;
+    constants `LISTEN_PAGE_RATE` and `LISTEN_STATUS_RATE` in `src/routes/listen.ts:646-647`,
+    namespaces `listen_page` and `listen_status`; reproducible check:
+    `grep -nE 'LISTEN_(PAGE|STATUS)_RATE' src/routes/listen.ts`, pinned by
+    `tests/listen_read_limit_test.ts` test "the listen read bounds are the documented numbers, written as literals (audio-feed-cfogj)").
+    By design, the bare `/listen` landing page (`renderListenLanding`, covered in Boundary 4) is
+    unbounded: it is a store-free template render with no token and no tenant reads, so read
+    limits do not cover it.
   - Feed routes (`GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`) are
     rate-limited before ANY store work (audio-feed-oxyp1; `src/compose/feeds.ts:96-139`): dual
     sliding windows in the shared metadata store bound requests per client IP (`FEED_IP_RATE`: 120
@@ -112,7 +122,7 @@ routes, listed separately because the attacker's position there is different.
   (`POST /api/admin/users/:id/rotate-token`), and neither can reach a device that already downloaded
   episodes — see the offline-cache section below (enclosure URLs already syndicated also survive
   feed-token rotation until account suspension, audio-feed-3wenc). The retry ceiling is intentionally small; a
-  persistently failing episode is an owner problem by design (`src/routes/listen.ts:889-892`).
+  persistently failing episode is an owner problem by design (`LISTEN_RETRY_CEILING` in `src/routes/listen.ts:940`).
   Feed reach is bounded by RAW records, not only by publishable ones: `listEpisodePage`'s `limit`
   bounds the underlying scan and the `publishable` filter runs over the page it returns, so once a
   request has found one publishable episode the loop stops after `FEED_MAX_PAGES` x
@@ -245,7 +255,9 @@ routes, listed separately because the attacker's position there is different.
     reddens when a new `sameSiteRead`-gated route appears unclassified.
   - The `/listen` bare path redirects an approved session to its capability URL with
     `cache-control: no-store` and `referrer-policy: no-referrer`, so the token is never written to
-    localStorage (`src/app.ts:200-226`).
+    localStorage (`src/app.ts:200-226`). When unauthenticated, it renders the bare landing page
+    (`renderListenLanding`, `src/routes/listen.ts:1144`), which is unbounded by design (store-free
+    template render, no token, no tenant reads).
 - **Residual (documented, accepted):** a stolen session cookie is a bearer credential until logout
   or `rotate-token`; nothing in code detects a replayed cookie from a second device.
 - **Residual (documented, accepted):** the read wall's absent-both admission is a standing
