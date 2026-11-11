@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join, normalize } from "@std/path";
 
 const CONTRACTS_PATH = new URL("./contracts.json", import.meta.url).pathname;
@@ -551,5 +551,134 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
       hasDirectTest || hasContractEntry,
       `changed file ${file} under scripts/ has no direct test and no entry in .fleet/coverage-contract.json (audio-feed-c0oh9)`,
     );
+  }
+});
+
+Deno.test("docs/speed.md load-bearing figures follow stated derivation rules (audio-feed-0l7tc)", async () => {
+  const content = await Deno.readTextFile(new URL("../docs/speed.md", import.meta.url));
+  const normalized = content.replace(/\r?\n/g, " ");
+
+  // 1. CHECK_TIMEOUT derivation rule
+  const runsMatch = normalized.match(/window holds TEN full-gate runs — ([^—]+) seconds —/);
+  assert(runsMatch !== null, "docs/speed.md must list full-gate runs for CHECK_TIMEOUT derivation");
+  const runs = [...runsMatch[1]!.matchAll(/\b(\d+)\b/g)].map((m) => parseInt(m[1]!, 10));
+  assertEquals(runs.length, 10, "expected 10 full-gate runs in the sample window");
+  const observedMax = Math.max(...runs);
+  assertStringIncludes(
+    normalized,
+    `from the observed max ${observedMax} s`,
+    `prose must state observed max ${observedMax} s`,
+  );
+  const computedHeadroom = Math.ceil(observedMax * 1.1);
+  assertStringIncludes(
+    normalized,
+    `gives ${computedHeadroom} s`,
+    `prose must state ceil(observed_max × 1.1) gives ${computedHeadroom} s`,
+  );
+  const computedDefault = Math.ceil(computedHeadroom / 100) * 100;
+  const defaultMatch = normalized.match(/\*\*CHECK_TIMEOUT default = (\d+) s\*\*/);
+  assert(defaultMatch !== null, "docs/speed.md must define CHECK_TIMEOUT default");
+  assertEquals(
+    parseInt(defaultMatch[1]!, 10),
+    computedDefault,
+    `CHECK_TIMEOUT default must equal ceil(headroom / 100) * 100 (${computedDefault})`,
+  );
+
+  // 2. CHECK_FAST_TIMEOUT bound rule
+  const fastProseMatch = normalized.match(/### Fast-gate bound: `CHECK_FAST_TIMEOUT` is (\d+) s/);
+  assert(fastProseMatch !== null, "docs/speed.md must state CHECK_FAST_TIMEOUT prose bound");
+  const shellDefaultMatch = normalized.match(/CHECK_FAST_TIMEOUT=\$\{CHECK_FAST_TIMEOUT:-(\d+)\}/);
+  assert(
+    shellDefaultMatch !== null,
+    "docs/speed.md must state shell default for CHECK_FAST_TIMEOUT",
+  );
+  const fastProse = parseInt(fastProseMatch[1]!, 10);
+  const shellDefault = parseInt(shellDefaultMatch[1]!, 10);
+  assertEquals(
+    fastProse,
+    shellDefault,
+    "CHECK_FAST_TIMEOUT prose bound must match shell default fallback",
+  );
+  assert(fastProse > 0, "CHECK_FAST_TIMEOUT must be positive");
+
+  // 3. 4x wall time contention rule
+  assertStringIncludes(
+    normalized,
+    "Gate wall time cannot detect a cost regression below roughly 4x",
+    "docs/speed.md must state the 4x wall time detection threshold",
+  );
+  const fourXStart = content.indexOf(
+    "### Gate wall time cannot detect a cost regression below roughly 4x",
+  );
+  assert(fourXStart !== -1, "docs/speed.md must have 4x wall time section");
+  const fourXEnd = content.indexOf("\n### ", fourXStart + 1);
+  const fourXSection = fourXEnd !== -1
+    ? content.slice(fourXStart, fourXEnd)
+    : content.slice(fourXStart);
+
+  const tableRows = [
+    ...fourXSection.matchAll(/\|\s*\d+m\d+s\s*\((\d+)\)\s*\|\s*(\d+)\s*\|/g),
+  ].map((m) => ({
+    testSec: parseInt(m[1]!, 10),
+    runSec: parseInt(m[2]!, 10),
+  }));
+  assert(
+    tableRows.length >= 4,
+    "expected at least 4 runs in the 4x spread table",
+  );
+  const testSecs = tableRows.map((r) => r.testSec);
+  const runSecs = tableRows.map((r) => r.runSec);
+  const testRatio = Math.max(...testSecs) / Math.min(...testSecs);
+  const runRatio = Math.max(...runSecs) / Math.min(...runSecs);
+  assert(
+    testRatio >= 4.0 && testRatio < 5.0,
+    `deno test duration spread ratio must be ~4x, got ${testRatio.toFixed(2)}x`,
+  );
+  assert(
+    runRatio >= 4.0 && runRatio < 5.0,
+    `run_s duration spread ratio must be ~4x, got ${runRatio.toFixed(2)}x`,
+  );
+
+  // 4. Test duration sum extraction rule (audio-feed-t7ri4, if section is present)
+  if (normalized.includes("reproducible full-class extraction rule")) {
+    assertStringIncludes(
+      normalized,
+      "ANSI escape sequences stripped",
+      "extraction rule must require ANSI escape sequences stripped",
+    );
+    assertStringIncludes(
+      normalized,
+      "both milliseconds and seconds formats included",
+      "extraction rule must require both ms and s formats included",
+    );
+    assertStringIncludes(
+      normalized,
+      "failed and ignored tests excluded",
+      "extraction rule must require failed and ignored tests excluded",
+    );
+    assert(
+      normalized.includes("------- output -------") &&
+        normalized.includes("capture blocks included"),
+      "extraction rule must require capture blocks included",
+    );
+    const sumsMatch = normalized.match(
+      /gives \*\*(\d+\.\d+) s for the 287 s log and (\d+\.\d+) s for the 583 s log\*\*/,
+    );
+    if (sumsMatch) {
+      const sum287 = parseFloat(sumsMatch[1]!);
+      const sum583 = parseFloat(sumsMatch[2]!);
+      const ratio = sum583 / sum287;
+      assert(
+        ratio >= 2.2 && ratio <= 2.4,
+        `expected duration sum growth ~2.3x matching wall (got ${ratio.toFixed(2)}x)`,
+      );
+    }
+    if (normalized.includes("80.1 s vs 79.8 s")) {
+      assert(
+        normalized.includes("withdrawn") &&
+          normalized.includes("omitted the captured output blocks"),
+        "withdrawn 80.1 vs 79.8 sum must be explicitly labelled as withdrawn and omitting capture blocks",
+      );
+    }
   }
 });
