@@ -630,55 +630,118 @@ Deno.test("docs/speed.md load-bearing figures follow stated derivation rules (au
   const runSecs = tableRows.map((r) => r.runSec);
   const testRatio = Math.max(...testSecs) / Math.min(...testSecs);
   const runRatio = Math.max(...runSecs) / Math.min(...runSecs);
+  // Only the floor is principled: the section's claim is one-sided (wall time cannot detect a cost
+  // regression BELOW roughly 4x), so a spread under 4x is what contradicts the section. The
+  // ceiling is a sanity bound for the current four-row table, not a claim derived from that
+  // premise -- a wider spread is a measured fact, not a doc inconsistency.
+  const WALL_SPREAD_FLOOR = 4.0;
+  const CURRENT_TABLE_SPREAD_CEILING = 5.0;
+  const clearsDetectionFloor = (ratio: number) =>
+    ratio >= WALL_SPREAD_FLOOR && ratio < CURRENT_TABLE_SPREAD_CEILING;
   assert(
-    testRatio >= 4.0 && testRatio < 5.0,
-    `deno test duration spread ratio must be ~4x, got ${testRatio.toFixed(2)}x`,
+    clearsDetectionFloor(testRatio),
+    `doc self-consistency: deno test duration spread must clear the section's ${WALL_SPREAD_FLOOR}x ` +
+      `detection floor (sanity ceiling ${CURRENT_TABLE_SPREAD_CEILING}x for the current table), ` +
+      `got ${testRatio.toFixed(2)}x`,
   );
   assert(
-    runRatio >= 4.0 && runRatio < 5.0,
-    `run_s duration spread ratio must be ~4x, got ${runRatio.toFixed(2)}x`,
+    clearsDetectionFloor(runRatio),
+    `doc self-consistency: run_s duration spread must clear the section's ${WALL_SPREAD_FLOOR}x ` +
+      `detection floor (sanity ceiling ${CURRENT_TABLE_SPREAD_CEILING}x for the current table), ` +
+      `got ${runRatio.toFixed(2)}x`,
   );
 
-  // 4. Test duration sum extraction rule (audio-feed-t7ri4, if section is present)
-  if (normalized.includes("reproducible full-class extraction rule")) {
-    assertStringIncludes(
-      normalized,
-      "ANSI escape sequences stripped",
-      "extraction rule must require ANSI escape sequences stripped",
+  // 4. Test duration sum extraction rule (audio-feed-t7ri4). The section is located by its bead id
+  // and its numbers are read by shape, so no sentence template can let a wrong pair skip the check.
+  const beadAt = content.indexOf("audio-feed-t7ri4");
+  assert(
+    beadAt !== -1,
+    "docs/speed.md must carry the audio-feed-t7ri4 section (2x wall move on an unchanged suite set)",
+  );
+  const t7ri4HeadingAt = content.lastIndexOf("\n### ", beadAt);
+  assert(t7ri4HeadingAt !== -1, "audio-feed-t7ri4 must sit under its own section heading");
+  const t7ri4NextHeadingAt = content.indexOf("\n### ", t7ri4HeadingAt + 1);
+  const t7ri4Section =
+    (t7ri4NextHeadingAt === -1
+      ? content.slice(t7ri4HeadingAt)
+      : content.slice(t7ri4HeadingAt, t7ri4NextHeadingAt)).replace(/\r?\n/g, " ");
+
+  assertStringIncludes(
+    t7ri4Section,
+    "ANSI escape sequences stripped",
+    "audio-feed-t7ri4 section must state the extraction rule: ANSI escape sequences stripped",
+  );
+  assertStringIncludes(
+    t7ri4Section,
+    "both milliseconds and seconds formats included",
+    "audio-feed-t7ri4 section must state the extraction rule: both ms and s formats included",
+  );
+  assertStringIncludes(
+    t7ri4Section,
+    "failed and ignored tests excluded",
+    "audio-feed-t7ri4 section must state the extraction rule: failed and ignored tests excluded",
+  );
+  assert(
+    t7ri4Section.includes("------- output -------") &&
+      t7ri4Section.includes("capture blocks included"),
+    "audio-feed-t7ri4 section must state the extraction rule: capture blocks included",
+  );
+
+  // The sums are read by shape, not by sentence: every decimal-second value in the section that is
+  // quoted for a run (the value, then the `287 s` / `583 s` run it belongs to, within one short
+  // clause) is a candidate, and the tightest candidate per run is that run's stated sum. The
+  // withdrawn 80.1 / 79.8 pair, if quoted, is quoted for no run, so it cannot satisfy the claim.
+  const SUM_ATTACHMENT_WINDOW = 30;
+  const runRefs = [...t7ri4Section.matchAll(/\b(287|583) s\b/g)].map((m) => ({
+    run: m[1]!,
+    at: m.index!,
+  }));
+  assert(
+    runRefs.length >= 2,
+    "audio-feed-t7ri4 section must name both runs it sums (the 287 s and the 583 s run)",
+  );
+  const durationSums = [...t7ri4Section.matchAll(/\b(\d+\.\d+) s\b/g)].map((m) => ({
+    value: parseFloat(m[1]!),
+    at: m.index!,
+  }));
+  const attachedSums = durationSums
+    .map((candidate) => {
+      const runRef = runRefs.find((ref) =>
+        ref.at > candidate.at && ref.at - candidate.at <= SUM_ATTACHMENT_WINDOW
+      );
+      return runRef ? { ...candidate, run: runRef.run, gap: runRef.at - candidate.at } : null;
+    })
+    .filter((candidate) => candidate !== null)
+    .sort((a, b) => a.gap - b.gap);
+  const claimedSums = new Set<number>();
+  const sumForRun = (run: string) => {
+    const match = attachedSums.find((candidate) =>
+      candidate.run === run && !claimedSums.has(candidate.at)
     );
-    assertStringIncludes(
-      normalized,
-      "both milliseconds and seconds formats included",
-      "extraction rule must require both ms and s formats included",
-    );
-    assertStringIncludes(
-      normalized,
-      "failed and ignored tests excluded",
-      "extraction rule must require failed and ignored tests excluded",
-    );
+    if (match) claimedSums.add(match.at);
+    return match;
+  };
+  const sum287 = sumForRun("287");
+  const sum583 = sumForRun("583");
+  assert(
+    sum287 !== undefined && sum583 !== undefined,
+    "audio-feed-t7ri4 section must quote its per-test duration sums for both the 287 s and the " +
+      "583 s run (a section that quotes no pair fails here; absence is not a skip)",
+  );
+  const sumsRatio = sum583.value / sum287.value;
+  // The section states in-body duration grew ~2.3x under its own rule against a ~2.0x wall move;
+  // 2.2-2.4 is that stated 2.3x with rounding room, and a flat pair (the withdrawn 80.1 / 79.8)
+  // lands nowhere near it.
+  assert(
+    sumsRatio >= 2.2 && sumsRatio <= 2.4,
+    `doc self-consistency: the section's own sums (${sum287.value} s / ${sum583.value} s) must ` +
+      `grow ~2.3x, tracking the ~2.0x wall move it reports; got ${sumsRatio.toFixed(2)}x`,
+  );
+  if (t7ri4Section.includes("80.1 s vs 79.8 s")) {
     assert(
-      normalized.includes("------- output -------") &&
-        normalized.includes("capture blocks included"),
-      "extraction rule must require capture blocks included",
+      t7ri4Section.includes("withdrawn") &&
+        t7ri4Section.includes("omitted the captured output blocks"),
+      "withdrawn 80.1 vs 79.8 sum must be labelled withdrawn and as omitting capture blocks",
     );
-    const sumsMatch = normalized.match(
-      /gives \*\*(\d+\.\d+) s for the 287 s log and (\d+\.\d+) s for the 583 s log\*\*/,
-    );
-    if (sumsMatch) {
-      const sum287 = parseFloat(sumsMatch[1]!);
-      const sum583 = parseFloat(sumsMatch[2]!);
-      const ratio = sum583 / sum287;
-      assert(
-        ratio >= 2.2 && ratio <= 2.4,
-        `expected duration sum growth ~2.3x matching wall (got ${ratio.toFixed(2)}x)`,
-      );
-    }
-    if (normalized.includes("80.1 s vs 79.8 s")) {
-      assert(
-        normalized.includes("withdrawn") &&
-          normalized.includes("omitted the captured output blocks"),
-        "withdrawn 80.1 vs 79.8 sum must be explicitly labelled as withdrawn and omitting capture blocks",
-      );
-    }
   }
 });
