@@ -506,10 +506,37 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       exercising: true,
     },
     {
+      why: "live tests/login_conditional_mediation_test.ts:269 dispatches /login through app.fetch",
+      source: 'const res = await app.fetch(new Request("https://audio.example.com/login"));',
+      exercising: true,
+    },
+    {
       why: "dispatches through the app fetch with a Request whose URL carries its protocol",
       // audio-feed-anqjk: the protocol prefix is the point of this row - `https://` must not
       // truncate the line before the path (tests/login_conditional_mediation_test.ts:269).
       source: 'await fetch(new Request("https://audio.example.com/login"));',
+      exercising: true,
+    },
+    {
+      why: "live tests/passkeys_test.ts:188 dispatches webauthn via victim.com Request URL",
+      paths: ["/.well-known/webauthn"],
+      isLogin: false,
+      source: "const res1 = await fetch(\n" +
+        '  new Request("https://victim.com/.well-known/webauthn", {\n' +
+        '    headers: { host: "victim.com" },\n' +
+        "  }),\n" +
+        ");",
+      exercising: true,
+    },
+    {
+      why: "live tests/passkeys_test.ts:196 dispatches webauthn via attacker-evil.com Request URL",
+      paths: ["/.well-known/webauthn"],
+      isLogin: false,
+      source: "const res2 = await fetch(\n" +
+        '  new Request("https://attacker-evil.com/.well-known/webauthn", {\n' +
+        '    headers: { host: "attacker-evil.com" },\n' +
+        "  }),\n" +
+        ");",
       exercising: true,
     },
     {
@@ -525,10 +552,26 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       exercising: true,
     },
     {
+      why: "mixes a URL literal with a route path after it and an escaped quote inside a string",
+      source: 'const banner = "see \\"https://example.com\\" before login";\n' +
+        'await fetch(new Request("https://audio.example.com/login"));',
+      exercising: true,
+    },
+    {
       why: "only names the route in a comment that follows a protocol URL",
       // audio-feed-anqjk, the other direction: a quote-aware strip must not turn a commented-out
       // dispatch into an exerciser, and the `//` in the URL must not licence reading past it.
       source: '// await fetch(new Request("https://audio.example.com/login"));',
+      exercising: false,
+    },
+    {
+      why: "only names the route in an unrelated string",
+      source: 'const note = "navigate to /login to sign in";',
+      exercising: false,
+    },
+    {
+      why: "only names the route in an unrelated string mixing a URL literal and an escaped quote",
+      source: 'const doc = "see \\"https://example.com\\" before /login is accessed";',
       exercising: false,
     },
     {

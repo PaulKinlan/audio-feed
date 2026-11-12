@@ -72,6 +72,16 @@ Deno.test("blankCommentsOnly does not read a // inside a literal as a comment st
   );
 });
 
+Deno.test("blankCommentsOnly handles escaped quotes inside a string without dropping following code", () => {
+  const source =
+    'const x = "url \\"https://example.test\\""; await fetch(new Request("/books/1"));';
+  assertEquals(
+    blankCommentsOnly(source),
+    source,
+    "escaped quotes must not close the string early and protocol slashes must not truncate the line",
+  );
+});
+
 Deno.test("blankCommentsOnly is not fooled by an apostrophe in prose", () => {
   const source = "// don't dispatch yet\n" + DISPATCH_WITH_PROTOCOL;
   assertEquals(
