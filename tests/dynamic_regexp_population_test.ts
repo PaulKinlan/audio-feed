@@ -133,12 +133,18 @@ Deno.test("audio-feed-thwir: THREAT_MODEL.md register row 10 documents the exact
     "THREAT_MODEL.md must contain dynamic RegExp row",
   );
   assert(
-    threatModel.includes("src/routes/shell.ts:572-573"),
-    "THREAT_MODEL.md row 10 must cite shell.ts anchor",
+    threatModel.includes("`CONFIRM_SHARED_BEGIN`/`CONFIRM_SHARED_END` (`src/routes/shell.ts`)"),
+    "THREAT_MODEL.md row 10 must cite the shell.ts constant anchor",
   );
   assert(
-    threatModel.includes("src/worker/script.ts:153"),
-    "THREAT_MODEL.md row 10 must cite script.ts anchor",
+    threatModel.includes("`FENCE_NAMES` (`src/worker/script.ts`)"),
+    "THREAT_MODEL.md row 10 must cite the script.ts constant anchor",
+  );
+  // audio-feed-0c5uc: the row cites its anchors by CONSTANT, not by line number — a line range in
+  // this row is what drifted to point at the wrong symbol before the sweep.
+  assert(
+    !/src\/(routes\/shell\.ts|worker\/script\.ts):\d+/.test(threatModel),
+    "THREAT_MODEL.md must cite row 10's anchors by constant, not by line number (audio-feed-0c5uc)",
   );
   assert(
     threatModel.includes("3 matches at `34ae917d`"),
