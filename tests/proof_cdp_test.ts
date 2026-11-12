@@ -1369,8 +1369,9 @@ const deliberateClients = [
  * file, and a literal `new URL("../tests/...")` here would derive a self-read relation on
  * tests/proof_cdp_test.ts and move the selection audit for a suite that is already selected by
  * being the changed file. The STALE check below keeps each name honest against the derived
- * population, and the census rejects a name whose socket argument DOES name a DevTools endpoint -
- * otherwise this classification would be a bypass of all four rules, not a record of an exclusion.
+ * population, and the census rejects a name whose socket argument or file text DOES name DevTools
+ * vocabulary - otherwise this classification would be a bypass of all four rules, not a record of
+ * an exclusion.
  */
 const nonDevtoolsClients: { name: string; reason: string }[] = [
   {
@@ -1456,8 +1457,9 @@ Deno.test(
     //      the unbounded await with a nicer comment);
     //   5. NON-DEVTOOLS - not a DevTools client at all, listed in nonDevtoolsClients with a
     //      one-line reason, so the exclusion is explicit and reviewable rather than invisible.
-    //      A name whose socket argument DOES name a DevTools endpoint is rejected: without that,
-    //      this classification would be a bypass of all four rules instead of an exclusion.
+    //      A name whose socket argument or file text DOES name DevTools vocabulary is rejected:
+    //      without that, this classification would be a bypass of all four rules instead of an
+    //      exclusion.
     //
     // A derived file in none of those is NAMED, and the DevTools vocabulary is only a hint in that
     // message: it says which classification the file most likely wants and decides nothing.
@@ -1510,13 +1512,24 @@ Deno.test(
           continue;
         }
         if (nonDevtools.has(name)) {
-          const vocabulary = devtoolsVocabularyIn(args.join("\n"));
-          if (vocabulary.length > 0) {
+          const inArgument = devtoolsVocabularyIn(args.join("\n"));
+          // tests/proof_cdp_test.ts defines DEVTOOLS_VOCABULARY itself; any other file in
+          // nonDevtoolsClients that names DevTools vocabulary anywhere in source is a DevTools
+          // client (or variable-bound one) trying to hide behind a reason string.
+          const inFile = name === "proof_cdp_test.ts" ? [] : devtoolsVocabularyIn(source);
+          if (inArgument.length > 0) {
             misclassified.push(
               `${file.name}: listed as a non-DevTools socket, but its socket argument names ${
-                vocabulary.join(" / ")
+                inArgument.join(" / ")
               } - that is a DevTools client, so bound its reply, annotate it ` +
                 `"${DELIBERATE_ANNOTATION} - <reason>", or prove its own bound`,
+            );
+          } else if (inFile.length > 0) {
+            misclassified.push(
+              `${file.name}: listed as a non-DevTools socket, but the file names ${
+                inFile.join(" / ")
+              } - that is a DevTools client (likely variable-bound), so bound its reply, annotate ` +
+                `it "${DELIBERATE_ANNOTATION} - <reason>", or prove its own bound`,
             );
           } else if ((nonDevtools.get(name) ?? "").trim().length < 10) {
             unreasoned.push(
@@ -1540,16 +1553,15 @@ Deno.test(
       (name) => !derived.includes(name),
     );
 
-    // The walk's own health check, and it counts what the WALK found rather than what survived
-    // classification: a broken readDir must not be reported as a misclassified client, and a
-    // misclassified one must not be reported as a broken walk. 26 is the 25 DevTools clients of
-    // audio-feed-9go2t plus the non-DevTools socket this census derives from its own source; it is
-    // a FLOOR, so a file added tomorrow still clears it.
+    // A low absolute sanity floor for a broken walk (a broken readDir finding nothing or almost
+    // nothing), not a pin on today's population: a handful is enough to prove the walk traversed
+    // the tree, while legitimate client removals clear it. The population itself is enforced in
+    // both directions by the per-file classification (no unlisted additions) and the stale rule
+    // below (no unlisted removals).
     assert(
-      derived.length >= 26,
+      derived.length >= 5,
       `the census derived only ${derived.length} file(s) opening a WebSocket in scripts/ and ` +
-        "tests/; the walk is broken, not the tree (audio-feed-9go2t counted 24 private DevTools " +
-        "clients plus the shared one)",
+        "tests/; the walk is broken, not the tree (expected at least a handful of clients)",
     );
     assert(unclassified.length === 0, unclassified.join("\n"));
     assert(unannotated.length === 0, unannotated.join("\n"));
@@ -1558,8 +1570,8 @@ Deno.test(
     assert(unproven.length === 0, unproven.join("\n"));
     assert(
       stale.length === 0,
-      `these are listed as socket-openers but no longer open one - remove the entry or fix ` +
-        `the matcher: ${stale.join(", ")}`,
+      `the population shrank - recount it and update the list (or fix the matcher): ` +
+        `these are listed as socket-openers but no longer open one: ${stale.join(", ")}`,
     );
   },
 );
