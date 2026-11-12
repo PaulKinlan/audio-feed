@@ -65,8 +65,18 @@
  * OF THAT LINE. The line this limit was MEASURED on (`src/ingest/url.ts`'s
  * protocol-relative test) was rewritten to spell the pair as `[/]{2}`, which matches
  * the same strings with no adjacency, and tests/source_mask_test.ts pins the misread
- * itself under a name that says DECLARED LIMIT. Both limits are named here rather
- * than assumed away.
+ * itself under a name that says DECLARED LIMIT. audio-feed-nl0cn rewrote the four
+ * lines where the blanked tail is a DECISION rather than boilerplate - the
+ * `articleUrl` linkback ternary in `src/routes/listen.ts` and the three `itemLink`
+ * URL tests in `src/ingest/feed.ts` - the same way and for the same reason. THE
+ * SHAPE'S REMAINING FOOTPRINT is stated as a count so it is not left to be guessed:
+ * twelve lines on the tree at the time of writing, all of them regex literals, being
+ * `scripts/test-selection.ts` (five), `scripts/call-arity.ts`, `scripts/cors-repro.ts`,
+ * `scripts/evidence-selection.ts`, `scripts/fast-check.ts`, `src/auth/sessions.ts`,
+ * `src/routes/shell.ts` and `src/assets/listen-landing.js`. Each takes the same
+ * one-line `[/]{2}` rewrite; none is done here because a pattern no census masks
+ * through is a change with its own before/after, not a tidy-up. Both limits are
+ * named here rather than assumed away.
  *
  * THIS IS THE `blankLiterals: true` ARM of blankedSource(). audio-feed-anqjk
  * needed the other arm - comments blanked, literal BODIES kept - and one walk
@@ -107,7 +117,9 @@ export function maskNonCode(source: string): string {
  * the miss direction for a classifier), a template literal nested inside another
  * template's `${...}` is treated as code, and an unterminated literal stops at the
  * newline. The measured instance of the regex limit is an escaped slash pair before
- * the closing delimiter, which blanks the rest of its line (audio-feed-naplt).
+ * the closing delimiter, which blanks the rest of its line (audio-feed-naplt, and
+ * the four sites audio-feed-nl0cn rewrote; the shape's remaining footprint is
+ * counted in the block above).
  */
 export function blankCommentsOnly(source: string): string {
   return blankedSource(source, false);

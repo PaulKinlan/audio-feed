@@ -121,7 +121,7 @@ function childText(node: Element, names: string[]): string | null {
 function itemLink(node: Element, baseUrl: string): string | null {
   // Feedburner / canonical original link
   const origLink = childText(node, ["feedburner:origlink", "origlink"])?.trim();
-  if (origLink && /^https?:\/\//i.test(origLink)) return absolutise(origLink, baseUrl);
+  if (origLink && /^https?:[/]{2}/i.test(origLink)) return absolutise(origLink, baseUrl);
 
   let textLink: string | null = null;
   for (const child of Array.from(node.childNodes)) {
@@ -149,13 +149,13 @@ function itemLink(node: Element, baseUrl: string): string | null {
     const name = element.nodeName.toLowerCase();
     if (name === "media:content" || name === "enclosure" || name === "media:player") {
       const url = element.getAttribute?.("url");
-      if (url && /^https?:\/\//i.test(url)) return absolutise(url, baseUrl);
+      if (url && /^https?:[/]{2}/i.test(url)) return absolutise(url, baseUrl);
     }
   }
 
   // Some feeds only carry a guid that happens to be a URL.
   const guid = childText(node, ["guid", "id"])?.trim();
-  if (guid && /^https?:\/\//i.test(guid)) return guid;
+  if (guid && /^https?:[/]{2}/i.test(guid)) return guid;
   return null;
 }
 
