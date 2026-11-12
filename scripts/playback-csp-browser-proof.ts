@@ -35,9 +35,11 @@ import { wav } from "./listen-harness.ts";
 import { runProof, startInProcessServer, withChrome } from "./proof-helper.ts";
 import { CdpHangBoundExceeded, connectCdp, HANG_BOUND_MS } from "./proof-cdp.ts";
 import {
+  buildPlaybackPlayingMessage,
   PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
   PLAYBACK_ADVANCE_SAMPLE_MS,
   PLAYBACK_ADVANCE_WAIT_MS,
+  type StarvedSampleRead,
 } from "./proof-latency-budgets.ts";
 
 const TOKEN = "playback-proof-token";
@@ -307,9 +309,32 @@ await runProof("playback-proof", async (checker) => {
         // SAMPLE stage: its own budget, because the assertion below reads the page TWICE. Both
         // reads are clamped to what is left of PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS (2 starved polls
         // + the 1.2s window), so neither is silently bounded by the 120s hang ceiling.
+        const sampleStartTime = Date.now();
         const sampleDeadline = Date.now() + PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS;
-        const first = await js(
-          `(() => {
+        let first: {
+          src: unknown;
+          currentTime: number;
+          readyState: number;
+          networkState: number;
+          paused: boolean;
+          errorCode: number | null;
+          errorMessage: string | null;
+          duration: number;
+        } | null = null;
+        let second: {
+          currentTime: number;
+          readyState: number;
+          networkState: number;
+          paused: boolean;
+          errorCode: number | null;
+        } | null = null;
+        let sampleWindowMs = 0;
+        let starvedSampleRead: StarvedSampleRead | null = null;
+
+        let firstRemainingMs = 0;
+        try {
+          first = await js(
+            `(() => {
           const a = document.getElementById("audio");
           return {
             src: a.src, currentTime: a.currentTime, readyState: a.readyState,
@@ -319,28 +344,65 @@ await runProof("playback-proof", async (checker) => {
             duration: a.duration,
           };
         })()`,
-          Math.max(1, sampleDeadline - Date.now()),
-        );
-
-        // A second sample a moment later: currentTime must MOVE, not merely be non-zero. The
-        // window is the sample granularity, clipped only if the first read ate the budget - which
-        // the PLAYING check below then reports by name rather than as a product failure.
-        const sampleWindowMs = Math.max(
-          0,
-          Math.min(PLAYBACK_ADVANCE_SAMPLE_MS, sampleDeadline - Date.now()),
-        );
-        await new Promise((r) => setTimeout(r, sampleWindowMs));
-        const second = await js(
-          `(() => {
-          const a = document.getElementById("audio");
-          return {
-            currentTime: a.currentTime, readyState: a.readyState,
-            networkState: a.networkState, paused: a.paused,
-            errorCode: a.error ? a.error.code : null,
+            firstRemainingMs = Math.max(1, sampleDeadline - Date.now()),
+          );
+        } catch (err) {
+          // Only the hang bound is a budget signal here; a throwing expression is a bug and
+          // still escapes unwrapped, unretried (the same rule the START loop follows).
+          if (!(err instanceof CdpHangBoundExceeded)) throw err;
+          starvedSampleRead = {
+            read: "first",
+            elapsedMs: Date.now() - sampleStartTime,
+            remainingMs: firstRemainingMs,
           };
-        })()`,
-          Math.max(1, sampleDeadline - Date.now()),
-        );
+        }
+
+        if (!starvedSampleRead) {
+          // A second sample a moment later: currentTime must MOVE, not merely be non-zero. The
+          // window is the sample granularity, clipped only if the first read ate the budget - which
+          // the PLAYING check below then reports by name rather than as a product failure.
+          sampleWindowMs = Math.max(
+            0,
+            Math.min(PLAYBACK_ADVANCE_SAMPLE_MS, sampleDeadline - Date.now()),
+          );
+          await new Promise((r) => setTimeout(r, sampleWindowMs));
+          let secondRemainingMs = 0;
+          try {
+            second = await js(
+              `(() => {
+          const a = document.getElementById("audio");
+              return {
+                currentTime: a.currentTime, readyState: a.readyState,
+                networkState: a.networkState, paused: a.paused,
+                errorCode: a.error ? a.error.code : null,
+              };
+            })()`,
+              secondRemainingMs = Math.max(1, sampleDeadline - Date.now()),
+            );
+          } catch (err) {
+            if (!(err instanceof CdpHangBoundExceeded)) throw err;
+            starvedSampleRead = {
+              read: "second",
+              elapsedMs: Date.now() - sampleStartTime,
+              remainingMs: secondRemainingMs,
+            };
+          }
+        }
+
+        if (starvedSampleRead) {
+          check(
+            "the audio element reached a PLAYING state: playback started inside the latency budget, currentTime advanced and readyState >= 2",
+            false,
+            buildPlaybackPlayingMessage({
+              advanced,
+              startPolls,
+              starvedStartPollMs,
+              sampleWindowMs,
+              starvedSampleRead,
+            }),
+          );
+          return;
+        }
 
         const mediaEvents = await js(`JSON.stringify(window.__mediaEvents ?? [])`);
         const violations = await js(`JSON.stringify(window.__cspViolations ?? [])`);
@@ -353,15 +415,15 @@ await runProof("playback-proof", async (checker) => {
         );
 
         const mediaServed = mediaRequests.filter((r) => r.path.includes(audioKey));
-        const currentTimeAdvanced = second.currentTime - first.currentTime > 0.25;
-        const elementError = first.errorCode ?? second.errorCode;
+        const currentTimeAdvanced = second!.currentTime - first!.currentTime > 0.25;
+        const elementError = first!.errorCode ?? second!.errorCode;
 
         check(
           "the browser followed the 302 to the cross-origin store origin (the media server was asked)",
           mediaServed.length > 0,
           `${mediaServed.length} request(s) to ${MEDIA_ORIGIN}, first=${
             mediaServed[0] ? JSON.stringify(mediaServed[0]) : "(none)"
-          }; element src ${String(first.src).replace(`${BASE}`, "")}`,
+          }; element src ${String(first!.src).replace(`${BASE}`, "")}`,
         );
 
         check(
@@ -382,25 +444,22 @@ await runProof("playback-proof", async (checker) => {
 
         check(
           "the audio element reached a PLAYING state: playback started inside the latency budget, currentTime advanced and readyState >= 2",
-          advanced && currentTimeAdvanced && second.readyState >= 2,
-          `start observed inside ${PLAYBACK_ADVANCE_WAIT_MS}ms after ${startPolls} poll(s): ${advanced}` +
-            (starvedStartPollMs
-              ? ` (the final poll's evaluate got no answer in the ${starvedStartPollMs}ms left of ` +
-                "that budget, so the host starved the poll rather than the page refusing to start)"
-              : "") +
-            `; sample window ${sampleWindowMs}ms of the ${PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS}ms ` +
-            `budget; currentTime ${first.currentTime.toFixed(3)}s -> ${
-              second.currentTime.toFixed(3)
-            }s (+${
-              (second.currentTime - first.currentTime).toFixed(3)
-            }s), readyState ${first.readyState} -> ${second.readyState}, networkState ${second.networkState}, paused ${second.paused}`,
+          advanced && currentTimeAdvanced && second!.readyState >= 2,
+          buildPlaybackPlayingMessage({
+            advanced,
+            startPolls,
+            starvedStartPollMs,
+            sampleWindowMs,
+            first: first!,
+            second: second!,
+          }),
         );
 
         // Printed unconditionally so the failing mutation run carries the same evidence.
         console.log(
-          `EVIDENCE readyState=${first.readyState}->${second.readyState} ` +
-            `currentTime=${first.currentTime.toFixed(3)}->${second.currentTime.toFixed(3)} ` +
-            `duration=${first.duration} paused=${second.paused} mediaRequests=${
+          `EVIDENCE readyState=${first!.readyState}->${second!.readyState} ` +
+            `currentTime=${first!.currentTime.toFixed(3)}->${second!.currentTime.toFixed(3)} ` +
+            `duration=${first!.duration} paused=${second!.paused} mediaRequests=${
               JSON.stringify(mediaRequests.slice(0, 4))
             } cspViolations=${violations} events=${String(mediaEvents).slice(0, 400)}`,
         );

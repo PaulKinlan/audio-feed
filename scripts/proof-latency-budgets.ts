@@ -104,3 +104,70 @@ const PRODUCT_BUDGETS: Record<string, number> = {
 for (const [name, budgetMs] of Object.entries(PRODUCT_BUDGETS)) {
   assertBudgetBelowHang(name, budgetMs);
 }
+
+/** Which sample evaluate starved when reading playback state. */
+export type StarvedSampleRead = {
+  read: "first" | "second";
+  elapsedMs: number;
+  remainingMs: number;
+};
+
+/**
+ * Build the message for the PLAYING check in playback-csp-browser-proof.ts (audio-feed-wwvny).
+ *
+ * When neither read starved, formats start observation, sample window, and currentTime progression.
+ * When a sample read starved, names the sample window and budget, which read starved (first or
+ * second currentTime), the elapsed time, and the remaining budget it got no answer in.
+ */
+export function buildPlaybackPlayingMessage(options: {
+  advanced: boolean;
+  startPolls: number;
+  starvedStartPollMs?: number;
+  sampleWindowMs: number;
+  starvedSampleRead?: StarvedSampleRead | null;
+  first?: {
+    currentTime: number;
+    readyState: number;
+  } | null;
+  second?: {
+    currentTime: number;
+    readyState: number;
+    networkState: number;
+    paused: boolean;
+  } | null;
+}): string {
+  const {
+    advanced,
+    startPolls,
+    starvedStartPollMs = 0,
+    sampleWindowMs,
+    starvedSampleRead = null,
+    first = null,
+    second = null,
+  } = options;
+
+  let msg =
+    `start observed inside ${PLAYBACK_ADVANCE_WAIT_MS}ms after ${startPolls} poll(s): ${advanced}` +
+    (starvedStartPollMs
+      ? ` (the final poll's evaluate got no answer in the ${starvedStartPollMs}ms left of ` +
+        "that budget, so the host starved the poll rather than the page refusing to start)"
+      : "") +
+    `; sample window ${sampleWindowMs}ms of the ${PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS}ms budget`;
+
+  if (starvedSampleRead) {
+    const whichRead = starvedSampleRead.read === "first"
+      ? "first currentTime"
+      : "second currentTime";
+    msg += `: the ${whichRead} read got no answer in the ${starvedSampleRead.remainingMs}ms ` +
+      `left of that budget (${starvedSampleRead.elapsedMs}ms elapsed), so the host starved the sample rather than playback failing to advance`;
+    return msg;
+  }
+
+  if (first && second) {
+    msg += `; currentTime ${first.currentTime.toFixed(3)}s -> ${second.currentTime.toFixed(3)}s ` +
+      `(+${(second.currentTime - first.currentTime).toFixed(3)}s), ` +
+      `readyState ${first.readyState} -> ${second.readyState}, networkState ${second.networkState}, paused ${second.paused}`;
+  }
+
+  return msg;
+}

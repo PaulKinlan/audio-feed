@@ -57,6 +57,7 @@ import {
 import {
   assertBudgetBelowHang,
   BOOTSTRAP_REDIRECT_LATENCY_MS,
+  buildPlaybackPlayingMessage,
   PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
   PLAYBACK_ADVANCE_SAMPLE_MS,
   PLAYBACK_ADVANCE_WAIT_MS,
@@ -571,6 +572,71 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         }`,
       );
 
+      // 13b. Sample stage starvation under mock DevTools (audio-feed-wwvny).
+      // A simulated START poll succeeds immediately ("poll_counter"). The subsequent sample
+      // read evaluate is bounded by the remaining budget and never answered ("never_answers").
+      // (a) WITH the catch: CdpHangBoundExceeded is caught and formatted by buildPlaybackPlayingMessage,
+      //     failing the row with the message naming the sample window, elapsed time and remaining budget.
+      // (b) WITHOUT the catch: the evaluate throws raw CdpHangBoundExceeded uncaught.
+      const sampleClock = new FakeTime();
+      let caughtSampleSettled = false;
+      let caughtRowMessage: string | null = null;
+      let uncaughtRawError: unknown = null;
+      try {
+        // (a) With catch:
+        const sampleBudgetMs = 150;
+        const sampleStartTime = Date.now();
+        void (async () => {
+          try {
+            await client.js("never_answers", sampleBudgetMs);
+          } catch (err) {
+            if (!(err instanceof CdpHangBoundExceeded)) throw err;
+            caughtRowMessage = buildPlaybackPlayingMessage({
+              advanced: true,
+              startPolls: 1,
+              sampleWindowMs: 0,
+              starvedSampleRead: {
+                read: "first",
+                elapsedMs: Date.now() - sampleStartTime,
+                remainingMs: sampleBudgetMs,
+              },
+            });
+          } finally {
+            caughtSampleSettled = true;
+          }
+        })();
+        await sampleClock.tickAsync(sampleBudgetMs);
+        await sampleClock.runMicrotasks();
+      } finally {
+        sampleClock.restore();
+      }
+      assert(caughtSampleSettled, "the caught sample read evaluate must settle at its bound");
+      assert(caughtRowMessage !== null, "the caught sample read must generate the row message");
+      assertStringIncludes(
+        caughtRowMessage!,
+        "sample window 0ms of the 17200ms budget: the first currentTime read got no answer in the 150ms left of that budget (150ms elapsed)",
+      );
+
+      // (b) Without catch: the raw evaluate escapes as CdpHangBoundExceeded:
+      const rawClock = new FakeTime();
+      try {
+        void client.js("never_answers", 150).catch((err: unknown) => {
+          uncaughtRawError = err;
+        });
+        await rawClock.tickAsync(150);
+        await rawClock.runMicrotasks();
+      } finally {
+        rawClock.restore();
+      }
+      assert(
+        uncaughtRawError instanceof CdpHangBoundExceeded,
+        "without the catch, the starved evaluate must reject as raw CdpHangBoundExceeded",
+      );
+      assertStringIncludes(
+        (uncaughtRawError as Error).message,
+        "js: the evaluate of `never_answers` got no answer in 150ms",
+      );
+
       // 14. The swept proofs carry NO private copy of the client any more (audio-feed-go4le). A
       // private `js()` is how the unbounded evaluate came back the first time: the copy sent
       // `Runtime.evaluate` with no timeout and no race, so a main thread that never answered had
@@ -721,6 +787,81 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         ),
         "the PLAYING check must require `advanced`, so a start slower than the budget reds the row",
       );
+
+      // 15d. The sample stage catches CdpHangBoundExceeded and reports which read starved
+      // (first or second currentTime), the elapsed time, and the remaining budget, failing
+      // the row with that message rather than letting a raw hang-bound error escape (audio-feed-wwvny).
+      // Browser-side throwing errors must still escape unwrapped.
+      assert(
+        playbackProof.includes("if (!(err instanceof CdpHangBoundExceeded)) throw err;"),
+        "the sample stage catch must re-throw any non-CdpHangBoundExceeded error unwrapped",
+      );
+      assert(
+        playbackProof.includes('read: "first",') &&
+          playbackProof.includes('read: "second",'),
+        "the sample stage must identify whether the first or second read starved",
+      );
+
+      // Unit-level rows over the message builder (audio-feed-wwvny).
+      // First read starved:
+      const firstStarvedMsg = buildPlaybackPlayingMessage({
+        advanced: true,
+        startPolls: 2,
+        sampleWindowMs: 0,
+        starvedSampleRead: {
+          read: "first",
+          elapsedMs: 17_200,
+          remainingMs: 17_200,
+        },
+      });
+      assertStringIncludes(
+        firstStarvedMsg,
+        "sample window 0ms of the 17200ms budget",
+      );
+      assertStringIncludes(
+        firstStarvedMsg,
+        "the first currentTime read got no answer in the 17200ms left of that budget (17200ms elapsed)",
+      );
+      assertStringIncludes(
+        firstStarvedMsg,
+        "so the host starved the sample rather than playback failing to advance",
+      );
+
+      // Second read starved:
+      const secondStarvedMsg = buildPlaybackPlayingMessage({
+        advanced: true,
+        startPolls: 1,
+        sampleWindowMs: 1_200,
+        starvedSampleRead: {
+          read: "second",
+          elapsedMs: 9_200,
+          remainingMs: 8_000,
+        },
+      });
+      assertStringIncludes(
+        secondStarvedMsg,
+        "sample window 1200ms of the 17200ms budget",
+      );
+      assertStringIncludes(
+        secondStarvedMsg,
+        "the second currentTime read got no answer in the 8000ms left of that budget (9200ms elapsed)",
+      );
+      assertStringIncludes(
+        secondStarvedMsg,
+        "so the host starved the sample rather than playback failing to advance",
+      );
+
+      // Neither read starved (healthy progression):
+      const healthyMsg = buildPlaybackPlayingMessage({
+        advanced: true,
+        startPolls: 2,
+        sampleWindowMs: 1_200,
+        first: { currentTime: 0.02, readyState: 4 },
+        second: { currentTime: 1.16, readyState: 4, networkState: 1, paused: false },
+      });
+      assertStringIncludes(healthyMsg, "sample window 1200ms of the 17200ms budget");
+      assertStringIncludes(healthyMsg, "currentTime 0.020s -> 1.160s (+1.140s)");
+      assertStringIncludes(healthyMsg, "readyState 4 -> 4, networkState 1, paused false");
       for (const [swept, bootstrapProof] of sweptProofs) {
         assertStringIncludes(bootstrapProof, "BOOTSTRAP_REDIRECT_LATENCY_MS,");
         assert(
