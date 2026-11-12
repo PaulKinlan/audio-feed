@@ -16,7 +16,7 @@
  * - `HANG_BOUND_MS = 15 x` that floor = 120s. A page that never answers still fails, in two
  *   minutes instead of eight, and it fails by name instead of waiting for the lane's killer.
  *
- * BOTH helpers default to `HANG_BOUND_MS`, including `until()`, whose old default was the
+ * ALL THREE helpers default to `HANG_BOUND_MS`, including `until()`, whose old default was the
  * un-derived 8s. That default is what a caller who states no budget inherits, and on this host
  * it is a false-failure generator: it fires while a healthy page is merely starved. Changing it
  * is a behaviour change ONLY for a call site that omits the third argument, and an arity census
@@ -25,6 +25,18 @@
  * 3 in `tooltip-top-layer-browser-proof.ts` and 1 in `tests/anchor_positioning_test.ts` all pass
  * an explicit 15x-derived bound, and `tests/proof_cdp_test.ts` passes explicit 500/150ms bounds.
  * No existing wait moves by a millisecond; the default only decides what the next caller inherits.
+ *
+ * `cdp()` ITSELF is bounded too (audio-feed-54f8j): it used to await a promise only a WebSocket
+ * reply could settle, so `Page.navigate`, `Page.captureScreenshot` and `WebAuthn.*` were unbounded
+ * for whichever proof awaited them - a browser that never answered parked that proof until the
+ * lane's killer arrived (measured: a proof printed 11/11 PASS and never exited). The bound is now
+ * INSIDE the client rather than at each of the 280-odd raw call sites, because a call site cannot
+ * forget a bound it never has to write. It carries the same `HANG_BOUND_MS` default as the other
+ * two, and a caller whose command is genuinely slow opts into a longer one with the third argument
+ * (`cdp("Page.navigate", { url }, 2 * HANG_BOUND_MS)`), the same trailing-budget shape `js()` and
+ * `until()` already use. No per-method table: `Page.navigate` resolves on navigation COMMIT, so
+ * the derived 120s already absorbs a host starved for 8s fifteen times over, and inventing a
+ * second set of numbers nobody measured is how a bound becomes a flake.
  */
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -73,10 +85,93 @@ function renderExpression(expression: string): string {
     : `${oneLine.slice(0, limit)}... (${oneLine.length} chars in full)`;
 }
 
+/**
+ * Reduce one stack frame to `scripts/file.ts:line:col`, or "" if it holds no position.
+ *
+ * A gate log is read line by line, and the question a hung command raises is "which proof step
+ * sent it": an absolute URL to a worktree path answers that only after the reader strips it.
+ */
+function renderFrame(frame: string): string {
+  const match = frame.match(/((?:scripts|tests)\/[^\s)]+:\d+:\d+)/) ??
+    frame.match(/([^\s/()]+:\d+:\d+)/);
+  return match?.[1] ?? "";
+}
+
+/**
+ * Where a CDP command was sent from, for the failure message: `scripts/x-proof.ts:112:9`.
+ *
+ * `omit` is the framing function to leave out of the trace - the client's own `cdp()` - so what
+ * is reported is the CALLER's line rather than the wrapper that bounded the wait. Frames inside
+ * this file are skipped for the same reason: when `js()` sends its single evaluate through
+ * `cdp()`, the honest answer is the proof line that asked for the evaluate, not `js()`'s body.
+ * Returns "" when no frame is readable, and the message then simply omits the clause.
+ */
+export function cdpCallSite(omit: (...args: never[]) => unknown): string {
+  const holder: { stack?: string } = {};
+  const capture = (Error as unknown as {
+    captureStackTrace?: (target: object, constructorOpt?: (...args: never[]) => unknown) => void;
+  }).captureStackTrace;
+  if (capture) capture(holder, omit);
+  else holder.stack = new Error().stack;
+  for (const frame of (holder.stack ?? "").split("\n").slice(1)) {
+    const site = renderFrame(frame);
+    if (site && !site.startsWith("scripts/proof-cdp.ts")) return site;
+  }
+  return "";
+}
+
+/** The one spelling of "this CDP reply never arrived" (audio-feed-54f8j). */
+function replyHangMessage(method: string, timeoutMs: number, sentFrom: string): string {
+  return (
+    `cdp: the \`${method}\` reply never arrived within ${timeoutMs}ms - the hang bound ` +
+    `in force (${HANG_BOUND_MS}ms by default, 15 x the ${MEASURED_STARVED_POLL_MS}ms ` +
+    `measured starved-poll floor, audio-feed-6gst1)` +
+    (sentFrom ? `, for the command sent at ${sentFrom}` : "") +
+    `. This is a HANG bound on ONE CDP ` +
+    `reply, not a latency bound: the command was sent exactly once and the browser ` +
+    `never answered it, so the browser's main thread (or the DevTools socket) stalled ` +
+    `rather than the page being slow.`
+  );
+}
+
+/**
+ * Bound ONE reply from a client's own `cdp()` and name the proof line that sent it.
+ *
+ * Exported because proofs still carry private DevTools clients (`ws.send` + a pending map) whose
+ * reply wait is the same unbounded promise; `omit` lets each of those bound its OWN `cdp()` at
+ * the single place its call sites go through, which is what stops a new call site forgetting.
+ */
+export function boundedCdpReply<T>(
+  method: string,
+  reply: Promise<T>,
+  omit: (...args: never[]) => unknown,
+  timeoutMs = HANG_BOUND_MS,
+): Promise<T> {
+  // Captured NOW, while the sender's frame is still on the stack; the timer callback below runs
+  // with a stack that names nothing useful.
+  const sentFrom = cdpCallSite(omit);
+  let timer: ReturnType<typeof setTimeout> | 0 = 0;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new CdpHangBoundExceeded(replyHangMessage(method, timeoutMs, sentFrom))),
+      timeoutMs,
+    );
+  });
+  return Promise.race([reply, expired]).finally(() => clearTimeout(timer));
+}
+
 export interface CdpClient {
   ws: WebSocket;
+  /**
+   * Send ONE command and wait for its reply, bounded by `timeoutMs`.
+   *
+   * The bound is not optional: a call site that states no budget inherits `HANG_BOUND_MS`, so a
+   * new proof cannot be written unbounded by forgetting to pass one. Pass a LARGER budget only
+   * for a command that is genuinely slow (see the module comment); a shorter one keeps a cheap
+   * step cheap when the row is already under its own deadline.
+   */
   // deno-lint-ignore no-explicit-any
-  cdp: (method: string, params?: Record<string, unknown>) => Promise<any>;
+  cdp: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<any>;
   // deno-lint-ignore no-explicit-any
   js: (expression: string, timeoutMs?: number) => Promise<any>;
   until: (expr: string, desc: string, timeoutMs?: number) => Promise<void>;
@@ -100,11 +195,26 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
     }
   });
 
-  // deno-lint-ignore no-explicit-any
-  async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  async function cdp(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = HANG_BOUND_MS,
+    // deno-lint-ignore no-explicit-any
+  ): Promise<any> {
     const id = ++nextId;
     ws.send(JSON.stringify({ id, method, params }));
-    const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+    const reply = new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+    let msg: { result?: unknown; error?: unknown };
+    try {
+      // `omit: cdp` so a reply that never comes names the proof line that sent the command, not
+      // this wrapper (audio-feed-54f8j). The command above was sent exactly once either way.
+      msg = await boundedCdpReply(method, reply, cdp, timeoutMs);
+    } catch (err) {
+      // The reply will never be dispatched: forget the entry instead of holding it for the life
+      // of the client, so a stalled command cannot accumulate map entries across a hung sweep.
+      pending.delete(id);
+      throw err;
+    }
     if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
     return msg.result;
   }
@@ -220,6 +330,10 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
  * in the SAME derived bound js() uses and rejects with the SAME class, so a caller's catch block
  * can treat a starved screenshot exactly like a starved evaluate. The command itself is sent
  * exactly once by the caller; this only bounds the wait for its answer.
+ *
+ * The shared client's own `cdp()` no longer needs this wrapper - it bounds itself - but proofs
+ * that build a reply promise by hand, and callers that already race their own deadline, still
+ * reach for it: it is one spelling of the bound, so both paths fail with one message.
  */
 export async function withHangBound<T>(
   what: string,
@@ -231,33 +345,13 @@ export async function withHangBound<T>(
   what: string,
   timeoutMs?: number,
 ): Promise<T>;
-export async function withHangBound<T>(
+export function withHangBound<T>(
   first: string | Promise<T>,
   second: Promise<T> | string,
   timeoutMs = HANG_BOUND_MS,
 ): Promise<T> {
   const what = typeof first === "string" ? first : (second as string);
   const reply = (typeof first === "string" ? second : first) as Promise<T>;
-  let timer: ReturnType<typeof setTimeout> | 0 = 0;
-  const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new CdpHangBoundExceeded(
-            `cdp: the \`${what}\` reply never arrived within ${timeoutMs}ms - the hang bound ` +
-              `in force (${HANG_BOUND_MS}ms by default, 15 x the ${MEASURED_STARVED_POLL_MS}ms ` +
-              `measured starved-poll floor, audio-feed-6gst1). This is a HANG bound on ONE CDP ` +
-              `reply, not a latency bound: the command was sent exactly once and the browser ` +
-              `never answered it, so the browser's main thread (or the DevTools socket) stalled ` +
-              `rather than the page being slow.`,
-          ),
-        ),
-      timeoutMs,
-    );
-  });
-  try {
-    return await Promise.race([reply, expired]);
-  } finally {
-    clearTimeout(timer);
-  }
+  // `omit: withHangBound` so the message names the line that sent the command, not this wrapper.
+  return boundedCdpReply(what, reply, withHangBound, timeoutMs);
 }

@@ -860,3 +860,278 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "proof-cdp: cdp() bounds its OWN reply - a command the browser never answers fails at the shared default naming the method and the line that sent it, with the command sent once",
+  async () => {
+    // WHY THIS ROW EXISTS (audio-feed-54f8j): cdp() awaited a promise only a WebSocket reply could
+    // settle, with no timer. Every raw command a proof sends - Page.navigate,
+    // Page.captureScreenshot, WebAuthn.* - was therefore unbounded for the proof that awaited it,
+    // and a browser that never answered parked the proof until the lane's killer arrived. The
+    // bound now lives INSIDE the client, so this row is about the DEFAULT a call site inherits by
+    // saying nothing: it must fire at HANG_BOUND_MS, not never, and the message must name the
+    // command and the proof line that sent it rather than the wrapper that bounded it.
+    //
+    // Driven on the FAKE clock for the same reason as the js()/until() defaults above: a row that
+    // waited out a two-minute hang would cost a gate slot for nothing, and host promptness is not
+    // a property of the bound.
+    const ac = new AbortController();
+    let serverPort = 0;
+    const silent = new Map<string, number>();
+    let resolveListening!: () => void;
+    const listening = new Promise<void>((resolve) => resolveListening = resolve);
+    const server = Deno.serve({
+      port: 0,
+      signal: ac.signal,
+      onListen: ({ port }) => {
+        serverPort = port;
+        resolveListening();
+      },
+    }, (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/json/list") {
+        return new Response(
+          JSON.stringify([
+            { type: "page", webSocketDebuggerUrl: `ws://127.0.0.1:${serverPort}/page` },
+          ]),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/page") {
+        const { socket, response } = Deno.upgradeWebSocket(req);
+        socket.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.method === "Page.enable") {
+            socket.send(JSON.stringify({ id: msg.id, result: { enabled: true } }));
+            return;
+          }
+          // Counted and deliberately UNANSWERED: the reply never comes, which is the hang.
+          silent.set(msg.method, (silent.get(msg.method) ?? 0) + 1);
+        };
+        return response;
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    try {
+      await listening;
+      const client = await connectCdp({ port: serverPort });
+      try {
+        // 1. NO budget stated: the inherited default is HANG_BOUND_MS.
+        const defaultClock = new FakeTime();
+        let defaultError: unknown = null;
+        let defaultSettled = false;
+        let defaultElapsed = -1;
+        try {
+          const start = Date.now();
+          void client.cdp("Page.captureScreenshot").then(
+            () => {
+              defaultSettled = true;
+            },
+            (err: unknown) => {
+              defaultSettled = true;
+              defaultError = err;
+            },
+          );
+          await defaultClock.tickAsync(HANG_BOUND_MS);
+          await defaultClock.runMicrotasks();
+          defaultElapsed = Date.now() - start;
+        } finally {
+          defaultClock.restore();
+        }
+        assert(
+          defaultSettled,
+          "a cdp() call with no budget must settle at HANG_BOUND_MS: the screenshot was never " +
+            "answered, so the race had to have settled - it was still pending after the default",
+        );
+        assertEquals(
+          defaultElapsed,
+          HANG_BOUND_MS,
+          "cdp() must inherit HANG_BOUND_MS, not wait for ever and not a fixed 8s",
+        );
+        assert(
+          defaultError instanceof CdpHangBoundExceeded,
+          `a never-answered command must reject as CdpHangBoundExceeded, got ${
+            String(defaultError)
+          }`,
+        );
+        const message = (defaultError as Error).message;
+        // Names the METHOD ...
+        assertStringIncludes(message, "cdp: the `Page.captureScreenshot` reply never arrived");
+        assertStringIncludes(message, `within ${HANG_BOUND_MS}ms`);
+        // ... and the CALL SITE: this file, at a line, never the wrapper in scripts/proof-cdp.ts.
+        assert(
+          /tests\/proof_cdp_test\.ts:\d+:\d+/u.test(message),
+          `the failure must name the proof line that sent the command, got: ${message}`,
+        );
+        assert(
+          !message.includes("scripts/proof-cdp.ts"),
+          `the failure must name the call site, not the wrapper that bounded it: ${message}`,
+        );
+
+        // 2. A CALLER OPTS INTO A LONGER BOUND (the genuinely-slow method case, e.g.
+        // Page.navigate): the budget it states is the budget that fires, and it is still one
+        // command, named.
+        const slowClock = new FakeTime();
+        let slowError: unknown = null;
+        let slowSettled = false;
+        let slowElapsed = -1;
+        const slowBudgetMs = 2 * HANG_BOUND_MS;
+        try {
+          const start = Date.now();
+          void client.cdp("Page.navigate", { url: "http://127.0.0.1:1/never" }, slowBudgetMs).then(
+            () => {
+              slowSettled = true;
+            },
+            (err: unknown) => {
+              slowSettled = true;
+              slowError = err;
+            },
+          );
+          await slowClock.tickAsync(slowBudgetMs);
+          await slowClock.runMicrotasks();
+          slowElapsed = Date.now() - start;
+        } finally {
+          slowClock.restore();
+        }
+        assert(
+          slowSettled,
+          "an explicitly stated budget must be the deadline in force: the navigate was never " +
+            "answered, so the race had to have settled",
+        );
+        assertEquals(
+          slowElapsed,
+          slowBudgetMs,
+          "the bound must fire at the budget the caller stated, not at the shared default",
+        );
+        assert(
+          slowError instanceof CdpHangBoundExceeded,
+          `a never-answered navigate must reject as CdpHangBoundExceeded, got ${String(slowError)}`,
+        );
+        assertStringIncludes(
+          (slowError as Error).message,
+          `cdp: the \`Page.navigate\` reply never arrived within ${slowBudgetMs}ms`,
+        );
+
+        // 3. The client still works after a bound fired, and each command was sent exactly once -
+        // a bound, not a retry loop, and not a dead socket.
+        await client.cdp("Page.enable");
+        assertEquals(silent.get("Page.captureScreenshot"), 1);
+        assertEquals(silent.get("Page.navigate"), 1);
+
+        // 4. THE WIRING, pinned as a source assertion the way this file already pins the other
+        // two defaults: the bound is a SIGNATURE default on cdp(), so a new call site cannot be
+        // written unbounded by omission. Reading the file is what makes that checkable without
+        // waiting out a two-minute hang.
+        const sharedSource = await Deno.readTextFile(
+          new URL("../scripts/proof-cdp.ts", import.meta.url),
+        );
+        assert(
+          /params: Record<string, unknown> = \{\},\s*timeoutMs = HANG_BOUND_MS,/u.test(
+            sharedSource,
+          ),
+          "cdp() must carry `timeoutMs = HANG_BOUND_MS` as a signature default",
+        );
+        assertStringIncludes(
+          sharedSource,
+          "msg = await boundedCdpReply(method, reply, cdp, timeoutMs)",
+        );
+      } finally {
+        client.close();
+      }
+    } finally {
+      ac.abort();
+      await server.finished;
+    }
+  },
+);
+
+Deno.test(
+  "proof-cdp: REAL CLOCK - cdp() settles as a named CdpHangBoundExceeded naming the method when the browser never answers, instead of hanging the row",
+  async () => {
+    // This is the reproduction the bug was filed from: a browser that never answers a raw
+    // command used to park the proof past its last PASS (measured: 11/11 PASS printed and never
+    // exiting). The bound is stated SMALL here because the property is that the wait ENDS, and
+    // the row carries its own guard deadline so a fix whose timer never fires fails the row in
+    // bounded time rather than hanging the runner. `deno test` for this file is run under a hard
+    // `timeout` for the same reason.
+    const boundMs = 400;
+    const guardMs = 2_000;
+    const ac = new AbortController();
+    let serverPort = 0;
+    let silentCount = 0;
+    let resolveListening!: () => void;
+    const listening = new Promise<void>((resolve) => resolveListening = resolve);
+    const server = Deno.serve({
+      port: 0,
+      signal: ac.signal,
+      onListen: ({ port }) => {
+        serverPort = port;
+        resolveListening();
+      },
+    }, (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/json/list") {
+        return new Response(
+          JSON.stringify([
+            { type: "page", webSocketDebuggerUrl: `ws://127.0.0.1:${serverPort}/page` },
+          ]),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/page") {
+        const { socket, response } = Deno.upgradeWebSocket(req);
+        socket.onmessage = () => {
+          // Received and never answered: exactly a screenshot the browser's main thread never
+          // serves. Nothing but the cdp() bound can end the wait.
+          silentCount++;
+        };
+        return response;
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    let guardTimer: ReturnType<typeof setTimeout> | 0 = 0;
+    try {
+      await listening;
+      const client = await connectCdp({ port: serverPort });
+      try {
+        const startedAt = Date.now();
+        const err = await Promise.race([
+          client.cdp("Page.captureScreenshot", { format: "png" }, boundMs),
+          new Promise<void>((resolve) => {
+            guardTimer = setTimeout(resolve, guardMs);
+          }).then(() => {
+            throw new Error(
+              `the row never settled: cdp()'s ${boundMs}ms bound did not fire within ${guardMs}ms`,
+            );
+          }),
+        ]).then(() => null, (e: unknown) => e);
+        const elapsed = Date.now() - startedAt;
+        assert(
+          err instanceof CdpHangBoundExceeded,
+          `a never-answered command must SETTLE as CdpHangBoundExceeded (elapsed ${elapsed}ms), ` +
+            `got ${String(err)}`,
+        );
+        const message = (err as Error).message;
+        assertStringIncludes(message, "`Page.captureScreenshot` reply never arrived");
+        assertStringIncludes(message, `within ${boundMs}ms`);
+        assert(
+          /tests\/proof_cdp_test\.ts:\d+:\d+/u.test(message),
+          `the failure must name the proof line that sent the command, got: ${message}`,
+        );
+        assertEquals(
+          silentCount,
+          1,
+          `the command must have been sent exactly once; server saw ${silentCount}`,
+        );
+      } finally {
+        if (guardTimer) clearTimeout(guardTimer);
+        client.close();
+      }
+    } finally {
+      ac.abort();
+      await server.finished;
+    }
+  },
+);
