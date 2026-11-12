@@ -94,6 +94,10 @@ try {
   });
 
   let seq = 0;
+  // audio-feed-9go2t: DELIBERATELY unbounded - this client resolves on demand and has no reject
+  // path; the row reads Interaction-to-Next-Paint from the page, so an input dispatch's reply
+  // arriving late is the measurement, not a hang. A bound would manufacture a rejection the row
+  // has no branch for, so the wait is left as it is.
   const cdp = (method: string, params: Record<string, unknown> = {}) =>
     new Promise<Record<string, unknown>>((resolve) => {
       const id = ++seq;

@@ -29,7 +29,7 @@ import {
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 import { PLAYBACK_POSITION_EVIDENCE } from "./playback-position-evidence.ts";
-import { withHangBound } from "./proof-cdp.ts";
+import { boundedCdpReply, HANG_BOUND_MS, withHangBound } from "./proof-cdp.ts";
 
 await runProof("playback-position-browser-proof", async (checker) => {
   const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-playback-");
@@ -80,11 +80,18 @@ await runProof("playback-position-browser-proof", async (checker) => {
     }
   });
 
-  // deno-lint-ignore no-explicit-any
-  async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  async function cdp(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = HANG_BOUND_MS,
+    // deno-lint-ignore no-explicit-any
+  ): Promise<any> {
     const id = ++nextId;
     ws.send(JSON.stringify({ id, method, params }));
-    const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+    const reply = new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+    // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call site,
+    // so a browser that never answers names the method instead of parking the proof.
+    const msg = await boundedCdpReply(method, reply, cdp, timeoutMs);
     if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
     return msg.result;
   }
@@ -257,10 +264,15 @@ await runProof("playback-position-browser-proof", async (checker) => {
         pending2.delete(msg.id);
       }
     });
-    // deno-lint-ignore no-explicit-any
-    const cdp2 = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+    const cdp2 = (
+      method: string,
+      params: Record<string, unknown> = {},
+      timeoutMs = HANG_BOUND_MS,
+      // deno-lint-ignore no-explicit-any
+    ): Promise<any> => {
       const id = ++nextId2;
-      return new Promise((resolve, reject) => {
+      // audio-feed-9go2t: the second user's tab is a second client, bounded the same single way.
+      const reply = new Promise<unknown>((resolve, reject) => {
         pending2.set(
           id,
           // deno-lint-ignore no-explicit-any
@@ -268,6 +280,7 @@ await runProof("playback-position-browser-proof", async (checker) => {
         );
         ws2.send(JSON.stringify({ id, method, params }));
       });
+      return boundedCdpReply(method, reply, cdp2, timeoutMs);
     };
     // deno-lint-ignore no-explicit-any
     const js2 = async (expression: string): Promise<any> => {

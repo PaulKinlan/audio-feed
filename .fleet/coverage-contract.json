@@ -58,6 +58,63 @@
   "scripts/bootstrap-refusal-browser-proof.ts": [
     "tests/proof_cdp_test.ts"
   ],
+  "scripts/account-mobile-layout-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/csp-nonce-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/exww-live-claims-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/failure-diagnostics-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/home-module-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/landing-tooltip-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/passkey-provider-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/playback-position-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/repro_b6nr_token_storage.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/request-access-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/spend-visibility-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/tokens-browser-proof.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/verify_3asd_bookmarklet_browser.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/verify_dfbu_pagehide_browser.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/verify_ieek_canonical_urls.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/verify_kvnw_account_bookmarklet_browser.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/verify_main_l7m1_e2e.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/verify_i7vi_browser.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
+  "scripts/verify_s3uk_real_browser.ts": [
+    "tests/proof_cdp_test.ts"
+  ],
   "scripts/source-mask.ts": [
     "tests/source_mask_test.ts",
     "tests/fast_check_test.ts"

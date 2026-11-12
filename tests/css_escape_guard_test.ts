@@ -94,6 +94,10 @@ Deno.test("audio-feed-h7rhb: the narrow listen layout genuinely applies - the co
     const cdp = (method: string, params: Record<string, unknown> = {}) => {
       const id = ++nextId;
       ws.send(JSON.stringify({ id, method, params }));
+      // audio-feed-9go2t: DELIBERATELY unbounded - this client resolves on demand and never
+      // rejects, and its call sites treat a reply that arrives late as "the page is not ready
+      // yet" (the navDeadline loop below). A bound would manufacture a rejection this proof has
+      // no branch for, so the wait is left as it is.
       // deno-lint-ignore no-explicit-any
       return new Promise<any>((resolve) => pending.set(id, resolve));
     };

@@ -27,6 +27,7 @@ import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 import { evidencePngDigestLine } from "./evidence-png-digest.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "./harness-port.ts";
+import { boundedCdpReply, HANG_BOUND_MS } from "./proof-cdp.ts";
 
 const PROOF_PORT = resolveHarnessPort([], Deno.env.get("BOOKMARKLET_PROOF_PORT"));
 if (PROOF_PORT === 0) throw new Error("Bookmarklet evidence requires a fixed port, not 0");
@@ -107,13 +108,18 @@ await runProof("audio-feed-3asd", async (checker) => {
         }
       });
 
-      // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+      async function cdp(
+        method: string,
+        params: Record<string, unknown> = {},
+        timeoutMs = HANG_BOUND_MS,
+        // deno-lint-ignore no-explicit-any
+      ): Promise<any> {
         const id = ++nextId;
         ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
-        );
+        const reply = new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+        // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+        // site, so a browser that never answers names the method instead of parking the proof.
+        const msg = await boundedCdpReply(method, reply, cdp, timeoutMs);
         if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
         return msg.result;
       }

@@ -24,7 +24,7 @@ import {
   removeDirWhenQuiet,
   waitForChromeProfileUnused,
 } from "../scripts/proof-helper.ts";
-import { HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
+import { boundedCdpReply, HANG_BOUND_MS } from "../scripts/proof-cdp.ts";
 import { browserRowIgnored, computedKey, readCssInChrome } from "./css_engine.ts";
 
 const BASE = "https://audio.example.com";
@@ -140,10 +140,18 @@ Deno.test({
           pending.delete(msg.id);
         }
       });
-      const cdp = (method: string, params: Record<string, unknown> = {}) => {
+      const cdp = (
+        method: string,
+        params: Record<string, unknown> = {},
+        timeoutMs = HANG_BOUND_MS,
+        // deno-lint-ignore no-explicit-any
+      ): Promise<any> => {
         const id = ++nextId;
+        // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+        // site, so a browser that never answers names the method instead of parking the row.
+        const reply = new Promise<unknown>((resolve) => pending.set(id, resolve));
         ws.send(JSON.stringify({ id, method, params }));
-        return new Promise((resolve) => pending.set(id, resolve));
+        return boundedCdpReply(method, reply, cdp, timeoutMs);
       };
 
       await cdp("Page.enable");

@@ -27,6 +27,7 @@ import { approveUser, createUser } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { boundedCdpReply, HANG_BOUND_MS } from "./proof-cdp.ts";
 
 const EXPECT_LEAK = Deno.args.includes("--expect-leak");
 const OUT = new URL("../docs/evidence/audio-feed-b6nr/", import.meta.url).pathname;
@@ -71,12 +72,19 @@ await runProof("audio-feed-b6nr", async (checker) => {
         }
       });
 
-      const send = (method: string, params: Record<string, unknown> = {}) => {
+      const send = (
+        method: string,
+        params: Record<string, unknown> = {},
+        timeoutMs = HANG_BOUND_MS,
+      ) => {
         const id = ++nextId;
-        return new Promise<{ result?: unknown; error?: unknown }>((resolve) => {
+        // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+        // site, so a browser that never answers names the method instead of parking the proof.
+        const reply = new Promise<{ result?: unknown; error?: unknown }>((resolve) => {
           pending.set(id, resolve);
           ws.send(JSON.stringify({ id, method, params }));
         });
+        return boundedCdpReply(method, reply, send, timeoutMs);
       };
 
       const evaluate = async (expression: string): Promise<unknown> => {

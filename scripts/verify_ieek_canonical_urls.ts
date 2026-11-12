@@ -25,7 +25,7 @@ import { memoryStores } from "../src/config.ts";
 import { canonicalAudioKey, enclosureUrl, toFeedEpisode } from "../src/feed/adapter.ts";
 import { audioBlobKey } from "../src/types.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
-import { withHangBound } from "./proof-cdp.ts";
+import { boundedCdpReply, HANG_BOUND_MS, withHangBound } from "./proof-cdp.ts";
 
 export const COMMITTED_SHA = "3fd98e28e034cf3bc60b90ef345681d0deb78d38";
 export const COMMITTED_TREE = "fa4371042eb50e3b9e20447b66184de1c584d531";
@@ -593,13 +593,18 @@ export async function runVerification(): Promise<VerificationResult> {
         }
       });
 
-      // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+      async function cdp(
+        method: string,
+        params: Record<string, unknown> = {},
+        timeoutMs = HANG_BOUND_MS,
+        // deno-lint-ignore no-explicit-any
+      ): Promise<any> {
         const id = ++nextId;
         ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
-        );
+        const reply = new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+        // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+        // site, so a browser that never answers names the method instead of parking the proof.
+        const msg = await boundedCdpReply(method, reply, cdp, timeoutMs);
         if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
         return msg.result;
       }
