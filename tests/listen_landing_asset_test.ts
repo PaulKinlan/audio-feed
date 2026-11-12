@@ -85,6 +85,69 @@ Deno.test("listen-landing.css is composed with the design tokens in front of the
   );
 });
 
+/**
+ * The landing client's `tokenFrom`, taken out of the bytes the browser receives and EVALUATED, the way
+ * tests/temporal_test.ts runs listen.js's when(). The alternative — retyping the parsing here — is the
+ * copy that stays green while the shipped file drifts, which is the whole reason this row exists.
+ */
+function servedTokenFrom(source: string): (value: string) => string {
+  const start = source.indexOf("const tokenFrom = (");
+  assert(start >= 0, "listen-landing.js must still define tokenFrom — the page's only parsing job");
+  const arrow = source.indexOf("=>", start);
+  assert(arrow > start, "tokenFrom must still be an arrow function, so its body can be evaluated");
+  const brace = source.indexOf("{", arrow);
+  assert(brace > arrow, "tokenFrom must still have a block body");
+  let depth = 0;
+  let end = -1;
+  for (let index = brace; index < source.length; index++) {
+    if (source[index] === "{") depth++;
+    else if (source[index] === "}") {
+      depth--;
+      if (depth === 0) {
+        end = index + 1;
+        break;
+      }
+    }
+  }
+  assert(end > 0, "tokenFrom's block body must be closed");
+  const declaration = source.slice(start, end).replace("const tokenFrom = ", "return ");
+  return new Function(`${declaration};`)() as (value: string) => string;
+}
+
+Deno.test("listen-landing.js takes the feed token out of a pasted URL, whatever shape it arrives in (audio-feed-lmf8p)", () => {
+  // The asset is served verbatim to the landing page and the browser runs it from there, so the only
+  // honest way to pin what it does is to read the registered bytes and run the parsing they carry.
+  const tokenFrom = servedTokenFrom(assetBody("listen-landing.js") ?? "");
+
+  assertEquals(tokenFrom("https://audio.example.com/feed/tok-123/"), "tok-123", "absolute URL");
+  assertEquals(
+    tokenFrom("//audio.example.com/feed/tok-123/"),
+    "tok-123",
+    "a protocol-relative URL is parsed on its feed PATH, not on the presence of a scheme",
+  );
+  assertEquals(
+    tokenFrom("HTTPS://Audio.Example.COM/feed/AbC-9/"),
+    "AbC-9",
+    "a mixed-case absolute URL still resolves, and the token keeps the case it was pasted in",
+  );
+  assertEquals(
+    tokenFrom("  https://audio.example.com/feed/tok-123/  "),
+    "tok-123",
+    "the paste is trimmed before it is parsed",
+  );
+  assertEquals(
+    tokenFrom("https://audio.example.com/feed/tok%2Fwith%20space/"),
+    "tok/with space",
+    "the captured segment is percent-decoded once, so what is re-encoded on the way out is the token",
+  );
+  assertEquals(tokenFrom("tok-123"), "tok-123", "a bare token is its own token");
+  assertEquals(
+    tokenFrom("   "),
+    "",
+    "whitespace alone yields no token, which is what makes the submit handler show its error",
+  );
+});
+
 Deno.test("the landing assets are served with the immutable contract and stale hashes 404", async () => {
   const fetch = landingApp();
 
