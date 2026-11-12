@@ -18,16 +18,23 @@ The count is mechanical, re-derivable with:
 
 Run from the repository root, on the revision this section was last re-derived at (`07d8e60a`,
 2026-11-10), that command yields **72 registrations** (35 GET, 33 POST, 3 DELETE, 1 `add`): 71
-literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`,
-`src/app.ts:131`). The `OPTIONS` registration on `/api/reports/csp` (`src/app.ts:411`) shares the
-POST handler, so there are **71 distinct handler endpoints**, of which one (`/__test/throw`,
-`src/app.ts:170`) exists only when an operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
+literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`, the
+exported constant in `src/app.ts`). The `router.add("OPTIONS", "/api/reports/csp", …)` registration
+shares the POST handler, so there are **71 distinct handler endpoints**, of which one (`GET
+/__test/throw`, the `AUDIO_FEED_TEST_THROW` trap door inside `createRouter`) exists only when an
+operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
 production attack surface — leaving **70 production entry points**.
 
 **70 production entry points; all 70 covered by one of the eight boundary sections below**; the three
 pre-existing decision sections (CSP reports, `/health`, offline cache) are cited from inside them.
 Unmitigated boundaries are labelled as such — none are softened or omitted. A citation should be
-re-derivable by a command; line ranges are the last resort and must say so.
+re-derivable by a command; line ranges are the last resort and must say so. Concretely, every
+citation in this file takes one of two forms: a durable anchor — a symbol (function, constant,
+type), a route literal, a pinned test name, or the command that reproduces the claim — or a
+`file:line` pointer carrying an explicit `last resort:` clause saying why nothing nameable locates
+it. Symbols and route literals win wherever they can name the thing, because they survive the
+refactors that move line numbers: a number that is not the only way to name the code is a citation
+waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 
 | # | Boundary | Registrations | Routes |
 |---|---|---|---|
@@ -45,17 +52,20 @@ routes, listed separately because the attacker's position there is different.
 
 ### Boundary 1 — Public capability URLs: the token in the path is the whole credential
 
-- **Routes:** `GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`
-  (`src/app.ts:268-276`), `GET /listen/:token` + `GET /listen/:token/status` +
-  `POST /listen/:token/episodes/:episodeId/retry` (`src/app.ts:228-234`), `GET /audio/:key+`
-  (`src/app.ts:279`). Podcast clients cannot authenticate, so the path token is the only credential
-  these routes will ever get (`src/app.ts:266-267`).
+- **Routes:** `GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`, `GET
+  /listen/:token` + `GET /listen/:token/status` +
+  `POST /listen/:token/episodes/:episodeId/retry`, and `GET /audio/:key+` — each one a
+  `router.get`/`router.post` line naming that exact pattern inside `createRouter` (`src/app.ts`; the
+  census command above reproduces all 72). Podcast clients cannot authenticate, so the path token is
+  the only credential these routes will ever get (stated in the `-- feeds --` registration comment in
+  `src/app.ts`).
 - **Attacker controls:** the path token or key itself — it leaks through browser history, proxy logs
   and pasted links; anyone holding it is, from the server's view, the subscriber.
 - **Mitigations:**
   - Token resolution is a single indexed lookup on the capability, and user IDs are deliberately NOT
-    accepted as tokens (the historical ID-as-token bypass is documented at `src/compose/shared.ts:40-56`);
-    every user-scoped route shares `approvedUserFor` (`src/compose/shared.ts:69-90`) so the approval
+    accepted as tokens (the historical ID-as-token bypass is documented above `presentedToken` and
+    `loadUserByFeedToken` in `src/compose/shared.ts`);
+    every user-scoped route shares `approvedUserFor` (`src/compose/shared.ts`) so the approval
     gate cannot be forgotten on a new route.
   - `/listen` refusals are uniform 404s with no status detail distinguishing unknown token, unapproved
     owner or missing episode (audio-feed-se8s8; routes `GET /listen/:token`, `GET /listen/:token/status`,
@@ -66,20 +76,29 @@ routes, listed separately because the attacker's position there is different.
     "retry refuses an unapproved token with the uniform 404, byte-identical to an unknown one (audio-feed-se8s8)"). The
     `/audio` precedent is approval-before-blob (audio-feed-7kdhb): the owner's approval is checked on
     the key that actually resolved, failing closed, BEFORE any blob read or cache spend, so a refusal
-    cannot confirm blob existence (`src/routes/audio.ts:221-244`).
+    cannot confirm blob existence (`checkUserApproval` in `src/routes/audio.ts`, called once in
+    `handleAudio` before any blob read — reproducible check:
+    `grep -n 'checkUserApproval' src/routes/audio.ts`).
   - The feed routes follow the same rule (audio-feed-vcpyi): an unknown token and a
     known-but-unapproved owner answer the IDENTICAL 404 `{"error":"Unknown feed"}` with no status
     detail, so holding a capability cannot confirm it or read the account's lifecycle out of a refusal
-    (`src/compose/feeds.ts:274`, `:322`).
+    (`createMasterFeedHandler` and `createSourceFeedHandler` in `src/compose/feeds.ts`, each with its
+    own refusal — reproducible check: `grep -n 'Unknown feed' src/compose/feeds.ts`).
   - The served feed document carries no subscriber EMAIL and no account status (audio-feed-zlu04):
     `ownerEmail` is never populated from the account, so no `<itunes:owner><itunes:email>` is emitted.
     A capability URL is pasted into third-party clients and directories, and an address published that
-    way cannot be recalled (`src/compose/feeds.ts:293-297`, `:339`). What the document DOES still
+    way cannot be recalled (the `ownerEmail` comments in `createMasterFeedHandler` and
+    `createSourceFeedHandler`, `src/compose/feeds.ts`; reproducible check:
+    `grep -n 'ownerEmail' src/compose/feeds.ts`). What the document DOES still
     publish is the display name: the master feed's channel `<title>` is `${displayName} — Audio Feed`
-    and its `<itunes:author>` is `displayName` itself (`src/compose/feeds.ts:288`, `:292`); a
+    and its `<itunes:author>` is `displayName` itself (the channel object of `createMasterFeedHandler`
+    in `src/compose/feeds.ts`); a
     per-source feed titles itself from the source and sends the SOURCE title as `<itunes:author>`
-    (`:334`, `:338`), so the account name does not appear there. No email, no account id and no
-    approval status ride along, and `tests/feed_disclosure_test.ts:147-195` pins both halves — the
+    (the same two fields in `createSourceFeedHandler`), so the account name does not appear there. No
+    email, no account id and no
+    approval status ride along, and the `tests/feed_disclosure_test.ts` tests "the served feed publishes
+    no account email and no itunes:owner (audio-feed-zlu04)" and "the metadata a subscriber keeps is
+    the show's, not the account's (audio-feed-zlu04)" pin both halves — the
     absent email shape and the present title/author. Dropping the display name as well was left as a
     PRODUCT decision rather than a leak fix: clients render `<itunes:author>` as the show's author, so
     removing it changes what every subscriber sees in their player.
@@ -103,12 +122,13 @@ routes, listed separately because the attacker's position there is different.
     unbounded: it is a store-free template render with no token and no tenant reads, so read
     limits do not cover it.
   - Feed routes (`GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`) are
-    rate-limited before ANY store work (audio-feed-oxyp1; `src/compose/feeds.ts:96-139`): dual
+    rate-limited before ANY store work (audio-feed-oxyp1; `refuseFeedRead` in `src/compose/feeds.ts`): dual
     sliding windows in the shared metadata store bound requests per client IP (`FEED_IP_RATE`: 120
     per 5 min) against token enumeration and per capability token (`FEED_TOKEN_RATE`: 60 per 5 min)
     across aggregator IPs and client apps, returning a clean 429 with `Retry-After`.
-  - Feed generation work per request is bounded (audio-feed-oxyp1; `src/compose/feeds.ts:63-90`,
-    `:141-236`): `publishableEpisodes` asks the store for publishable episodes (`publishable: true`)
+  - Feed generation work per request is bounded (audio-feed-oxyp1; `publishableEpisodes` and the
+    `FEED_EPISODE_CAP` / `FEED_MAX_PAGES` / `FEED_MAX_SCAN_PAGES` / `FEED_MAX_HEAD_CALLS` constants in
+    `src/compose/feeds.ts`): `publishableEpisodes` asks the store for publishable episodes (`publishable: true`)
     so unpublishable noise (pending/failed/synthesizing) never consumes a page slot, scans at most
     `FEED_MAX_PAGES` (3 pages of `FEED_EPISODE_CAP` = 200) once it has found one,
     `FEED_MAX_SCAN_PAGES` (10 pages) only while it has found nothing, never calls blob `head()` on
@@ -118,12 +138,12 @@ routes, listed separately because the attacker's position there is different.
     `sanitizeRequestUrl`).
   - **Audio enclosure URL lifetime vs rotation (audio-feed-3wenc):** `/audio/:key+` URLs are bearer
     capabilities that embed the user id and episode id (`audio/<userId>/<mode>/<id>.<ext>`), but do NOT
-    embed the feed token (`src/feed/adapter.ts:70`). Rotating a feed token (`POST /api/account/rotate-token`
+    embed the feed token (`enclosureUrl` in `src/feed/adapter.ts`). Rotating a feed token (`POST /api/account/rotate-token`
     or `POST /api/admin/users/:id/rotate-token`) invalidates the feed XML (`/feed/:token/...`) and web
     player (`/listen/:token/...`) with uniform 404 ("Unknown feed"), revoking podcast client updates
     and web playback. It intentionally does NOT invalidate already-syndicated enclosure URLs: podcast
     clients poll feeds over months, audio responses are cached `public, immutable`, and the audio route's
-    pre-blob gate (`checkUserApproval`, `src/routes/audio.ts:349-353`) verifies only that the owning user
+    pre-blob gate (`checkUserApproval`, called from `handleAudio` in `src/routes/audio.ts`) verifies only that the owning user
     is in `approved` status. The only server-side kill switch for audio enclosure access is account
     suspension (which marks `user.status` away from "approved", causing `checkUserApproval` to refuse
     with uniform 404 "Unknown audio object") or episode deletion.
@@ -146,15 +166,16 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 2 — Feed-token APIs (capability-token account surface)
 
 - **Routes:** `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes`
-  (`src/app.ts:282-295`).
+  (the matching `router.post`/`router.get` lines in `createRouter`, `src/app.ts`).
 - **Attacker controls:** the presented token (`x-feed-token`, `x-user-token`, or `Authorization:
-  Bearer`; `src/compose/shared.ts:17-30`) and, on ingest/upload, the URL or document content.
+  Bearer`; `TOKEN_HEADERS` and `presentedToken` in `src/compose/shared.ts`) and, on ingest/upload, the URL or document content.
 - **Mitigation:** both ingest and upload resolve through `authorizeIngest`
-  (`src/compose/ingest.ts:62-89`): an explicit token goes through `approvedUserFor` (boundary 1's
+  (`src/compose/ingest.ts`): an explicit token goes through `approvedUserFor` (boundary 1's
   gate); a cookie-only request must ALSO pass the strict same-origin wall, because a cookie is
   ambient. Both paths require an approved user.
 - **Mitigation (audio-feed-kp30l):** accepted episode CREATION is capped per subscriber. Both routes
-  compose `authorizeIngest` with `refuseIngestOverCreationCap` (`src/compose/ingest.ts`), which counts
+  compose `authorizeIngest` with `refuseIngestOverCreationCap` (`src/compose/ingest.ts`; on the two
+  creating routes the pair is composed by `authorizeIngestWithCap`), which counts
   one hit in a shared 24-hour `SlidingWindowRateLimiter` window (`INGEST_CREATION_RATE`, 50 per
   rolling 24 hours, namespace `ingest_creation`, row keyed on the USER id — the account whose token
   pays, not the address). The check runs inside `authorize`, i.e. after identity resolves and BEFORE
@@ -163,7 +184,7 @@ routes, listed separately because the attacker's position there is different.
   (`episode_creations_per_token`), the limit, the window and a `retry-after`.
 - **Residual (partly mitigated, recorded):** **why the count is on creations, not on spend.** The
   daily counters increment only in the same atomic commit that marks an episode `ready`
-  (`src/storage/kv/episodes.ts:64-74`), so a paid attempt that ends `failed` is spent and never
+  (`atomicPutEpisode` in `src/storage/kv/episodes.ts`), so a paid attempt that ends `failed` is spent and never
   counted — and counting attempts instead would change what the daily budget MEANS (one broken
   article consuming three of a subscriber's fifty) while still not bounding how many episodes exist.
   Creation is what a token chooses and is countable before anything is paid. The shared
@@ -171,7 +192,7 @@ routes, listed separately because the attacker's position there is different.
   3 = 150 paid attempts** per rolling 24 hours at the default funded budget; operator
   actions are outside this window. A same-URL resubmission — which IS
   a new episode by request
-  (`src/storage/kv/articles.ts:251`) — is charged like any other creation.
+  (the `putArticleWithEpisode` comment in `createArticlesRepository`, `src/storage/kv/articles.ts`) — is charged like any other creation.
 - **Residuals that remain:** (a) those 150 attempts still do not reach the completion counter: the
   bound limits how many episodes can be attempted, not how spend is accounted, and the per-episode
   segment/attempt ceilings still multiply per episode (see boundary 8). (b) The cap covers
@@ -204,24 +225,29 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 3 — Anonymous browser writes
 
 - **Routes:** `POST /api/auth/login/options`, `POST /api/auth/register/options`,
-  `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+OPTIONS)
-  (`src/app.ts:287-287`, `:359`, `:376`, `:378`, `:410-411`), plus `GET /share` which only validates
+  `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its `router.add("OPTIONS", …)`
+  alias) — each the matching registration line in `createRouter` (`src/app.ts`) — plus `GET /share`
+  which only validates
   a shared URL as http/https and redirects signed-in subscribers to the quick-add panel
-  (`src/routes/share.ts:11-19`).
+  (`isValidWebUrl` and `handleShare` in `src/routes/share.ts`).
 - **Attacker controls:** everything — no credential exists; the only varying input is the client
   address and the body.
 - **Mitigations:**
   - The passkey challenge write is bounded per address BEFORE the handler mints a challenge: 60 per
     5 min, with the window equal to the challenge TTL so an address can never hold more than 60 live
     challenge rows, and unaddressed clients collapsed onto a dedicated limiter key
-    (audio-feed-plmhk; `src/routes/account_api.ts:134-164`, check at `:240`). The verify halves
+    (audio-feed-plmhk; `LOGIN_OPTIONS_RATE` and the `loginOptions` handler's check in
+    `src/routes/account_api.ts`; reproducible check:
+    `grep -n 'LOGIN_OPTIONS_RATE' src/routes/account_api.ts`). The verify halves
     (`login/verify`, `register/verify`) require a challenge minted by the options call
-    (single-use, TTL 5 min, `src/routes/account_api.ts:138`), so this bound caps verify attempts too.
+    (single-use, TTL `CHALLENGE_TTL_MS`, `src/auth/passkeys.ts`), so this bound caps verify attempts too.
   - Request-access: 5 per hour per IP, atomic email dedup that does not reveal an account's
     existence or status, tokens never returned to the applicant (audio-feed-r97/oxw5g/2zvc;
-    `src/compose/access.ts:24-46`).
+    `createRequestAccessHandler` and `REQUEST_ACCESS_NAMESPACE` in `src/compose/access.ts`, whose
+    header comment states the atomic-dedup rule).
   - The CWV beacon is a typed record, not request fields, with a 4 KiB body cap and a 60/min per
-    client window (`src/routes/cwv.ts:25-41`, `:72`, `:99`).
+    client window (`MAX_CWV_BODY_BYTES` and `CWV_RATE_LIMIT` in `src/routes/cwv.ts`; the record is
+    built by `parseCwvReport` in `src/observability/cwv.ts`).
   - CSP reports: see the origin-policy section below (untrusted or absent `Origin` accepted with 204
     but never stored, never budgeted).
 - **Residual (documented, accepted):** origin-less CSP reports from legacy WebKit engines are
@@ -230,24 +256,27 @@ routes, listed separately because the attacker's position there is different.
 ### Boundary 4 — Session APIs and pages
 
 - **Routes:** `POST /api/auth/logout`, the 9 `/api/account/*` routes, `POST /api/auth/login/verify`,
-  `POST /api/auth/register/verify` (`src/app.ts:376-390`), `GET /account`, `GET /login`, `GET /add`,
-  `GET /listen` bare path (`src/app.ts:181-226`).
+  `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, and the bare `GET
+  /listen` — each the registration line naming that pattern in `createRouter` (`src/app.ts`).
 - **Attacker controls:** a cross-site browser context (CSRF position); a stolen session cookie if
   they have one.
 - **Mitigations:**
-  - A session is a random secret in a `__Host-af_session` cookie (`src/auth/sessions.ts:21`);
-    `__Host-` forces Secure, Path=/ and no Domain (`src/auth/sessions.ts:104`), and the store holds
-    only its hash (`src/auth/sessions.ts:6`).
+  - A session is a random secret in a `__Host-af_session` cookie (`SESSION_COOKIE` in
+    `src/auth/sessions.ts`);
+    `__Host-` forces Secure, Path=/ and no Domain (`sessionCookie` in the same file), and the store holds
+    only its hash (the header comment of `src/auth/sessions.ts`, and `hashSecret`, which every write
+    goes through).
   - Every state-changing session API sits behind the strict same-origin wall
-    (`src/routes/account_api.ts:104-106`); admin reads use the looser `sameSiteRead` so legitimate
+    (`crossOrigin`, which wraps `sameOrigin` in `src/routes/account_api.ts`); admin reads use the looser
+    `sameSiteRead` so legitimate
     same-origin GETs without an Origin header succeed while cross-site requests are refused
-    (`src/compose/admin.ts:100-108`).
+    (the `sameSiteRead` branch of `adminGate`, `src/compose/admin.ts`).
   - **The read wall admits a request carrying NEITHER `Sec-Fetch-Site` NOR `Origin`**
-    (`src/auth/sessions.ts:139-152`) — audio-feed-vfyte, decision below. The routes it gates today
+    (`sameSiteRead` in `src/auth/sessions.ts`) — audio-feed-vfyte, decision below. The routes it gates today
     are all pure reads, listed and pinned in `tests/read_wall_population_test.ts`: `GET
-    /api/episodes` (`src/compose/shared.ts:113` via `callerUserFor`), and `GET /api/admin/users`,
+    /api/episodes` (`callerUserFor` in `src/compose/shared.ts`), and `GET /api/admin/users`,
     `GET /api/admin/users/:id/sources`, `GET /api/admin/users/:id/episodes`, `GET /api/admin/stats`,
-    `GET /api/admin/outbox` (`src/compose/admin.ts:92` via `adminGate`, safe methods only — writes on
+    `GET /api/admin/outbox` (`adminGate` in `src/compose/admin.ts`, safe methods only — writes on
     that gate use `sameOrigin`).
   - **Absent-both is admitted on purpose, and this wall is for reads only.** A cross-origin
     attacker cannot READ a read route's response: the same-origin policy blocks the body, and the
@@ -257,9 +286,9 @@ routes, listed separately because the attacker's position there is different.
     a GET. That compatibility cost was bought for no security gain, so the fail-closed change
     (branch `fleet/csrf-absent`) was REJECTED as over-broad.
   - **The one read route with server-side work left the wall instead.** `POST
-    /api/account/discover-feed` (`src/app.ts:385`) fetched a third-party page on the signed-in
-    subscriber's behalf; it is now POST behind `sameOrigin` (`src/routes/account_api.ts:104-107`,
-    handler at `:483`) with a per-subscriber rate limit and per-hop SSRF re-validation (23782a1e,
+    /api/account/discover-feed` (the registration line in `createRouter`, `src/app.ts`) fetched a third-party page on the signed-in
+    subscriber's behalf; it is now POST behind `sameOrigin` (the `crossOrigin` prelude,
+    `src/routes/account_api.ts`, handler `discoverFeed`) with a per-subscriber rate limit and per-hop SSRF re-validation (23782a1e,
     audio-feed-oq4pz). **Rule for future authors: a cookie-authenticated route that does server-side
     work — an outbound fetch, a write, paid synthesis — uses `sameOrigin` on a state-changing
     method, never `sameSiteRead`.** Nothing in the type system or the router enforces that rule;
@@ -267,7 +296,7 @@ routes, listed separately because the attacker's position there is different.
     reddens when a new `sameSiteRead`-gated route appears unclassified.
   - The `/listen` bare path redirects an approved session to its capability URL with
     `cache-control: no-store` and `referrer-policy: no-referrer`, so the token is never written to
-    localStorage (`src/app.ts:200-226`). When unauthenticated, it renders the bare landing page
+    localStorage (the inline `GET /listen` handler in `createRouter`, `src/app.ts`). When unauthenticated, it renders the bare landing page
     (`renderListenLanding` in `src/routes/listen.ts`; reproducible check:
     `grep -nE 'export function renderListenLanding' src/routes/listen.ts`, pinned by
     `tests/listen_test.ts` test "the bare /listen launch resolves the session server-side (audio-feed-b6nr)"), which is unbounded by design (store-free
@@ -281,25 +310,29 @@ routes, listed separately because the attacker's position there is different.
 
 ### Boundary 5 — Admin surface (console, admin API, break-glass, observability API)
 
-- **Routes:** the 6 `/admin*` pages (`src/app.ts:150-160`), the 19 `/api/admin/*` routes
-  (`src/app.ts:306-368`, `:392-404`), `POST /api/auth/bootstrap` (break-glass,
-  `src/app.ts:380`), and the observability API `GET /api/observability/errors` +
-  `GET /api/observability/summary` (`src/app.ts:298-305`).
+- **Routes:** the 6 `/admin*` pages, the 19 `/api/admin/*` routes, `POST /api/auth/bootstrap`
+  (break-glass), and the observability API `GET /api/observability/errors` +
+  `GET /api/observability/summary` — every one a registration line naming that pattern in
+  `createRouter` (`src/app.ts`); the census command above counts them.
 - **Attacker controls:** the whole unauthenticated internet; plus a subscriber session attempting to
   reach admin data.
 - **Mitigations:**
-  - ONE gate helper, `adminGate` (`src/compose/admin.ts:64-119`), so "a new admin route cannot be
+  - ONE gate helper, `adminGate` (`src/compose/admin.ts`), so "a new admin route cannot be
     added without the token check by accident" (audio-feed-z2s): the normal path is session +
     `isActiveAdmin` + strict same-origin on writes / `sameSiteRead` on reads; the break-glass path is
-    `x-admin-token`/Bearer checked by `requireAdminToken` (`src/auth/users.ts:65-69`); and an
-    unconfigured `ADMIN_TOKEN` fails CLOSED (`src/compose/admin.ts:97-100`). The admin pages render
-    no subscriber data in the shell; data comes only from the gated API routes (`src/app.ts:148-151`).
+    `x-admin-token`/Bearer checked by `requireAdminToken` (`src/auth/users.ts`); and an
+    unconfigured `ADMIN_TOKEN` fails CLOSED (the `ADMIN_TOKEN is not configured` branch of `adminGate`;
+    reproducible check: `grep -n 'is not configured' src/compose/admin.ts`). The admin pages render
+    no subscriber data in the shell; data comes only from the gated API routes (`createRouter`'s
+    admin-shell comment, `src/app.ts`).
   - Failed attempts on the header path AND bootstrap share ONE sliding-window lockout limiter
-    (audio-feed-bns, store-shared so the bound holds across isolates; `src/compose/admin.ts:60-62`,
-    `:118-140`; bootstrap at `src/routes/account_api.ts:354-357`). The lockout gates attempts before
+    (audio-feed-bns, store-shared so the bound holds across isolates; the `AdminGateDeps.limiter`
+    path and the `guardSecretAuth` call in `adminGate`, `src/compose/admin.ts`, plus the matching
+    `guardSecretAuth` call in the `bootstrap` handler, `src/routes/account_api.ts`). The lockout gates attempts before
     secret compare (audio-feed-pymwh), so candidates are not evaluated at line rate.
   - The observability API is a separate Bearer shared key, `timingSafeEqual`-compared, and closed
-    when `AUDIOFEED_OBSERVABILITY_KEY` is unset (`src/routes/observability.ts:110-147`).
+    when `AUDIOFEED_OBSERVABILITY_KEY` is unset (`presentedKey` and `authorise` in
+    `src/routes/observability.ts`).
 - **Residual (documented, accepted):** the break-glass token is a static configured secret with no
   expiry or rotation enforcement in code — rotation is an operational concern outside this repo.
   Admin-initiated feed-token rotation cannot reach a device's already-downloaded library
@@ -314,12 +347,15 @@ routes, listed separately because the attacker's position there is different.
 - **Attacker controls:** the URL — and everything behind it — that the SERVER fetches, including
   redirect chains; a hostile feed also controls the content later narrated to the subscriber.
 - **Mitigations (`src/ingest/url.ts`, `src/routes/account_api.ts`):** only global-unicast hosts are
-  fetchable — loopback, LAN, metadata and transition ranges are denied (`:53`); every redirect target is
-  re-validated and chains are capped at 5 (`:238`, `:310-311`, `:348`, `:537`); reads are bounded per
-  content type — `MAX_HTML_BYTES` 2 MiB (`:41`) for HTML and other non-PDF reads, `MAX_PDF_BYTES`
-  10 MiB (`:42`) for PDF, selected at `:255` — with a 15 s deadline (`:512-513`), and the PDF bound's
+  fetchable — loopback, LAN, metadata and transition ranges are denied (`isPublicAddress`); every redirect target is
+  re-validated and chains are capped at 5 (`fetchArticle`, `fetchFeedDocument` and `discoverFeeds`, each
+  raising its own `invalid or excessive redirect chain` `IngestError`; reproducible check:
+  `grep -n 'excessive redirect chain' src/ingest/url.ts`); reads are bounded per
+  content type in `fetchArticle` — `MAX_HTML_BYTES` 2 MiB for HTML and other non-PDF reads, `MAX_PDF_BYTES`
+  10 MiB for PDF, chosen from the response's content type there — under the shared 15 s
+  `TIMEOUT_MS` abort, and the PDF bound's
   parse-time residuals are recorded below; a public hostname that resolves to a private address is
-  refused (`:456-457`);
+  refused at the socket by `publicLookup`;
   feed discovery re-validates each redirect hop through `articleUrl` and `publicLookup`; `POST /api/account/discover-feed` is
   gated by the strict same-origin CSRF wall (`signedIn`, refusing GET via 405 Method Not Allowed) and
   rate-limited per subscriber (`DISCOVER_FEED_RATE` 30 requests / 5 min, `src/routes/account_api.ts`).
@@ -335,43 +371,55 @@ routes, listed separately because the attacker's position there is different.
   and public-unicast address validation. (b) Prompt injection and content
   integrity (partly mitigated, recorded — audio-feed-o9wew): publisher-supplied text reaches the
   reasoning LLM under delimiter fencing rather than raw. In `src/worker/script.ts`
-  (`buildScriptPrompt`, `:180-213`), every publisher-controlled field (`title`, `author`, `summary`,
-  `body`) is length-capped before fencing (`capped()`, `:189`, bound `DEFAULT_MAX_BODY_CHARS`
-  12,000 chars, `:49`), enclosed in field-specific XML-like tags (`<article_title>`,
-  `<article_author>`, `<article_summary>`, `<article_body>`, `:124-138`), stripped to a fixed point
-  of all fence-tag variants across all four names (`UNTRUSTED_FENCE_TAG` and `fencedRegion`,
-  `:153-172`), and framed as untrusted data to analyze rather than instructions to follow
-  (`:192-195`). The repo pins this structural invariant in `tests/prompt_census_test.ts:42` (mutant
-  test at `:254-282`). The prompt is sent to Gemini `generateContent` with Google Search grounding
-  (`src/worker/script.ts:468`), while the TTS builders (`src/tts/gemini.ts:1421`, `:1498`, `:2207`)
-  are transcript-only without prompt instructions (`tests/prompt_census_test.ts:49-53`). What the
+  (`buildScriptPrompt`), every publisher-controlled field (`title`, `author`, `summary`,
+  `body`) is length-capped before fencing (the `capped()` local, bound `DEFAULT_MAX_BODY_CHARS`
+  12,000 chars), enclosed in field-specific XML-like tags (`<article_title>`,
+  `<article_author>`, `<article_summary>`, `<article_body>` — the four names in `FENCE_NAMES`), stripped to a fixed point
+  of all fence-tag variants across all four names (`UNTRUSTED_FENCE_TAG` and `fencedRegion`),
+  and framed as untrusted data to analyze rather than instructions to follow (the framing text inside
+  `buildScriptPrompt`). The repo pins this structural invariant in `tests/prompt_census_test.ts`
+  (`EXPECTED_PROMPT_SITES`, which records `buildScriptPrompt` as "fenced", and the mutant tests
+  "MUTANT: deleting the fence call flips buildScriptPrompt to unmitigated" and "MUTANT: deleting
+  capped() from a field in buildScriptPrompt fails the cap check"). The prompt is sent to Gemini
+  `generateContent` with Google Search grounding
+  (`createGroundedScriptGenerator` in `src/worker/script.ts`), while the TTS builders
+  (`formatNarrationIntro`, `formatNarrationPrompt` and `formatDialoguePrompt` in `src/tts/gemini.ts`,
+  the three sites `EXPECTED_PROMPT_SITES` records as "transcript-only") are transcript-only without
+  prompt instructions. What the
   fence CANNOT defend against: a fence reduces delimiter breakout and payload size, but does not
   eliminate semantic prompt injection. Injections that survive within the 12,000-character cap can
   still attempt to bias the model's reasoning or grounded retrieval; model-level instruction following
   is not guaranteed; and output-side effects in generated dialogue turns flow directly into TTS
-  narration (`src/worker/synthesis.ts:1094`, `src/tts/gemini.ts:2116`). On the direct narration path,
+  narration (`createGeminiSynthesizer` in `src/worker/synthesis.ts` and the `GeminiTtsClient`
+  narration request in `src/tts/gemini.ts`). On the direct narration path,
   article text is read aloud verbatim. The blast radius remains narration audio content integrity,
   not code execution or server compromise.
 - **Residual (documented, accepted) — a PDF parse outlives the request that refused it
   (audio-feed-ppikk, audio-feed-a3y; recorded on audio-feed-32leq):** `pdf-parse` accepts no
   `AbortSignal` into its worker loop, so the deadline is a `Promise.race` that answers 504 and
   abandons the promise rather than a cancellation — the abandoned parse keeps burning CPU until it
-  finishes or the isolate recycles (`src/ingest/url.ts:805-808` states the limitation; the
-  unabortable call is `:864`, the race `:872`). What IS bounded: input size — `MAX_PDF_BYTES`
-  10 MiB (`:42`, checked against `content-length` at `:256` and against the bytes themselves at
-  `:947`); the WAIT — 504 at the 10 s `PDF_PARSE_TIMEOUT_MS` (`:43`, `:841-852`), preceded by a
-  30 s bound on the upload body (`src/ingest/upload.ts:499`); and the NUMBER of parses running at
-  once — `MAX_CONCURRENT_PDF_PARSES` **2** (`:49`), where the slot is bound to the PARSE rather
-  than to the request (`:866-868`) and is therefore still held after a 504, and a request arriving
-  with both slots held is refused 429 instead of being queued or started (`:826-831`). WHY
+  finishes or the isolate recycles (the `activePdfParses` counter and the surrounding comment in
+  `src/ingest/url.ts` state the limitation; the
+  unabortable call is `pdfParse(bytes)` inside `parsePdfBounded`, and the race is the
+  `Promise.race` in that same function). What IS bounded: input size — `MAX_PDF_BYTES`
+  10 MiB (checked against `content-length` in `fetchArticle` and against the bytes themselves in
+  `extractPdfArticle`); the WAIT — 504 at the 10 s `PDF_PARSE_TIMEOUT_MS` (raised by
+  `parsePdfBounded`), preceded by a
+  30 s bound on the upload body (the `readBounded` call in `createUploadIngestHandler`,
+  `src/ingest/upload.ts`); and the NUMBER of parses running at
+  once — `MAX_CONCURRENT_PDF_PARSES` **2**, where the slot is bound to the PARSE rather
+  than to the request (the `parsePromise.then(releaseSlot, releaseSlot)` line in `parsePdfBounded`)
+  and is therefore still held after a 504, and a request arriving
+  with both slots held is refused 429 instead of being queued or started (the same function). WHY
   ACCEPTED rather than bounded: the only real bound is an abort inside `pdf-parse`, which the
-  pinned dependency (`npm:pdf-parse@1.1.1`, `:10`) does not expose, so no code in this repo can
+  pinned dependency (the `pdfParse` import at the head of `src/ingest/url.ts`, `npm:pdf-parse@1.1.1`)
+  does not expose, so no code in this repo can
   stop a run that has begun; and the counter is module state, so the cap is **per isolate**, not
   fleet-wide — the exposure is 2 x the isolate count, rising with the fleet rather than capped by
   it. The worst case the tree makes derivable: a subscriber is admitted at most 50 submissions per
   rolling 24 hours at the default budget — the cap IS that subscriber's funded budget, so an
   admin-set personal budget raises it (`refuseIngestOverCreationCap`,
-  `src/compose/ingest.ts:178-193`, composed into `/api/ingest` and `/api/upload` at `:216-219`) —
+  `src/compose/ingest.ts`, composed into `/api/ingest` and `/api/upload` by `authorizeIngestWithCap`) —
   so ≤ **50 x 10 MiB** of PDF per subscriber per day with **at most 2 parses executing at once per
   isolate**. Input size and document COUNT are bounded; parse DURATION is not, so the residual is
   CPU time proportional to document size, inside a per-isolate concurrency window rather than
@@ -379,19 +427,24 @@ routes, listed separately because the attacker's position there is different.
 - **Residual (documented, accepted) — the .docx inflation ceiling bounds one document, not the
   number inflating at once (audio-feed-yl3bq; recorded on audio-feed-32leq):** a .docx arrives only
   through `POST /api/upload`, and only its `word/document.xml` entry is inflated
-  (`extractDocxArticle`, `src/ingest/upload.ts:313`; entry located at `:353-378`). The current bound
-  is `MAX_DOCX_INFLATED_BYTES` **4 MiB** (`:26`), enforced WHILE streaming: the inflated total is
+  (`extractDocxArticle`, `src/ingest/upload.ts`). The current bound
+  is `MAX_DOCX_INFLATED_BYTES` **4 MiB**, enforced WHILE streaming: the inflated total is
   counted chunk by chunk and the read is refused the moment it crosses the ceiling
-  (`inflateRawBounded`, `:190-218`), so the allocation can never exceed the cap. A stored
-  (`compressionMethod` 0) entry takes the same ceiling before use (`:405-420`), so choosing no
+  (`inflateRawBounded`), so the allocation can never exceed the cap. A stored
+  (`compressionMethod` 0) entry takes the same ceiling before use (the `compressionMethod` branch in
+  `extractDocxArticle`), so choosing no
   compression does not dodge it. What happens when it is exceeded: `IngestError` 413 naming the
   4 MiB limit, answered as HTTP 413 carrying `limit: MAX_DOCX_INFLATED_BYTES`, with the reader
-  cancelled in `finally` (`:217`) — the upload is rejected before extraction, before the
-  192,000-byte `MAX_NARRATION_BYTES` check (`:16`, `:845-872`) and before any paid call;
-  `tests/upload_test.ts:544-604` and `:606-644` pin the deflated and stored shapes. Compressed
-  input is separately capped at `MAX_UPLOAD_BYTES` 10 MiB (`:15`, read bounded at `:499-507`), the
-  entry's declared size is re-checked against the real buffer (`:399-401`), and extraction is a
-  linear SCAN of the capped XML rather than a DOM (`extractDocxParagraphs`, `:269-311`,
+  cancelled in the `finally` of `inflateRawBounded` — the upload is rejected before extraction, before the
+  192,000-byte `MAX_NARRATION_BYTES` check and before any paid call;
+  three tests in `tests/upload_test.ts` pin the deflated and stored shapes: "extractDocxArticle rejects
+  a deflated zip bomb DURING decompression, before allocation (audio-feed-yl3bq)", "POST /api/upload
+  rejects a deflated .docx zip bomb with 413 naming the inflated limit (audio-feed-yl3bq)" and "POST
+  /api/upload rejects a stored .docx whose document XML exceeds the inflated bound (audio-feed-yl3bq)". Compressed
+  input is separately capped at `MAX_UPLOAD_BYTES` 10 MiB (read bounded in
+  `createUploadIngestHandler`), the
+  entry's declared size is re-checked against the real buffer (in `extractDocxArticle`), and extraction is a
+  linear SCAN of the capped XML rather than a DOM (`extractDocxParagraphs`,
   audio-feed-heeem), so working memory stays proportional to the ceiling. WHY ACCEPTED rather than
   bounded further: 4 MiB is a **per-document, per-request** ceiling with no concurrency counter
   behind it — unlike PDF parsing there is no cap on how many inflations run at once and no 429
@@ -399,21 +452,25 @@ routes, listed separately because the attacker's position there is different.
   most 4 MiB of inflated XML, one linear scan over it, and extracted text limited downstream to
   192,000 narration bytes — a few MiB of transient allocation plus a linear pass, multiplied by the
   uploads a subscriber has in flight, whose COUNT the per-subscriber creation cap bounds — 50 per
-  rolling 24 hours at the default budget (`src/compose/ingest.ts:178-193`). Two formats are NOT
-  parsed at all: legacy `.doc` returns 415 (`:665-678`) and a bare zip archive returns 415
-  (`:680-693`).
+  rolling 24 hours at the default budget (`refuseIngestOverCreationCap`, `src/compose/ingest.ts`). Two formats are NOT
+  parsed at all: legacy `.doc` returns 415 and a bare zip archive returns 415 (the `detected.kind`
+  branches in `createUploadIngestHandler`, `src/ingest/upload.ts`; reproducible check:
+  `grep -n 'Zip archives are not supported\|Legacy .doc files' src/ingest/upload.ts`).
 
 
 ### Boundary 7 — Static, well-known and public pages
 
 - **Routes:** `/`, `/sw.js`, `/manifest.json`, `/robots.txt`, `/icon.svg`, `/assets/:name`,
-  `/.well-known/webauthn`, `/health`, `/assets/voices/:voice` (`src/app.ts:146`, `:227-249`).
+  `/.well-known/webauthn`, `/health`, `/assets/voices/:voice` — each the registration line naming
+  that pattern in `createRouter` (`src/app.ts`).
 - **Attacker controls:** nothing credential-bearing; some query parameters and the Asset name.
 - **Mitigations:** HTML responses carry a per-response CSP nonce and the shared security-header set
   (`src/router.ts` `applySecurityHeaders`; `src/routes/csp.ts` `htmlResponse`/`newCspNonce`); assets
-  are content-addressed (audio-feed-3xq, `src/app.ts:227`); voice samples are NOT public — the
+  are content-addressed (audio-feed-3xq, the `router.get("/assets/:name", …)` line in `src/app.ts`); voice samples are NOT public — the
   handler runs session → voice allowlist → cache/generate, and nothing before the allowlist check
-  reads a blob or pays for generation (`src/routes/voice-samples.ts:14`, `:73`); the service worker
+  reads a blob or pays for generation (the guard-order comment at the head of
+  `src/routes/voice-samples.ts` and the `isVoiceSampleName` refusal in
+  `createVoiceSampleHandler`); the service worker
   excludes token-bearing paths from every cache (audio-feed-s3f0, offline-cache section below);
   `/health` deliberately discloses deploy metadata — existing section below.
 - **Residual (documented, accepted):** `/health` is an unauthenticated reconnaissance signal
@@ -428,11 +485,12 @@ routes, listed separately because the attacker's position there is different.
   stored state (feeds, episodes), reachable only through boundaries 2 and 6. There is no inbound
   webhook surface at all: every provider interaction is outbound polling.
 - **Mitigation:** outbound fetches ride boundary 6's walls; TTS provider work is deadline-bounded
-  with explicit handling of segments billed after a deadline fires (`src/tts/gemini.ts:123-133`),
+  with explicit handling of segments billed after a deadline fires (the segment and deadline
+  constants in `src/tts/gemini.ts`; `MAX_TTS_SEGMENTS` bounds the segment count),
   under the limits in `src/synthesis/limits.ts`.
 - **Residual (documented, accepted):** a synthesis job's provider cost can be incurred by content
   that later fails, and such an attempt does not increment the daily counters (they bill only at
-  `ready`, `src/storage/kv/episodes.ts:64-74`); accepted as the price of the feature. Since
+  `ready`, the `atomicPutEpisode` commit in `src/storage/kv/episodes.ts`); accepted as the price of the feature. Since
   audio-feed-kp30l the number of episodes one subscriber can create per rolling 24 hours — and so the
   number that can fail — is bounded at 50 (boundary 2), so failed-attempt spend is bounded at 50 x
   `maxAttempts` 3 paid attempts per subscriber per day rather than unbounded.
@@ -538,8 +596,9 @@ routes, listed separately because the attacker's position there is different.
   documented 25 audio tokens/s) costs ~$0.18-$0.36, i.e. ~$9-$18/day per token. PER HOUR that figure is
   the whole allowance rather than a share of it, because the window resets at 00:00Z and the worker
   drains at `batchSize` 5 per tick with a measured ~10.2 s per episode — all 50 spend within the first
-  ~20-25 minutes of a UTC day (synthesis cron runs `*/2 * * * *`, `src/cron.ts:207`, at `batchSize` 5
-  per tick, `src/worker/synthesis.ts:280`: 50 episodes needs 10 ticks = ~20 minutes minimum, plus ~50 s
+  ~20-25 minutes of a UTC day (the `audio-feed-synthesis` job in `registerCronJobs`,
+  `schedule: "*/2 * * * *"`, `src/cron.ts`, at `batchSize` 5
+  per tick, `DEFAULTS.batchSize` in `src/worker/synthesis.ts`: 50 episodes needs 10 ticks = ~20 minutes minimum, plus ~50 s
   of batch work per tick). The per-episode ceiling cannot be grown by a bigger article either: narration
   input is capped at `MAX_NARRATION_BYTES` 192,000 bytes at accept for `/api/upload`
   (`src/ingest/upload.ts`) and at the worker's `maxInputBytes` preflight for every path, before any paid
@@ -552,43 +611,46 @@ routes, listed separately because the attacker's position there is different.
   — all happen before any paid call. So one request is a margin on the ceiling, not a way round it.
 - **Residual (CLOSED by the creation cap — audio-feed-kp30l; recorded 2026-11-06):** accepted
   episode CREATION is capped per subscriber, so the failed-attempt spend this passage used to call
-  UNBOUNDED is bounded. `authorizeIngestWithCap` (`src/compose/ingest.ts:195-199`) composes the
-  identity gate (`authorizeIngest`, `src/compose/ingest.ts:68`) with `refuseIngestOverCreationCap`
-  (`:157-193`) on both `/api/ingest` and `/api/upload` (`:325`, `:365`), and since
+  UNBOUNDED is bounded. `authorizeIngestWithCap` (`src/compose/ingest.ts`) composes the
+  identity gate (`authorizeIngest`) with `refuseIngestOverCreationCap`
+  (same file) on both `/api/ingest` and `/api/upload` — the only two registrations that compose it — and since
   audio-feed-ukuka and audio-feed-jgois periodic feed polls and initial subscription polls consume
-  the SAME row (`src/ingest/feed.ts:313-314`, `:658-662`), while subscription creation is bounded
+  the SAME row (`pollFeedSource` and `subscribeToFeed` in `src/ingest/feed.ts`), while subscription creation is bounded
   by `sourceCeilingFor` (`src/compose/ingest.ts`).
   The window is one `SlidingWindowRateLimiter` row: `INGEST_CREATION_RATE.windowMs` = 24 hours
-  (`src/compose/ingest.ts:125-129`), namespace `ingest_creation` (`:131`), keyed on the USER id —
+  (the `INGEST_CREATION_RATE` constant), namespace `INGEST_CREATION_WINDOW` (`ingest_creation`, same file), keyed on the USER id —
   the account whose token pays, not the address — and the bound is that subscriber's own funded
-  budget, `dailyEpisodeBudgetFor` (`src/worker/synthesis.ts:339-352`): an admin-set personal
-  budget, else `DEFAULT_DAILY_EPISODE_BUDGET` **50** (`src/config.ts:42`). Cap and spend budget
+  budget, `dailyEpisodeBudgetFor` (`src/worker/synthesis.ts`): an admin-set personal
+  budget, else `DEFAULT_DAILY_EPISODE_BUDGET` **50** (`src/config.ts`). Cap and spend budget
   read one number, so the cap cannot refuse a day the budget would fund. The check sits inside
   `authorize`, i.e. after identity resolves and BEFORE the article fetch and before
-  `putArticleWithEpisode` commits (`src/compose/ingest.ts:195-199`, `src/ingest/url.ts:1130`), and
+  `putArticleWithEpisode` commits (`authorizeIngestWithCap` in `src/compose/ingest.ts`, called from
+  `createUrlIngestHandler` and the upload handler), and
   a REFUSAL costs no credit: the refusal branch returns the active window unchanged rather than
-  appending a hit (`src/auth/rate_limit.ts:137-145`), so it buys no fetch and commits no episode,
+  appending a hit (`SlidingWindowRateLimiter` in `src/auth/rate_limit.ts`), so it buys no fetch and commits no episode,
   and it answers `429` naming the bound (`episode_creations_per_token`), the limit, the window and
-  a `retry-after` (`src/compose/ingest.ts:172-192`). `tests/ingest_creation_cap_test.ts` pins the
-  shape from the outside: N accepted, the N+1th refused by name, and the refusal never reaching
-  the fetch (`:97-131`).
+  a `retry-after` (the refusal branch of `refuseIngestOverCreationCap`). `tests/ingest_creation_cap_test.ts` pins the
+  shape from the outside: "audio-feed-kp30l: one token is accepted up to the creation bound and the
+  next submit is refused by name".
 - **Residuals that remain (recorded):** (a) it is a ceiling, not an absence — the worst case at
   the default budget is 50 accepted creations x `maxAttempts` 3 claims x the per-episode **$9.70**
   provider ceiling quoted above = **$1,455 per rolling 24 hours** per subscriber, against the $485
   that 50 COMPLETED episodes cost, because the window bounds CREATIONS while the daily counters
-  bill only at `ready` (`src/storage/kv/episodes.ts:64-74`) and a re-claim that resumes no
-  persisted segment re-bills (`src/worker/synthesis.ts:126-132`). (b) A creation whose fetch fails
+  bill only at `ready` (`atomicPutEpisode`, `src/storage/kv/episodes.ts`) and a re-claim that resumes no
+  persisted segment re-bills (`Synthesizer` in `src/worker/synthesis.ts`). (b) A creation whose fetch fails
   still consumed its slot, so a mistyped or unreachable URL costs a legitimate subscriber one of
   fifty — accepted: the count has to precede the fetch for the refusal to be cheap (boundary 2,
   residual (d)). (c) Initial subscription polls consume the SAME cap row as periodic polls and
   ingest/upload: when allowance is exhausted, initial polls DEFER items (queueing 0, holding offset 0)
-  rather than bypassing the cap or refusing the subscription itself (`src/ingest/feed.ts:658-675`).
+  rather than bypassing the cap or refusing the subscription itself (`subscribeToFeed` in
+  `src/ingest/feed.ts`, which defers and holds offset 0).
   Subscription creation is capped at `sourceCeilingFor` (`src/compose/ingest.ts`), derived from
   `dailyEpisodeBudgetFor` (50 by default), so subscribers cannot accumulate unbounded active sources;
   creating the (N+1)th source is refused with 429 (`SubscriptionLimitError`) and consumes no credit.
   (d) A periodic poll with no allowance left DEFERS rather than
   refuses: nothing is written for the item, not even its URL, and the scan offset is kept so the
-  same window is retried (`src/ingest/feed.ts:426-440`, `:337`) — so an item whose publisher drops
+  same window is retried (the `feedScanOffset` write-back in `pollFeedSource`, `src/ingest/feed.ts`, kept
+  whenever `deferred > 0`) — so an item whose publisher drops
   it (window rotation, a truncated document) before the allowance comes back is LOST silently, and
   no later poll can recover it. (e) One subscriber's cap does not bound the fleet: N approved
   subscribers multiply it, which is why `GLOBAL_DAILY_EPISODE_BUDGET` (**500** paid episodes per
@@ -613,26 +675,26 @@ its concrete code anchor, and the exact command to verify the claim.
 |---|---|---|---|---|
 | 1 | Dynamic code execution (`eval`, `new Function`, dynamic runtime evaluation) | The server runtime contains zero calls to `eval()`, `new Function()`, or dynamic code evaluation in `src/` or `main.ts`. All application modules and dependencies are statically imported, compiled, and strictly type-checked ahead of time. | Whole runtime (`src/`, `main.ts`) | `grep -rnE 'eval\(|new Function\(' src/ main.ts` (0 matches at `6ca30737`, verified 2026-11-09) |
 | 2 | Command execution and process spawning (`Deno.Command`, `Deno.run`) | Neither `Deno.Command` nor `Deno.run` is used anywhere in server runtime source (`src/` or `main.ts`). Incoming request data never reaches a process spawner or system shell; requests are handled strictly in-process using standard Web and Deno runtime APIs. | Whole runtime (`src/`, `main.ts`) | `grep -rnE 'Deno\.Command|Deno\.run' src/ main.ts` (0 matches at `6ca30737`, verified 2026-11-09) |
-| 3 | Service Worker shell cache prefix refuse list (`SENSITIVE_PREFIXES`) | `SENSITIVE_PREFIXES` is a static constant in worker source code acting as an admission refuse guard in `/sw.js` to exclude capability and authenticated routes from `audio-feed-shell-v2`; it is not mutable database state or user-controlled configuration. | `src/routes/pwa.ts:46`, `src/routes/pwa.ts:137`, `src/routes/pwa.ts:392` | `grep -n -C 1 'SENSITIVE_PREFIXES' src/routes/pwa.ts` (confirms definition array, `/sw.js` template injection, and cache admission check) |
-| 4 | Keyword and pattern hits on documentation, comments, and audit records | Text occurrences of security terminology (e.g. CSRF, SSRF, XSS, tokens, exploits) in markdown files (`docs/`, `THREAT_MODEL.md`, `README.md`) and code comments are architectural documentation, threat model definitions, and audit explanations, not executable runtime code or exposed endpoints. | `docs/**`, `*.md`, `src/routes/pwa.ts:30-36` | `git ls-files 'docs/**' '*.md' | grep -vE '\.(ts|js)$'` (confirms documentation files are non-executable text) and `sed -n '30,36p' src/routes/pwa.ts` (confirms cited code hit is inside JSDoc block comment) |
+| 3 | Service Worker shell cache prefix refuse list (`SENSITIVE_PREFIXES`) | `SENSITIVE_PREFIXES` is a static constant in worker source code acting as an admission refuse guard in `/sw.js` to exclude capability and authenticated routes from `audio-feed-shell-v2`; it is not mutable database state or user-controlled configuration. | `SENSITIVE_PREFIXES` in `src/routes/pwa.ts` — its definition, its injection into the `/sw.js` template, and the admission check | `grep -n -C 1 'SENSITIVE_PREFIXES' src/routes/pwa.ts` (confirms definition array, `/sw.js` template injection, and cache admission check) |
+| 4 | Keyword and pattern hits on documentation, comments, and audit records | Text occurrences of security terminology (e.g. CSRF, SSRF, XSS, tokens, exploits) in markdown files (`docs/`, `THREAT_MODEL.md`, `README.md`) and code comments are architectural documentation, threat model definitions, and audit explanations, not executable runtime code or exposed endpoints. | `docs/**`, `*.md`, and the JSDoc block above `SENSITIVE_PREFIXES` in `src/routes/pwa.ts` | `git ls-files 'docs/**' '*.md' | grep -vE '\.(ts|js)$'` (confirms documentation files are non-executable text) and `grep -n -B 17 'export const SENSITIVE_PREFIXES' src/routes/pwa.ts` (confirms the cited code hit is inside a JSDoc block comment) |
 | 5 | Static literal regular expression execution on length-bounded inputs (`RegExp.prototype.exec`, `RegExp.prototype.test`, `String.prototype.match`, `matchAll`) | Regular expressions across routing, key parsing, HTTP headers, rate limiting, and synthesis chunking execute static literal patterns without nested quantifiers over short, length-bounded inputs (URL paths, HTTP headers, XML tags from S3, IP addresses, bounded text chunks, model output). The regex execution class is NOT safe by construction: complex multi-line patterns like markdown code block extraction in `src/tts/gemini.ts` exhibited quadratic complexity under measurement and were replaced with a bounded hand-written scanner (`tests/c0gj_linear_complexity_test.ts`). | Whole runtime (`src/`, `main.ts`) | `grep -rnE '\.(exec|match|matchAll)\(' src/ main.ts` (36 matches at `34ae917d`, verified 2026-11-10; 25 static literal regex executions across 14 files, 9 Cache/Client/Storage calls, 2 URLPattern exec calls; 11 regex execution sites sit outside original 7 sampled anchors, 0 unanchored quadratic patterns) |
-| 6 | Client-side browser `fetch()` invocations in frontend scripts — the modules under `src/assets/` and the inline scripts embedded in route modules | Every browser-side `fetch()` call in the frontend enumerates to one of: a same-origin `/api/...` path literal, a `/api/...` literal prefix concatenated with `encodeURIComponent()` segments, `ORIGIN + ...` (the origin the page was rendered with), or a capability audio URL this server minted (`episode.audioUrl`). Three wrappers forward a CALLER-supplied path into `fetch()` — `api(path, options)` (`src/assets/admin.js:209`), `send(method, path, body)` (`src/routes/account.ts:542`) and `post(path, body)` (`src/routes/shell.ts:850`) — so the guarantee is a property of their call sites, not of the wrapper signatures; the row 6 note below states the constraint those call sites satisfy today. | `src/assets/admin.js:210`, `src/assets/home.js:113`, `src/assets/cwv.js:99`, `src/assets/listen.js:1245`, `src/assets/listen.js:1283`, `src/assets/listen.js:1838`, `src/routes/account.ts:543`, `src/routes/account.ts:653`, `src/routes/shell.ts:851` | `grep -rn 'fetch(' src/assets/ src/routes/ --exclude=pwa.ts` (15 hits at `07d8e60a`, verified 2026-11-10: 9 `fetch()` call sites — 6 in `src/assets/`, 3 inline in `src/routes/account.ts` and `src/routes/shell.ts` — plus 6 comment lines; the 4 `fetch(request)` service-worker passthroughs in `src/routes/pwa.ts` are row 7). **This command is `fetch(`-scoped: it enumerates the three wrapper DEFINITIONS above, not their call sites, so it cannot establish a call-site count — use the four-step method in "Register row 6 in detail" below.** |
-| 7 | Service Worker fetch event listener request passthroughs | The service worker's `fetch` handler uses `fetch(request)` as a standard passthrough for un-cached network requests, navigation requests, and network-first strategies; it does not redirect requests to third-party hosts or bypass security headers. | `src/routes/pwa.ts:319`, `src/routes/pwa.ts:345`, `src/routes/pwa.ts:388`, `src/routes/pwa.ts:427` | `grep -n 'fetch(request)' src/routes/pwa.ts` (verifies all 4 fetch handlers pass through un-cached requests to origin) |
-| 8 | Outbound S3/R2 client storage requests with path-shaped object keys | Storage operations target operator-configured endpoints (`#config.endpoint`) and enforce `assertSafeBlobKey(key)` prior to URL construction and SigV4 signing, preventing path traversal, dot segments (`..`), empty segments, or prefix escapes. | `src/storage/s3.ts:66`, `src/storage/s3.ts:70`, `src/storage/blob_key.ts:38` | `grep -n -C 2 'assertSafeBlobKey' src/storage/s3.ts src/storage/blob_key.ts` (confirms validation is executed in `#encodeKey` before `#objectUrl` builds request) |
+| 6 | Client-side browser `fetch()` invocations in frontend scripts — the modules under `src/assets/` and the inline scripts embedded in route modules | Every browser-side `fetch()` call in the frontend enumerates to one of: a same-origin `/api/...` path literal, a `/api/...` literal prefix concatenated with `encodeURIComponent()` segments, `ORIGIN + ...` (the origin the page was rendered with), or a capability audio URL this server minted (`episode.audioUrl`). Three wrappers forward a CALLER-supplied path into `fetch()` — `api(path, options)` in `src/assets/admin.js`, `send(method, path, body)` in `src/routes/account.ts` and `post(path, body)` in `PASSKEY_CLIENT` (`src/routes/shell.ts`) — so the guarantee is a property of their call sites, not of the wrapper signatures; the row 6 note below states the constraint those call sites satisfy today. | The 9 `fetch(` call sites in `src/assets/admin.js`, `home.js`, `cwv.js`, `listen.js` (3), `src/routes/account.ts` (2) and `src/routes/shell.ts` — enumerated by the command in the next column | `grep -rn 'fetch(' src/assets/ src/routes/ --exclude=pwa.ts` (15 hits at `07d8e60a`, verified 2026-11-10: 9 `fetch()` call sites — 6 in `src/assets/`, 3 inline in `src/routes/account.ts` and `src/routes/shell.ts` — plus 6 comment lines; the 4 `fetch(request)` service-worker passthroughs in `src/routes/pwa.ts` are row 7). **This command is `fetch(`-scoped: it enumerates the three wrapper DEFINITIONS above, not their call sites, so it cannot establish a call-site count — use the four-step method in "Register row 6 in detail" below.** |
+| 7 | Service Worker fetch event listener request passthroughs | The service worker's `fetch` handler uses `fetch(request)` as a standard passthrough for un-cached network requests, navigation requests, and network-first strategies; it does not redirect requests to third-party hosts or bypass security headers. | The 4 `fetch(request)` passthroughs in `boundOfflineAudio`, `src/routes/pwa.ts` — enumerated by the command in the next column | `grep -n 'fetch(request)' src/routes/pwa.ts` (verifies all 4 fetch handlers pass through un-cached requests to origin) |
+| 8 | Outbound S3/R2 client storage requests with path-shaped object keys | Storage operations target operator-configured endpoints (`#config.endpoint`) and enforce `assertSafeBlobKey(key)` prior to URL construction and SigV4 signing, preventing path traversal, dot segments (`..`), empty segments, or prefix escapes. | `#encodeKey` and `#objectUrl` on `S3BlobStore` (`src/storage/s3.ts`), and `assertSafeBlobKey` (`src/storage/blob_key.ts`) | `grep -n -C 2 'assertSafeBlobKey' src/storage/s3.ts src/storage/blob_key.ts` (confirms validation is executed in `#encodeKey` before `#objectUrl` builds request) |
 | 9 | Offline evidence capture scripts and artifacts under `docs/evidence/**` | Artifacts under `docs/evidence/` are offline proof outputs (run records, PNG screenshots) committed for build and verification evidence; they are never mounted as static routes or served by the application HTTP server. | Offline directory `docs/evidence/**` | `grep -rn 'docs/evidence' src/ main.ts` (0 matches at `6ca30737`, verified 2026-11-09; confirms path is never referenced in server routing or static serving) |
-| 10 | Dynamic regular expression construction (`new RegExp`) | Dynamic RegExp pattern construction is strictly limited to compile-time boundary constants escaped via `escapeRegExp()` (`src/routes/shell.ts:572-573` for `CONFIRM_SHARED_BEGIN`/`CONFIRM_SHARED_END`) and an internal hardcoded identifier array (`src/worker/script.ts:153` for `FENCE_NAMES`). Arbitrary user input is never interpolated into regular expressions. Dynamic regex construction is not trusted by class; new sites require explicit audit and register entry. | `src/routes/shell.ts:572-573`, `src/worker/script.ts:153` | `grep -rnE 'new RegExp\(' src/ main.ts` (3 matches at `34ae917d`, verified 2026-11-10; 2 in `src/routes/shell.ts`, 1 in `src/worker/script.ts`, 0 unescaped user-input patterns; enforced by `tests/dynamic_regexp_population_test.ts`) |
+| 10 | Dynamic regular expression construction (`new RegExp`) | Dynamic RegExp pattern construction is strictly limited to compile-time boundary constants escaped via `escapeRegExp()` (`CONFIRM_SHARED_BEGIN`/`CONFIRM_SHARED_END` in `src/routes/shell.ts`) and an internal hardcoded identifier array (`FENCE_NAMES` in `src/worker/script.ts`, which `UNTRUSTED_FENCE_TAG` is built from). Arbitrary user input is never interpolated into regular expressions. Dynamic regex construction is not trusted by class; new sites require explicit audit and register entry. | `CONFIRM_SHARED_BEGIN`/`CONFIRM_SHARED_END` (`src/routes/shell.ts`), `FENCE_NAMES` (`src/worker/script.ts`) | `grep -rnE 'new RegExp\(' src/ main.ts` (3 matches at `34ae917d`, verified 2026-11-10; 2 in `src/routes/shell.ts`, 1 in `src/worker/script.ts`, 0 unescaped user-input patterns; enforced by `tests/dynamic_regexp_population_test.ts`) |
 
 
 ### Register row 6 in detail — the path-forwarding helpers in inline scripts (audio-feed-fxeug)
 
 Three browser-side helpers take a path instead of a fixed route and hand it straight to `fetch()`:
 
-- `api(path, options = {})` — `src/assets/admin.js:209`, `fetch(path, ...)` at `:210`; 16 call sites, all
+- `api(path, options = {})` — the helper `api` in `src/assets/admin.js`; 16 call sites, all
   in that file (module-scoped, so the file is the whole population).
-- `send(method, path, body)` — `src/routes/account.ts:542`, `fetch(path, ...)` at `:543`; 13 call sites,
-  all in that file. `send` at `src/assets/cwv.js:80` is a same-name collision with a different signature
+- `send(method, path, body)` — the helper `send` in `src/routes/account.ts`; 13 call sites,
+  all in that file. The `send` in `src/assets/cwv.js` is a same-name collision with a different signature
   (`send(metric, value)`), takes no path, and is not in this population.
-- `post(path, body)` — `src/routes/shell.ts:850`, `fetch(path, ...)` at `:851`; 11 call sites, none of
+- `post(path, body)` — the helper `post` in `PASSKEY_CLIENT` (`src/routes/shell.ts`); 11 call sites, none of
   them in `shell.ts` (see the enumeration method below).
 
 **How these populations are enumerated (audio-feed-fxeug review correction, `a0f55db1`).** Counting
@@ -643,15 +705,16 @@ the call sites are in *different files*:
 
 1. Locate the definition (`grep -rnE 'function (api|send|post)\(' src/`).
 2. For a definition that lives inside a template literal, find which pages splice that literal into
-   their own script: `post` is defined in `PASSKEY_CLIENT` (`src/routes/shell.ts:796`), exported, and
-   interpolated at `src/routes/login.ts:129` and `src/routes/account.ts:473`. Neither page imports the
+   their own script: `post` is defined in `PASSKEY_CLIENT` (`src/routes/shell.ts`), exported, and
+   interpolated into `renderLoginPage` (`src/routes/login.ts`) and `renderAccountPage`
+   (`src/routes/account.ts`). Neither page imports the
    *function* — they import the string that inlines it — so the helper is in scope at runtime while
    being invisible to any import graph or single-file grep.
 3. Grep the bare name across all of `src/` and `main.ts`, not one file: `grep -rnE '(^|[^.\w])post\('`.
    The leading guard drops the router method `router.post(` in `src/app.ts` and the same-named method
    declared in `src/router.ts`; prose and string decoys such as `" post(s) queued"` go with them, and
-   the scope check in step 2 discards unrelated same-name helpers (the test-local `post` at
-   `tests/regenerate_test.ts:99` builds a server-side `Request`; it is not the browser wrapper and is
+   the scope check in step 2 discards unrelated same-name helpers (the test-local `post` in
+   `tests/regenerate_test.ts` builds a server-side `Request`; it is not the browser wrapper and is
    not in `src/`).
 4. Read each surviving site's path argument. All three families were counted this way at `a0f55db1`:
    16 + 13 + 11 = **40 wrapper call sites**.
@@ -673,24 +736,34 @@ omitting all 11 `post(` sites):
   imprecise and is corrected here: 25 pass a pure string literal and 15 build the path by
   concatenating a literal `/api/...` prefix with `encodeURIComponent(...)` segments
   (e.g. `"/api/account/sources/" + encodeURIComponent(id)`). Per family:
-  - `api(` — 16 = 5 pure literals (`:236`, `:253`, `:513`, `:611`, `:740`) + 11 concatenated
-    (`:300`, `:321`, `:358`, `:815`, `:860`, `:921`, `:970`, `:1057`, `:1093`, `:1143`, `:1203`).
-  - `send(` — 13 = 9 pure literals (`:491`, `:510`, `:529`, `:628`, `:718`, `:739`, `:818`, `:838`,
-    `:854`) + 4 concatenated (`:758`, `:777`, `:797`, `:890`).
-  - `post(` — 11 = **11 pure literals, 0 concatenated**: `/api/auth/login/options`
-    (`src/routes/login.ts:158`, `:201`), `/api/auth/login/verify` (`:162`, `:214`),
-    `/api/auth/bootstrap` (`:270`), `/api/auth/register/options` (`:272`, `:294`, and
-    `src/routes/account.ts:871`), `/api/auth/register/verify` (`:274`, `:312`, and
-    `src/routes/account.ts:873`). Every one is a single-leading-slash same-origin `/api/...` string —
+  - `api(` — 16 = 5 pure literals + 11 concatenated; enumerated by
+    `grep -nE '(^|[^.\w])api\(' src/assets/admin.js`, which returns 17 lines: this 16 plus the
+    declaration. Call-site line numbers are NOT reproduced here — they are positions inside a
+    1,200-line inline script and rot on the next edit above them; the grep is the citation.
+  - `send(` — 13 = 9 pure literals + 4 concatenated; enumerated by
+    `grep -nE '(^|[^.\w])send\(' src/routes/account.ts`, which returns 14 lines: these 13 plus the
+    declaration.
+  - `post(` — 11 = **11 pure literals, 0 concatenated**, enumerated by
+    `grep -rnE '(^|[^.\w])post\(' src/ main.ts` — 17 lines raw, discounted by step 3's guards to
+    these 11 (declaration, `Router.post`'s own declaration, two `" post(s) queued"` prose decoys and
+    one comment). The eleven, by
+    PATH: `/api/auth/login/options` (twice in `renderLoginPage`, `src/routes/login.ts`),
+    `/api/auth/login/verify` (twice there), `/api/auth/bootstrap` (there),
+    `/api/auth/register/options` (twice there, once in `renderAccountPage`,
+    `src/routes/account.ts`), and `/api/auth/register/verify` (twice there, once in
+    `renderAccountPage`). Every one is a single-leading-slash same-origin `/api/...` string —
     no host, no scheme, no `//`, no concatenation, no variable component — so the constraint above
     holds for all 11 today. The defect this correction fixes is the undercount, not a live violation.
 - **No call site in any family passes anything other than a literal or a literal-plus-
   `encodeURIComponent` concatenation** — no template-literal paths, no bare variables, no
   caller-supplied hosts.
 - The one caller-supplied component inside a path is `action` in `act(userId, action, button)`
-  (`src/assets/admin.js:297`), appended to `/api/admin/users/<id>/`. `act(` has exactly two call sites
-  and both pass a literal (`"approve"` at `:398`, `"suspend"` at `:407`), but `action` is
-  caller-supplied by signature rather than fixed by construction, so `:300` counts as concatenation.
+  (the `act` helper in `src/assets/admin.js`), appended to `/api/admin/users/<id>/`. `act(` has
+  exactly two call sites and both pass a literal (`"approve"` and `"suspend"`), enumerated by
+  `grep -nE '(^|[^.\w])act\(' src/assets/admin.js` (3 lines: the declaration plus the two calls),
+  but `action` is
+  caller-supplied by signature rather than fixed by construction, so that one site counts as
+  concatenation.
 - The direct, non-wrapper calls are `fetch("/api/request-access")`, `fetch("/api/cwv")`,
   `fetch("/api/upload")`, two `ORIGIN + "/listen/..."` calls (`ORIGIN` is the origin the page was
   rendered with), and `fetch(episode.audioUrl)` (a capability URL this server minted).
