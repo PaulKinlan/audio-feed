@@ -1151,14 +1151,29 @@ const SHARED_CLIENT = "proof-cdp.ts";
 const DELIBERATE_ANNOTATION = "DELIBERATELY unbounded";
 
 /**
- * What makes a `new WebSocket(...)` argument a DEVTOOLS endpoint rather than any other websocket:
- * the DevTools target's own `webSocketDebuggerUrl`, the helper that reads DevToolsActivePort, or
- * the /json endpoints that hand that URL out. Matched on the ARGUMENT, with comments stripped, so
- * (a) tests/proof_cdp_test.ts is not counted as a client - it FABRICATES /json/list responses in a
- * mock server and never dials one - and (b) a comment that spells the idiom out is not either.
+ * The vocabulary of a DevTools endpoint: the target's own `webSocketDebuggerUrl`, the helper that
+ * reads DevToolsActivePort, or the /json endpoints that hand that URL out.
+ *
+ * A HINT, never a filter (audio-feed-h8cam review, P1). The census derives on ANY
+ * `new WebSocket(` because filtering on THIS vocabulary is exactly the blind spot a one-variable
+ * refactor defeats: a client that binds `const ep = await devtoolsEndpoint(); new WebSocket(ep)`,
+ * or inlines `ws://127.0.0.1:<port>/devtools/browser/...`, names none of these strings in its
+ * socket argument and so escaped the census silently - dodging all four rules with no message.
+ * The vocabulary is now read for one thing only: which classification the FAILURE MESSAGE should
+ * suggest to the operator.
  */
-const DEVTOOLS_ENDPOINT =
-  /webSocketDebuggerUrl|devtoolsEndpoint|DevToolsActivePort|\/json\/(?:list|new)/u;
+const DEVTOOLS_VOCABULARY = [
+  "webSocketDebuggerUrl",
+  "devtoolsEndpoint",
+  "DevToolsActivePort",
+  "/json/list",
+  "/json/new",
+] as const;
+
+/** Which DevTools vocabulary this text names, in the order above - empty means none of it. */
+function devtoolsVocabularyIn(text: string): string[] {
+  return DEVTOOLS_VOCABULARY.filter((word) => text.includes(word));
+}
 
 /** `scripts/foo.ts` -> `foo.ts`: how the lists below name a file, and how the census reads it out
  * of a path it computed rather than spelled. */
@@ -1233,9 +1248,44 @@ function socketArguments(code: string): string[] {
   return args;
 }
 
-/** Does this source dial the DevTools endpoint itself? */
-function opensDevtoolsSocket(source: string): boolean {
-  return socketArguments(codeOnly(source)).some((arg) => DEVTOOLS_ENDPOINT.test(arg));
+/**
+ * The socket arguments this source dials - EMPTY means it opens no socket at all, and nothing else
+ * excludes it. Deriving on the presence of `new WebSocket(` rather than on what its argument names
+ * is what closes the blind spot: the argument can be a variable, an awaited helper or an inline
+ * URL, and every one of those is still a socket this census has to see.
+ */
+function socketArgumentsOf(source: string): string[] {
+  return socketArguments(codeOnly(source));
+}
+
+/**
+ * What the unclassified failure says AFTER naming the file: which classification it most likely
+ * wants. It is derived from the file's own text, read for the vocabulary only, and it decides
+ * nothing.
+ *
+ * Three cases, because the blind spot this bead closed is one of them: an argument that names a
+ * DevTools endpoint is almost certainly a client; an argument that names NONE while the file names
+ * one elsewhere is the variable-bound shape (`const ep = await devtoolsEndpoint(); new
+ * WebSocket(ep)`), which must not be nudged towards `nonDevtoolsClients`; and a file with no
+ * vocabulary anywhere is the only case where a non-DevTools socket is the likely answer.
+ */
+function classificationHint(args: string[], source: string): string {
+  const inArgument = devtoolsVocabularyIn(args.join("\n"));
+  if (inArgument.length > 0) {
+    return `its socket argument names ${inArgument.join(" / ")}, so it is almost certainly a ` +
+      `DevTools client: bound its reply, annotate it "${DELIBERATE_ANNOTATION} - <reason>", or ` +
+      "prove its own bound";
+  }
+  const inFile = devtoolsVocabularyIn(source);
+  if (inFile.length > 0) {
+    return `its socket argument names no DevTools endpoint, but the file names ${
+      inFile.join(" / ")
+    } - a client that binds the endpoint to a variable first looks exactly like this, so bound its ` +
+      `reply or annotate it "${DELIBERATE_ANNOTATION} - <reason>"; if it is not a DevTools client ` +
+      "at all, list it in nonDevtoolsClients with a one-line reason";
+  }
+  return "neither its socket argument nor the rest of the file names any DevTools vocabulary, so " +
+    "if it is not a DevTools client at all, list it in nonDevtoolsClients with a one-line reason";
 }
 
 /** Every `.ts` file under `dir`, recursively - a census that stopped at the top level would miss
@@ -1309,6 +1359,28 @@ const deliberateClients = [
   new URL("../scripts/verify_s3uk_real_browser.ts", import.meta.url),
 ];
 
+/**
+ * The fifth classification (audio-feed-h8cam review, P1): files that open a `new WebSocket(` and
+ * are NOT DevTools clients at all, so none of the four rules above can be what they satisfy. Each
+ * carries a one-line reason, because an exclusion nobody wrote down is the same failure as a
+ * socket nobody listed - the census derived it, so the census has to account for it out loud.
+ *
+ * NAMES, not literal URLs: the reason IS the payload, so there is nothing to read back from the
+ * file, and a literal `new URL("../tests/...")` here would derive a self-read relation on
+ * tests/proof_cdp_test.ts and move the selection audit for a suite that is already selected by
+ * being the changed file. The STALE check below keeps each name honest against the derived
+ * population, and the census rejects a name whose socket argument DOES name a DevTools endpoint -
+ * otherwise this classification would be a bypass of all four rules, not a record of an exclusion.
+ */
+const nonDevtoolsClients: { name: string; reason: string }[] = [
+  {
+    name: "proof_cdp_test.ts",
+    reason: "the only `new WebSocket(` in its CODE is this census's own needle string " +
+      '(`const open = "new WebSocket("`); its mock servers FABRICATE DevTools endpoints with ' +
+      "upgradeWebSocket(req) and dial none",
+  },
+];
+
 Deno.test(
   "proof-cdp: every private DevTools client bounds its OWN cdp() reply, and the clients that hang on purpose say so (audio-feed-9go2t)",
   async () => {
@@ -1367,34 +1439,55 @@ Deno.test(
     // vocabulary failure as the bare-literal and fixture gaps before it. The population here is
     // DERIVED (readDir + a computed name, so it leaves no read relation and does not widen the
     // fast gate's selection - tests/css_escape_guard_test.ts made the same call), and the lists
-    // above stay as the assertion payload. Four rules, and they fail in both directions:
+    // above stay as the assertion payload.
     //
-    //   1. every derived client is CLASSIFIED - the shared client, a bounded one, a deliberate
-    //      one, or a self-bounded one. A new client with none of those is named here.
-    //   2. a DELIBERATE client carries the annotation AND a reason. Deleting the annotation from
-    //      one of them turns a deliberate hang back into the bug, and this names the file.
-    //   3. a SELF-BOUNDED client can prove its bound: a signature default on `timeoutMs` and a
-    //      pending-map entry removed on the timeout path. A claim without the timer behind it is
-    //      the unbounded await with a nicer comment.
-    //   4. every listed name still OPENS a socket. A stale entry keeps asserting a shape about a
-    //      file that no longer has a client, which is how a list rots into decoration.
+    // WHAT IT DERIVES ON IS THE POINT (audio-feed-h8cam review, P1). ANY `new WebSocket(` counts,
+    // whatever its argument says. The first cut required one of four DevTools vocabulary strings
+    // INSIDE the argument, so a client that binds `const ep = await devtoolsEndpoint(); new
+    // WebSocket(ep)` - or inlines `ws://127.0.0.1:<port>/devtools/browser/...` - derived nothing
+    // at all and dodged every rule below in silence. Every file that opens a socket is now
+    // derived and has to be classified one of five ways:
+    //
+    //   1. the SHARED client, scripts/proof-cdp.ts;
+    //   2. BOUNDED - its own cdp() bounds its reply (the row above asserts that payload);
+    //   3. DELIBERATE - annotated "DELIBERATELY unbounded - <reason>" AND carries the reason;
+    //   4. SELF-BOUNDED - can prove the bound: a signature default on `timeoutMs` and a
+    //      pending-map entry removed on the timeout path (a claim without the timer behind it is
+    //      the unbounded await with a nicer comment);
+    //   5. NON-DEVTOOLS - not a DevTools client at all, listed in nonDevtoolsClients with a
+    //      one-line reason, so the exclusion is explicit and reviewable rather than invisible.
+    //      A name whose socket argument DOES name a DevTools endpoint is rejected: without that,
+    //      this classification would be a bypass of all four rules instead of an exclusion.
+    //
+    // A derived file in none of those is NAMED, and the DevTools vocabulary is only a hint in that
+    // message: it says which classification the file most likely wants and decides nothing.
+    //
+    // The rules fail in both directions: deleting the annotation from a deliberate client reds (a
+    // deliberate hang turned back into the bug), and so does a listed name that stops opening a
+    // socket - a stale entry keeps asserting a shape about a file that no longer has a client,
+    // which is how a list rots into decoration.
     const bounded = new Set(boundedClients.map((url) => baseNameOf(url.pathname)));
     const deliberate = new Set(deliberateClients.map((url) => baseNameOf(url.pathname)));
     const selfBounded = new Set(selfBoundedClients.map((url) => baseNameOf(url.pathname)));
+    const nonDevtools = new Map(nonDevtoolsClients.map((client) => [client.name, client.reason]));
 
     const unclassified: string[] = [];
     const unannotated: string[] = [];
+    const unreasoned: string[] = [];
+    const misclassified: string[] = [];
     const unproven: string[] = [];
     const derived: string[] = [];
     const roots: [URL, string][] = [[SCRIPTS_DIR, "scripts/"], [TESTS_DIR, "tests/"]];
     for (const [dir, prefix] of roots) {
       for await (const file of typeScriptFiles(dir, prefix)) {
         const source = await Deno.readTextFile(file.url);
-        if (!opensDevtoolsSocket(source)) continue;
-        derived.push(baseNameOf(file.name));
-        if (baseNameOf(file.name) === SHARED_CLIENT) continue;
-        if (bounded.has(baseNameOf(file.name))) continue;
-        if (deliberate.has(baseNameOf(file.name))) {
+        const args = socketArgumentsOf(source);
+        if (args.length === 0) continue;
+        const name = baseNameOf(file.name);
+        derived.push(name);
+        if (name === SHARED_CLIENT) continue;
+        if (bounded.has(name)) continue;
+        if (deliberate.has(name)) {
           if (deliberateReason(source) === null) {
             unannotated.push(
               `${file.name}: listed as a DELIBERATE hanger, but it carries no ` +
@@ -1403,7 +1496,7 @@ Deno.test(
           }
           continue;
         }
-        if (selfBounded.has(baseNameOf(file.name))) {
+        if (selfBounded.has(name)) {
           if (!/timeoutMs = \d[\d_]*/u.test(source)) {
             unproven.push(
               `${file.name}: listed as self-bounded, but no \`timeoutMs = <ms>\` default`,
@@ -1416,29 +1509,56 @@ Deno.test(
           }
           continue;
         }
+        if (nonDevtools.has(name)) {
+          const vocabulary = devtoolsVocabularyIn(args.join("\n"));
+          if (vocabulary.length > 0) {
+            misclassified.push(
+              `${file.name}: listed as a non-DevTools socket, but its socket argument names ${
+                vocabulary.join(" / ")
+              } - that is a DevTools client, so bound its reply, annotate it ` +
+                `"${DELIBERATE_ANNOTATION} - <reason>", or prove its own bound`,
+            );
+          } else if ((nonDevtools.get(name) ?? "").trim().length < 10) {
+            unreasoned.push(
+              `${file.name}: listed as a non-DevTools socket, but its reason is too short to ` +
+                "explain the exclusion",
+            );
+          }
+          continue;
+        }
         unclassified.push(
-          `${file.name}: opens a DevTools WebSocket and is none of the shared client ` +
-            `(scripts/${SHARED_CLIENT}), a bounded client, a DELIBERATE hanger, or a self-bounded ` +
-            `one - bound its reply or annotate it "${DELIBERATE_ANNOTATION} - <reason>"`,
+          `${file.name}: opens a WebSocket via \`new WebSocket(...)\` and is none of the shared ` +
+            `client (scripts/${SHARED_CLIENT}), a bounded client, a DELIBERATE hanger, a ` +
+            `self-bounded one, or a listed non-DevTools socket - ${
+              classificationHint(args, source)
+            }`,
         );
       }
     }
 
-    const stale = [...bounded, ...deliberate, ...selfBounded].filter((name) =>
-      !derived.includes(name)
+    const stale = [...bounded, ...deliberate, ...selfBounded, ...nonDevtools.keys()].filter(
+      (name) => !derived.includes(name),
     );
 
+    // The walk's own health check, and it counts what the WALK found rather than what survived
+    // classification: a broken readDir must not be reported as a misclassified client, and a
+    // misclassified one must not be reported as a broken walk. 26 is the 25 DevTools clients of
+    // audio-feed-9go2t plus the non-DevTools socket this census derives from its own source; it is
+    // a FLOOR, so a file added tomorrow still clears it.
     assert(
-      derived.length >= 25,
-      `the census found ${derived.length} DevTools clients in scripts/ and tests/; the walk is ` +
-        "broken, not the tree (audio-feed-9go2t counted 24 private clients plus the shared one)",
+      derived.length >= 26,
+      `the census derived only ${derived.length} file(s) opening a WebSocket in scripts/ and ` +
+        "tests/; the walk is broken, not the tree (audio-feed-9go2t counted 24 private DevTools " +
+        "clients plus the shared one)",
     );
     assert(unclassified.length === 0, unclassified.join("\n"));
     assert(unannotated.length === 0, unannotated.join("\n"));
+    assert(unreasoned.length === 0, unreasoned.join("\n"));
+    assert(misclassified.length === 0, misclassified.join("\n"));
     assert(unproven.length === 0, unproven.join("\n"));
     assert(
       stale.length === 0,
-      `these are listed as DevTools clients but no longer open one - remove the entry or fix ` +
+      `these are listed as socket-openers but no longer open one - remove the entry or fix ` +
         `the matcher: ${stale.join(", ")}`,
     );
   },
