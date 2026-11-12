@@ -58,6 +58,10 @@ try {
     });
 
     let seq = 0;
+    // audio-feed-9go2t: DELIBERATELY unbounded - this client resolves on demand and has no reject
+    // path, and its interaction calls are issued as bare `press()/release()` promises whose
+    // lateness the row measures as Event Timing. A bound would convert a slow-by-design
+    // interaction probe into an unhandled rejection, so the wait is left as it is.
     const cdp = (method: string, params: Record<string, unknown> = {}) =>
       new Promise<Record<string, unknown>>((resolve) => {
         const id = ++seq;

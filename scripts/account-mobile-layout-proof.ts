@@ -49,6 +49,7 @@ import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 import { evidencePngDigestLine } from "./evidence-png-digest.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "./harness-port.ts";
+import { boundedCdpReply, HANG_BOUND_MS } from "./proof-cdp.ts";
 
 const PROOF_PORT = resolveHarnessPort([], Deno.env.get("ACCOUNT_LAYOUT_PROOF_PORT"));
 if (PROOF_PORT === 0) throw new Error("Layout evidence requires a fixed port, not 0");
@@ -236,15 +237,22 @@ await runProof("audio-feed-lma7", async (checker) => {
         } catch { /* malformed frame */ }
       });
 
-      function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+      function cdp(
+        method: string,
+        params: Record<string, unknown> = {},
+        timeoutMs = HANG_BOUND_MS,
+      ): Promise<unknown> {
         const id = ++nextId;
-        return new Promise((resolve, reject) => {
+        // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+        // site, so a browser that never answers names the method instead of parking the proof.
+        const reply = new Promise<unknown>((resolve, reject) => {
           pending.set(id, (res) => {
             if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
             else resolve(res.result);
           });
           ws.send(JSON.stringify({ id, method, params }));
         });
+        return boundedCdpReply(method, reply, cdp, timeoutMs);
       }
 
       async function js(expr: string): Promise<unknown> {

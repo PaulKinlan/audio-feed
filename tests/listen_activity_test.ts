@@ -29,7 +29,7 @@ import {
   removeDirWhenQuiet,
   waitForChromeProfileUnused,
 } from "../scripts/proof-helper.ts";
-import { HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
+import { boundedCdpReply, HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -736,10 +736,17 @@ Deno.test({
           pending.delete(msg.id);
         }
       });
-      const cdp = (method: string, params: Record<string, unknown> = {}): Promise<CdpReply> => {
+      const cdp = (
+        method: string,
+        params: Record<string, unknown> = {},
+        timeoutMs = HANG_BOUND_MS,
+      ): Promise<CdpReply> => {
         const id = ++nextId;
+        // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+        // site, so a browser that never answers names the method instead of parking the row.
+        const reply = new Promise<CdpReply>((resolve) => pending.set(id, resolve));
         ws.send(JSON.stringify({ id, method, params }));
-        return new Promise((resolve) => pending.set(id, resolve));
+        return boundedCdpReply(method, reply, cdp, timeoutMs);
       };
 
       await cdp("Page.enable");
@@ -1008,10 +1015,18 @@ Deno.test({
           pending.delete(msg.id);
         }
       });
-      const cdp = (method: string, params: Record<string, unknown> = {}) => {
+      const cdp = (
+        method: string,
+        params: Record<string, unknown> = {},
+        timeoutMs = HANG_BOUND_MS,
+        // deno-lint-ignore no-explicit-any
+      ): Promise<any> => {
         const id = ++nextId;
+        // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+        // site, so a browser that never answers names the method instead of parking the row.
+        const reply = new Promise<unknown>((resolve) => pending.set(id, resolve));
         ws.send(JSON.stringify({ id, method, params }));
-        return new Promise((resolve) => pending.set(id, resolve));
+        return boundedCdpReply(method, reply, cdp, timeoutMs);
       };
 
       await cdp("Page.enable");
@@ -1380,6 +1395,10 @@ Deno.test({
           pending.delete(msg.id);
         }
       });
+      // audio-feed-9go2t: DELIBERATELY unbounded - this cdp() is the row's fixture for a browser
+      // whose Page.navigate never answers, so it must stay pending while the row proves the
+      // readiness wait concludes anyway. Bounding it here would turn the hang into a 120s
+      // rejection the row never awaits (an unhandled rejection) and delete what the row tests.
       const cdp = (method: string, params: Record<string, unknown> = {}) => {
         const id = ++nextId;
         ws.send(JSON.stringify({ id, method, params }));

@@ -1135,3 +1135,83 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "proof-cdp: every private DevTools client bounds its OWN cdp() reply, and the clients that hang on purpose say so (audio-feed-9go2t)",
+  async () => {
+    // audio-feed-54f8j bounded the SHARED client. The proofs below open their own socket
+    // (`new WebSocket(page.webSocketDebuggerUrl)` + a pending map) and awaited a reply only a
+    // WebSocket frame could settle, so `Page.navigate`, `Page.captureScreenshot` and
+    // `WebAuthn.*` were unbounded for whichever proof awaited them. The fix is a signature
+    // default on each file's OWN `cdp()` - the one place its call sites go through - so a new
+    // call site cannot be written unbounded by omission, exactly as the shared client's row
+    // above pins it. Source-pinned for the same reason: the behaviour the bound buys is the
+    // shared client's own rows, and waiting out a two-minute hang is not a test.
+    //
+    // The paths are LITERAL URLs, one per client. A template-built path here would derive a
+    // directory relation on `scripts/` and widen the fast gate's selection for every script
+    // change - the same reason the swept-proof row above spells its two paths out.
+    const boundedClients = [
+      new URL("../scripts/account-mobile-layout-proof.ts", import.meta.url),
+      new URL("../scripts/csp-nonce-browser-proof.ts", import.meta.url),
+      new URL("../scripts/exww-live-claims-browser-proof.ts", import.meta.url),
+      new URL("../scripts/failure-diagnostics-browser-proof.ts", import.meta.url),
+      new URL("../scripts/home-module-browser-proof.ts", import.meta.url),
+      new URL("../scripts/landing-tooltip-browser-proof.ts", import.meta.url),
+      new URL("../scripts/passkey-provider-browser-proof.ts", import.meta.url),
+      new URL("../scripts/playback-position-browser-proof.ts", import.meta.url),
+      new URL("../scripts/repro_b6nr_token_storage.ts", import.meta.url),
+      new URL("../scripts/request-access-browser-proof.ts", import.meta.url),
+      new URL("../scripts/spend-visibility-browser-proof.ts", import.meta.url),
+      new URL("../scripts/tokens-browser-proof.ts", import.meta.url),
+      new URL("../scripts/verify_3asd_bookmarklet_browser.ts", import.meta.url),
+      new URL("../scripts/verify_dfbu_pagehide_browser.ts", import.meta.url),
+      new URL("../scripts/verify_ieek_canonical_urls.ts", import.meta.url),
+      new URL("../scripts/verify_kvnw_account_bookmarklet_browser.ts", import.meta.url),
+      new URL("../scripts/verify_main_l7m1_e2e.ts", import.meta.url),
+      new URL("../tests/listen_activity_test.ts", import.meta.url),
+      new URL("../tests/sticky_scroll_state_test.ts", import.meta.url),
+      new URL("../tests/view_transitions_test.ts", import.meta.url),
+    ];
+    for (const url of boundedClients) {
+      const name = url.pathname.split("/").pop() ?? url.pathname;
+      const source = await Deno.readTextFile(url);
+      assert(
+        source.includes("boundedCdpReply(method, reply,") ||
+          source.includes("boundedCdpReply(method, reply, "),
+        `${name} opens its own DevTools socket, so its own cdp() must bound the reply it awaits`,
+      );
+      assert(
+        /timeoutMs = HANG_BOUND_MS/u.test(source),
+        `${name}: the bound must be a signature default on cdp(), not something a caller passes`,
+      );
+    }
+
+    // The other side of the same rule: a client that never resolves, or resolves only on demand,
+    // is the FIXTURE for the hang case (the row that proves a hung navigation is a named,
+    // bounded failure while the navigate is still in flight). It must stay unbounded - and it
+    // must SAY so, because an unannotated unbounded await is indistinguishable from the bug
+    // above and the next sweep would "fix" it.
+    const deliberateClients = [
+      new URL("../tests/css_escape_guard_test.ts", import.meta.url),
+      new URL("../scripts/verify_i7vi_browser.ts", import.meta.url),
+      new URL("../scripts/verify_s3uk_real_browser.ts", import.meta.url),
+    ];
+    for (const url of deliberateClients) {
+      const name = url.pathname.split("/").pop() ?? url.pathname;
+      const source = await Deno.readTextFile(url);
+      assertStringIncludes(source, "audio-feed-9go2t: DELIBERATELY unbounded");
+      assert(
+        !source.includes("boundedCdpReply(method, reply,"),
+        `${name}: its client resolves on demand with no reject path, so bounding it would ` +
+          "manufacture an unhandled rejection - leave it unbounded and annotated",
+      );
+    }
+    // listen_activity holds BOTH kinds in one file: two bounded clients and the hung-navigation
+    // row's deliberate one, so it is checked for both rather than listed on one side.
+    const listenSource = await Deno.readTextFile(
+      new URL("../tests/listen_activity_test.ts", import.meta.url),
+    );
+    assertStringIncludes(listenSource, "audio-feed-9go2t: DELIBERATELY unbounded");
+  },
+);

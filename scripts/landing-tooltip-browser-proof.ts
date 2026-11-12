@@ -30,7 +30,12 @@ import {
   waitForChromeProfileUnused,
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
-import { CdpHangBoundExceeded, withHangBound } from "./proof-cdp.ts";
+import {
+  boundedCdpReply,
+  CdpHangBoundExceeded,
+  HANG_BOUND_MS,
+  withHangBound,
+} from "./proof-cdp.ts";
 
 await runProof("landing-tooltip-browser-proof", async (checker) => {
   const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
@@ -101,15 +106,22 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
     }
   });
 
-  function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  function cdp(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = HANG_BOUND_MS,
+  ): Promise<unknown> {
     const id = ++nextId;
-    return new Promise((resolve, reject) => {
+    // audio-feed-9go2t: the reply is bounded at this ONE definition rather than at each call
+    // site, so a browser that never answers names the method instead of parking the proof.
+    const reply = new Promise<unknown>((resolve, reject) => {
       pending.set(id, (res) => {
         if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
         else resolve(res.result);
       });
       ws.send(JSON.stringify({ id, method, params }));
     });
+    return boundedCdpReply(method, reply, cdp, timeoutMs);
   }
 
   async function js(expr: string): Promise<unknown> {
