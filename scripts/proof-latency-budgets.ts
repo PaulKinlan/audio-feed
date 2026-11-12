@@ -23,15 +23,41 @@ import { HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "./proof-cdp.ts";
 export const PLAYBACK_ADVANCE_SAMPLE_MS = 1_200;
 
 /**
- * How long the play press is given to START playback before the sampled state is judged.
+ * How long the play press is given to START playback: the deadline on the poll loop, and on the
+ * ONE evaluate each of its polls sends.
  *
  * FLOOR, NOT A PROVEN BOUND: no measurement of time-to-first-audio exists in this repository. The
- * budget is one starved poll (MEASURED_STARVED_POLL_MS = 8s, measured under eight-way CPU
- * saturation, audio-feed-6gst1) plus the 1.2s advance sample window above = 9_200ms. That covers
- * the case the starved floor exists for - a host that takes 8s to answer one evaluate - without
- * inheriting the 120s hang ceiling.
+ * arithmetic names the waits the span actually encloses (audio-feed-v9uz5):
+ *
+ *   1 x MEASURED_STARVED_POLL_MS (the `currentTime`/`readyState` evaluate a poll sends; 8s,
+ *   measured under eight-way CPU saturation, audio-feed-6gst1)
+ *   + PLAYBACK_ADVANCE_SAMPLE_MS (overhead, not a wait: room for the poll to see the element move
+ *     after its first answer, at the 1.2s granularity the sample above defines)
+ *
+ * The poll loop clamps each evaluate to what is LEFT of this deadline, the way `until()` clamps a
+ * poll: a total-only budget over an unclamped `await js(...)` is not a bound on the evaluate that
+ * is in flight when the loop test next runs, so a host that takes 8s to answer reported "did not
+ * start inside 9200ms" for a press it had answered. This budget covers the START stage only; the
+ * two `currentTime` reads that judge whether it MOVED are the sample budget below.
  */
 export const PLAYBACK_ADVANCE_WAIT_MS = MEASURED_STARVED_POLL_MS + PLAYBACK_ADVANCE_SAMPLE_MS;
+
+/**
+ * How long the "playback has started" SAMPLE is given: the two `currentTime` reads and the 1.2s
+ * window between them.
+ *
+ * FLOOR, NOT A PROVEN BOUND, but the count is derived rather than picked: the assertion needs TWO
+ * evaluates of the page (a first read and a second after the window), so the span encloses
+ *
+ *   2 x MEASURED_STARVED_POLL_MS + PLAYBACK_ADVANCE_SAMPLE_MS = 17_200ms
+ *
+ * One starved poll would bound one of those reads and leave the other to the 120s hang ceiling,
+ * which is the sum-reads-as-a-hang failure this split exists to prevent (audio-feed-v9uz5). Both
+ * reads are clamped to what is left of this deadline; the window between them is skipped only if
+ * the first read has already eaten the budget, which the row then reports by name.
+ */
+export const PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS = 2 * MEASURED_STARVED_POLL_MS +
+  PLAYBACK_ADVANCE_SAMPLE_MS;
 
 /**
  * How long the bootstrap POST is given to answer and the browser to land on /admin.
@@ -72,6 +98,7 @@ export function assertBudgetBelowHang(
 // Fail at import, by name, instead of at a browser row nobody re-derives.
 const PRODUCT_BUDGETS: Record<string, number> = {
   PLAYBACK_ADVANCE_WAIT_MS,
+  PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
   BOOTSTRAP_REDIRECT_LATENCY_MS,
 };
 for (const [name, budgetMs] of Object.entries(PRODUCT_BUDGETS)) {

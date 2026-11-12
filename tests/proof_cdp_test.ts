@@ -57,6 +57,7 @@ import {
 import {
   assertBudgetBelowHang,
   BOOTSTRAP_REDIRECT_LATENCY_MS,
+  PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
   PLAYBACK_ADVANCE_SAMPLE_MS,
   PLAYBACK_ADVANCE_WAIT_MS,
 } from "../scripts/proof-latency-budgets.ts";
@@ -625,6 +626,21 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         1_200,
         "the advance sample window the assertion uses",
       );
+      // 15a. Each budget's arithmetic NAMES the waits its span encloses (audio-feed-v9uz5). The
+      // row above counted one starved poll, but the assertion judges playback by reading the page
+      // TWICE, so that stage encloses two - and one starved poll would have bounded the first read
+      // while leaving the second to the 120s hang ceiling, which is a sum of two waits reported as
+      // a hang. The count is derived, so a host as starved as the measurement still fits both.
+      assertEquals(
+        PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
+        2 * MEASURED_STARVED_POLL_MS + PLAYBACK_ADVANCE_SAMPLE_MS,
+        "PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS must be TWO measured starved polls (the two currentTime " +
+          "reads) plus the 1.2s window between them, not one",
+      );
+      assert(
+        PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS < HANG_BOUND_MS,
+        "the sample budget is a product budget, so it stays under the hang ceiling",
+      );
       assertEquals(BOOTSTRAP_REDIRECT_LATENCY_MS, 10_000, "the redirect budget is its own literal");
 
       // 15b. The GUARD is pinned, not only the constants it happens to accept (audio-feed-zkto5).
@@ -638,6 +654,7 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       for (
         const [name, budgetMs] of Object.entries({
           PLAYBACK_ADVANCE_WAIT_MS,
+          PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
           BOOTSTRAP_REDIRECT_LATENCY_MS,
         })
       ) {
@@ -667,9 +684,27 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       const playbackProof = await Deno.readTextFile(
         new URL("../scripts/playback-csp-browser-proof.ts", import.meta.url),
       );
-      assertStringIncludes(
-        playbackProof,
-        "while (Date.now() - startTime < PLAYBACK_ADVANCE_WAIT_MS)",
+      // 15c. Both stages CLAMP the evaluate they enclose to what is left of their budget
+      // (audio-feed-v9uz5). A total deadline tested only between awaits is not a bound on the
+      // evaluate in flight: the poll that starts 1ms before the deadline may still run to the 120s
+      // hang ceiling, so a starved host reds the row for a press it answered. Source-pinned because
+      // the property is the clamp at the call site, which no unit row can see.
+      assert(
+        /while \(Date\.now\(\) < startDeadline\)/u.test(playbackProof) &&
+          /const startDeadline = Date\.now\(\) \+ PLAYBACK_ADVANCE_WAIT_MS;/u.test(playbackProof),
+        "the playback START poll loop must run to a deadline derived from PLAYBACK_ADVANCE_WAIT_MS",
+      );
+      assert(
+        playbackProof.includes("const remainingMs = Math.max(1, startDeadline - Date.now());") &&
+          playbackProof.includes("remainingMs,"),
+        "each START poll's evaluate must be clamped to what is left of PLAYBACK_ADVANCE_WAIT_MS",
+      );
+      assert(
+        playbackProof.includes(
+          "const sampleDeadline = Date.now() + PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS;",
+        ) &&
+          playbackProof.split("Math.max(1, sampleDeadline - Date.now())").length === 3,
+        "both currentTime sample reads must be clamped to PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS",
       );
       assert(
         !playbackProof.includes("HANG_BOUND_MS /") &&

@@ -33,8 +33,12 @@ import { memoryStores } from "../src/config.ts";
 import { audioBlobKey } from "../src/types.ts";
 import { wav } from "./listen-harness.ts";
 import { runProof, startInProcessServer, withChrome } from "./proof-helper.ts";
-import { connectCdp, HANG_BOUND_MS } from "./proof-cdp.ts";
-import { PLAYBACK_ADVANCE_WAIT_MS } from "./proof-latency-budgets.ts";
+import { CdpHangBoundExceeded, connectCdp, HANG_BOUND_MS } from "./proof-cdp.ts";
+import {
+  PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
+  PLAYBACK_ADVANCE_SAMPLE_MS,
+  PLAYBACK_ADVANCE_WAIT_MS,
+} from "./proof-latency-budgets.ts";
 
 const TOKEN = "playback-proof-token";
 const EPISODE_ID = "ep-1";
@@ -44,7 +48,8 @@ const EPISODE_ID = "ep-1";
  * A LATENCY budget, not a hang bound: it lives in proof-latency-budgets.ts with its derivation
  * (one measured starved poll plus the 1.2s advance sample window below). It used to be written as
  * a fraction of HANG_BOUND_MS, which meant the 15s product budget silently moved whenever the
- * starved-poll floor moved (audio-feed-c0l7b).
+ * starved-poll floor moved (audio-feed-c0l7b). Every evaluate it covers is clamped to what is left
+ * of it, so the deadline is a deadline on the in-flight poll too (audio-feed-v9uz5).
  */
 /** Six seconds of real PCM: long enough that currentTime must move, short enough to stay fast. */
 const AUDIO: Uint8Array<ArrayBuffer> = wav(6) as Uint8Array<ArrayBuffer>;
@@ -268,20 +273,43 @@ await runProof("playback-proof", async (checker) => {
         );
 
         // Playback is asynchronous; poll rather than sleep a fixed guess.
-        const startTime = Date.now();
+        //
+        // START stage: PLAYBACK_ADVANCE_WAIT_MS is a TOTAL deadline, so each poll's evaluate is
+        // clamped to what is LEFT of it (the clamp `until()` applies). Without the clamp the
+        // evaluate in flight when the loop test next runs is bounded only by the 120s hang ceiling,
+        // so a starved host reds this row for a press it answered (audio-feed-v9uz5).
+        const startDeadline = Date.now() + PLAYBACK_ADVANCE_WAIT_MS;
         let advanced = false;
-        while (Date.now() - startTime < PLAYBACK_ADVANCE_WAIT_MS) {
-          advanced = await js(
-            `(() => {
-              const a = document.getElementById("audio");
-              return !!a && (a.currentTime > 0 || a.readyState >= 2);
-            })()`,
-          );
+        let startPolls = 0;
+        let starvedStartPollMs = 0;
+        while (Date.now() < startDeadline) {
+          const remainingMs = Math.max(1, startDeadline - Date.now());
+          try {
+            advanced = await js(
+              `(() => {
+                const a = document.getElementById("audio");
+                return !!a && (a.currentTime > 0 || a.readyState >= 2);
+              })()`,
+              remainingMs,
+            );
+          } catch (err) {
+            // Only the hang bound is a budget signal here; a throwing expression is a bug and
+            // still escapes unwrapped, unretried (the same rule `until()` follows).
+            if (!(err instanceof CdpHangBoundExceeded)) throw err;
+            starvedStartPollMs = remainingMs;
+            break;
+          }
+          startPolls++;
           if (advanced) break;
           await new Promise((r) => setTimeout(r, 100));
         }
 
-        const first = await js(`(() => {
+        // SAMPLE stage: its own budget, because the assertion below reads the page TWICE. Both
+        // reads are clamped to what is left of PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS (2 starved polls
+        // + the 1.2s window), so neither is silently bounded by the 120s hang ceiling.
+        const sampleDeadline = Date.now() + PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS;
+        const first = await js(
+          `(() => {
           const a = document.getElementById("audio");
           return {
             src: a.src, currentTime: a.currentTime, readyState: a.readyState,
@@ -290,18 +318,29 @@ await runProof("playback-proof", async (checker) => {
             errorMessage: a.error ? a.error.message : null,
             duration: a.duration,
           };
-        })()`);
+        })()`,
+          Math.max(1, sampleDeadline - Date.now()),
+        );
 
-        // A second sample a moment later: currentTime must MOVE, not merely be non-zero.
-        await new Promise((r) => setTimeout(r, 1200));
-        const second = await js(`(() => {
+        // A second sample a moment later: currentTime must MOVE, not merely be non-zero. The
+        // window is the sample granularity, clipped only if the first read ate the budget - which
+        // the PLAYING check below then reports by name rather than as a product failure.
+        const sampleWindowMs = Math.max(
+          0,
+          Math.min(PLAYBACK_ADVANCE_SAMPLE_MS, sampleDeadline - Date.now()),
+        );
+        await new Promise((r) => setTimeout(r, sampleWindowMs));
+        const second = await js(
+          `(() => {
           const a = document.getElementById("audio");
           return {
             currentTime: a.currentTime, readyState: a.readyState,
             networkState: a.networkState, paused: a.paused,
             errorCode: a.error ? a.error.code : null,
           };
-        })()`);
+        })()`,
+          Math.max(1, sampleDeadline - Date.now()),
+        );
 
         const mediaEvents = await js(`JSON.stringify(window.__mediaEvents ?? [])`);
         const violations = await js(`JSON.stringify(window.__cspViolations ?? [])`);
@@ -344,8 +383,15 @@ await runProof("playback-proof", async (checker) => {
         check(
           "the audio element reached a PLAYING state: playback started inside the latency budget, currentTime advanced and readyState >= 2",
           advanced && currentTimeAdvanced && second.readyState >= 2,
-          `start observed inside ${PLAYBACK_ADVANCE_WAIT_MS}ms: ${advanced}; ` +
-            `currentTime ${first.currentTime.toFixed(3)}s -> ${second.currentTime.toFixed(3)}s (+${
+          `start observed inside ${PLAYBACK_ADVANCE_WAIT_MS}ms after ${startPolls} poll(s): ${advanced}` +
+            (starvedStartPollMs
+              ? ` (the final poll's evaluate got no answer in the ${starvedStartPollMs}ms left of ` +
+                "that budget, so the host starved the poll rather than the page refusing to start)"
+              : "") +
+            `; sample window ${sampleWindowMs}ms of the ${PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS}ms ` +
+            `budget; currentTime ${first.currentTime.toFixed(3)}s -> ${
+              second.currentTime.toFixed(3)
+            }s (+${
               (second.currentTime - first.currentTime).toFixed(3)
             }s), readyState ${first.readyState} -> ${second.readyState}, networkState ${second.networkState}, paused ${second.paused}`,
         );

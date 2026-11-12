@@ -677,6 +677,22 @@ Four fixes exist and are the pattern to copy, not a complaint to file:
   `currentTime` samples alone (0.005 s → 1.176 s) still passed; at 9_200 ms the same row is green
   with `start observed inside 9200ms: true`.
 
+- **`fleet/window-budget` (`audio-feed-v9uz5`)** makes each playback budget's arithmetic name the
+  waits the span actually ENCLOSES. `PLAYBACK_ADVANCE_WAIT_MS` counted one starved poll, which was
+  right for the poll loop but not for two other things: the loop's evaluate was bounded only by the
+  120 s hang ceiling (a total deadline tested between awaits is not a bound on the evaluate that is
+  in flight when the test next runs, so a host that takes 8 s to answer redded the row for a press
+  it had answered), and the assertion that playback is PLAYING reads the page TWICE — two starved
+  evaluates, one of which the 9.2 s budget did not cover at all. Now: the start loop runs to
+  `Date.now() + PLAYBACK_ADVANCE_WAIT_MS` and clamps each poll's evaluate to the milliseconds left
+  (the clamp `until()` already applies), and the two `currentTime` reads are a named stage with
+  `PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS = 2 × MEASURED_STARVED_POLL_MS + PLAYBACK_ADVANCE_SAMPLE_MS =
+  17_200 ms`, also clamped per read. Both are still asserted below `HANG_BOUND_MS` at import. Rows:
+  `tests/proof_cdp_test.ts` row 15a pins the two-poll derivation with its own message, row 15c pins
+  both clamps at the call sites. Mutant: the sample budget cut to ONE starved poll (9_200 ms) reds
+  15a with `PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS must be TWO measured starved polls … not one`;
+  restored, the suite is green.
+
 The derivation, stated honestly wherever the constant appears: **120 s = 15 × the measured
 starved-poll floor** — an 8s `document.readyState` wait was observed to legitimately exceed 8s under
 an eight-way saturated host (audio-feed-6gst1) — a HANG bound, never a latency promise about the
