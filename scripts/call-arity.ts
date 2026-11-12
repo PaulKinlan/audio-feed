@@ -94,7 +94,7 @@ function escapeRegExp(s: string): string {
  * NON-empty — `until("")` is one argument, not zero.
  */
 function onlyComments(span: string): boolean {
-  return span.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "").trim() === "";
+  return span.replace(/\/\*[\s\S]*?\*[/]/g, "").replace(/\/\/[^\n]*/g, "").trim() === "";
 }
 
 /**

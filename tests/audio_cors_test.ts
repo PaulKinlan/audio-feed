@@ -19,7 +19,7 @@
  * redirect. These tests pin BOTH sides, because deleting the redirect would have
  * been the easy fix and would have quietly undone audio-feed-vnb.
  */
-import { assertEquals, assertNotEquals } from "@std/assert";
+import { assertEquals, assertNotEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -209,4 +209,33 @@ Deno.test("our own origin still gets the grant and the bytes (audio-feed-cf0hi)"
   assertEquals(res.headers.get("access-control-allow-origin"), "*");
   assertEquals(res.headers.get("content-range"), `bytes 0-3/${BYTES.length}`);
   assertEquals(new Uint8Array(await res.arrayBuffer()), BYTES.slice(0, 4));
+});
+
+/**
+ * The repro script still reproduces the shape these rows describe (audio-feed-nl0cn).
+ *
+ * `scripts/cors-repro.ts` is what makes the bug reproducible locally at all - memory stores never
+ * redirect, so a green local page was never evidence. It has no importable surface (it seeds a store
+ * and serves two origins at module scope), so this row pins the two lines the reproduction rests on
+ * in its SOURCE, which is also what keeps the script covered under the coverage contract.
+ *
+ * The key derivation is asserted in its no-adjacency spelling on purpose: written with an escaped
+ * slash before the closing delimiter, the source walk in scripts/source-mask.ts reads the two
+ * slashes as a comment start and blanks the rest of that line (the whole `, "");` goes with it), so
+ * a scanner loses that line's brackets.
+ */
+Deno.test("the CORS repro script keeps the production shape it exists to reproduce (audio-feed-nl0cn)", () => {
+  const source = Deno.readTextFileSync(new URL("../scripts/cors-repro.ts", import.meta.url));
+  assertStringIncludes(
+    source,
+    'if (req.method === "OPTIONS") return new Response("preflight refused", { status: 403 });',
+  );
+  assertStringIncludes(
+    source,
+    'const key = new URL(req.url).pathname.replace(/^[/]/, "");',
+  );
+  assertStringIncludes(
+    source,
+    "url: (key) => Promise.resolve(`${storeBase}/${key}?X-Amz-Signature=repro`)",
+  );
 });

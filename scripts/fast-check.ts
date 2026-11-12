@@ -448,7 +448,7 @@ export async function nameMatchedTests(
   const matched = new Map<string, string[]>();
   const stems: { file: string; stem: string; subdir: string | null }[] = [];
   for (const file of changed) {
-    if (!/^(src|scripts)\//.test(file) || !file.endsWith(".ts")) continue;
+    if (!/^(src|scripts)[/]/.test(file) || !file.endsWith(".ts")) continue;
     const parts = file.split("/");
     stems.push({
       file,

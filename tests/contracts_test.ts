@@ -144,7 +144,7 @@ function loadCoverageContract(): ContractMapping {
  */
 export function stripComments(source: string): string {
   return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\*[\s\S]*?\*[/]/g, "")
     .replace(/(^|[^:])\/\/[^\r\n]*/g, "$1");
 }
 

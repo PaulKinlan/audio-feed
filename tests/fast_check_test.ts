@@ -1508,7 +1508,7 @@ Deno.test("audio-feed-2h5f: production fmt covers deno.json's configured include
   // in this assertion. Bare `deno fmt --check` delegates both to deno.json.
   const jsonc = await Deno.readTextFile(new URL("../deno.json", import.meta.url));
   const config = JSON.parse(
-    jsonc.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n"),
+    jsonc.split("\n").filter((line) => !/^\s*[/][/]/.test(line)).join("\n"),
   ) as {
     fmt?: { include?: string[] };
   };
@@ -1548,7 +1548,7 @@ Deno.test("audio-feed-pnw73: the gate type-checks the tree once per run, never t
   // duplicate took 201.4s/259.8s down to 191.6s/187.5s with an identical result.
   const jsonc = await Deno.readTextFile(new URL("../deno.json", import.meta.url));
   const config = JSON.parse(
-    jsonc.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n"),
+    jsonc.split("\n").filter((line) => !/^\s*[/][/]/.test(line)).join("\n"),
   ) as { tasks?: Record<string, string> };
   const tasks = config.tasks ?? {};
   const gateTask = tasks.gate ?? "";

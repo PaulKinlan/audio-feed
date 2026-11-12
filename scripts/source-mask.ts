@@ -68,15 +68,33 @@
  * itself under a name that says DECLARED LIMIT. audio-feed-nl0cn rewrote the four
  * lines where the blanked tail is a DECISION rather than boilerplate - the
  * `articleUrl` linkback ternary in `src/routes/listen.ts` and the three `itemLink`
- * URL tests in `src/ingest/feed.ts` - the same way and for the same reason. THE
- * SHAPE'S REMAINING FOOTPRINT is stated as a count so it is not left to be guessed:
- * twelve lines on the tree at the time of writing, all of them regex literals, being
- * `scripts/test-selection.ts` (five), `scripts/call-arity.ts`, `scripts/cors-repro.ts`,
- * `scripts/evidence-selection.ts`, `scripts/fast-check.ts`, `src/auth/sessions.ts`,
- * `src/routes/shell.ts` and `src/assets/listen-landing.js`. Each takes the same
- * one-line `[/]{2}` rewrite; none is done here because a pattern no census masks
- * through is a change with its own before/after, not a tidy-up. Both limits are
- * named here rather than assumed away.
+ * URL tests in `src/ingest/feed.ts` - the same way and for the same reason, and its
+ * part 2 rewrote EVERY remaining site on the tree: twenty lines across fifteen files,
+ * being `src/auth/sessions.ts`, `src/assets/listen-landing.js`, `scripts/call-arity.ts`,
+ * `scripts/cors-repro.ts`, `scripts/evidence-selection.ts`, `scripts/fast-check.ts`,
+ * `scripts/test-selection.ts` (five), and nine in `tests/` - `auth_routes_test.ts`,
+ * `auth_login_options_limit_test.ts`, `contracts_test.ts`, `fast_check_test.ts`
+ * (twice), `fast_gate_subset_test.ts`, `l7m1_proof_test.ts`, `listen_activity_test.ts`
+ * and `synthesis_invocation_death_test.ts`. Each took the same one-line rewrite: the
+ * escaped slash that sat before the closing delimiter becomes a character class -
+ * `[/]` for one slash, `[/]{2}` for two, `[/][/]` where the pair is a `file:` scheme -
+ * which matches the same strings with no adjacency. Equivalence was proven per pattern
+ * against cases chosen for that pattern (protocol-relative, single-slash and
+ * mixed-case for the URL-ish ones; unterminated, nested and empty for the comment
+ * strippers), not asserted by inspection. THE SHAPE'S FOOTPRINT ON THIS TREE IS NOW
+ * ZERO, and that is a MEASUREMENT rather than a claim: a scan that runs this walk and
+ * keeps only the lines where the adjacency survives in CODE (a line inside a string, a
+ * template body or a comment is blanked before the test, so it cannot survive) found
+ * twenty such lines before and none after. TWO SHAPE-LOOKING LINES ARE NOT SITES, AND
+ * ARE NAMED SO A LATER GREP DOES NOT RE-OPEN THEM AS DEBT: `src/routes/shell.ts`'s
+ * `PASSKEY_CLIENT` carries the adjacency inside a TEMPLATE BODY, where this walk never
+ * reads a comment start because the template branch consumes the body itself, and
+ * `tests/source_mask_test.ts`'s DECLARED LIMIT row pins it inside a DOUBLE-QUOTED
+ * STRING for the same reason. THAT ROW STAYS AND IS NOT DELETED: it pins the WALKER's
+ * behaviour on the shape, not the tree's inventory, so emptying the tree does not
+ * retire it - it is the tripwire for the limit itself, and if the walk ever learns
+ * regex literals that row should go red and be replaced. Both limits are named here
+ * rather than assumed away.
  *
  * THIS IS THE `blankLiterals: true` ARM of blankedSource(). audio-feed-anqjk
  * needed the other arm - comments blanked, literal BODIES kept - and one walk
@@ -117,9 +135,8 @@ export function maskNonCode(source: string): string {
  * the miss direction for a classifier), a template literal nested inside another
  * template's `${...}` is treated as code, and an unterminated literal stops at the
  * newline. The measured instance of the regex limit is an escaped slash pair before
- * the closing delimiter, which blanks the rest of its line (audio-feed-naplt, and
- * the four sites audio-feed-nl0cn rewrote; the shape's remaining footprint is
- * counted in the block above).
+ * the closing delimiter, which blanks the rest of its line (audio-feed-naplt; every
+ * site on this tree is rewritten now, and the count is the block above).
  */
 export function blankCommentsOnly(source: string): string {
   return blankedSource(source, false);
