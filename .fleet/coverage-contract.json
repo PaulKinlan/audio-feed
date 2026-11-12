@@ -42,6 +42,10 @@
     "tests/admin_asset_test.ts",
     "tests/admin_ui_test.ts"
   ],
+  "src/assets/listen-landing.js": [
+    "tests/listen_landing_asset_test.ts",
+    "tests/listen_test.ts"
+  ],
   "scripts/proof-latency-budgets.ts": [
     "tests/proof_cdp_test.ts"
   ],
