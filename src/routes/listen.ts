@@ -814,7 +814,7 @@ export async function handleListen(
       audioUrl: enclosureUrl(origin.baseUrl, episode),
       // A linkback only when the stored URL is a real web address: the value comes from a feed the
       // user subscribed to, and a link is not a place to trust it further than ingest did.
-      articleUrl: /^https?:\/\//i.test(article?.url ?? "") ? article?.url : undefined,
+      articleUrl: /^https?:[/]{2}/i.test(article?.url ?? "") ? article?.url : undefined,
     };
   });
 
