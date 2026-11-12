@@ -1136,6 +1136,179 @@ Deno.test(
   },
 );
 
+/** `scripts/` and `tests/`: the two roots a DevTools client can live in. */
+const SCRIPTS_DIR = new URL("../scripts/", import.meta.url);
+const TESTS_DIR = new URL("../tests/", import.meta.url);
+
+/** The shared client - the one file that opens a DevTools socket without being classified below. */
+const SHARED_CLIENT = "proof-cdp.ts";
+
+/**
+ * What a client that MUST hang says so with (audio-feed-9go2t), and what has to follow it: a
+ * reason. An unannotated unbounded await is indistinguishable from the bug, so the annotation is
+ * only worth anything if the NEXT reader can tell why it is deliberate.
+ */
+const DELIBERATE_ANNOTATION = "DELIBERATELY unbounded";
+
+/**
+ * What makes a `new WebSocket(...)` argument a DEVTOOLS endpoint rather than any other websocket:
+ * the DevTools target's own `webSocketDebuggerUrl`, the helper that reads DevToolsActivePort, or
+ * the /json endpoints that hand that URL out. Matched on the ARGUMENT, with comments stripped, so
+ * (a) tests/proof_cdp_test.ts is not counted as a client - it FABRICATES /json/list responses in a
+ * mock server and never dials one - and (b) a comment that spells the idiom out is not either.
+ */
+const DEVTOOLS_ENDPOINT =
+  /webSocketDebuggerUrl|devtoolsEndpoint|DevToolsActivePort|\/json\/(?:list|new)/u;
+
+/** `scripts/foo.ts` -> `foo.ts`: how the lists below name a file, and how the census reads it out
+ * of a path it computed rather than spelled. */
+function baseNameOf(path: string): string {
+  return path.split("/").pop() ?? path;
+}
+
+/**
+ * The reason after a DELIBERATELY-unbounded annotation, or null when there is no annotation or no
+ * reason. Ten characters is not a style rule: it is enough that "- it hangs" cannot pass as one.
+ */
+function deliberateReason(source: string): string | null {
+  const at = source.indexOf(DELIBERATE_ANNOTATION);
+  if (at === -1) return null;
+  const tail = source.slice(at + DELIBERATE_ANNOTATION.length).split("\n")[0] ?? "";
+  const match = /^\s*[-:\u2013]\s*(\S.{9,})/u.exec(tail);
+  return match?.[1]?.trim() ?? null;
+}
+
+/** One line with its `//` comment removed - `://` is a URL, not a comment. */
+function cutLineComment(line: string): string {
+  for (let i = 0; i < line.length - 1; i++) {
+    if (line[i] === "/" && line[i + 1] === "/" && line[i - 1] !== ":") return line.slice(0, i);
+  }
+  return line;
+}
+
+/**
+ * Source with comments removed, so the census sees CODE. Comment lines are not cosmetic here:
+ * `new WebSocket(page.webSocketDebuggerUrl)` appears inside a comment in this very file, and a
+ * matcher that counted it would demand a bound from a file that opens no socket at all.
+ */
+function codeOnly(source: string): string {
+  const kept: string[] = [];
+  let inBlock = false;
+  for (const line of source.split("\n")) {
+    if (inBlock) {
+      const end = line.indexOf("*/");
+      if (end === -1) continue;
+      inBlock = false;
+      kept.push(line.slice(end + 2));
+      continue;
+    }
+    const start = line.indexOf("/*");
+    if (start !== -1 && line.indexOf("*/", start) === -1) {
+      inBlock = true;
+      kept.push(line.slice(0, start));
+      continue;
+    }
+    kept.push(cutLineComment(line));
+  }
+  return kept.join("\n");
+}
+
+/** The argument text of every `new WebSocket(...)` in `code`, paren-balanced because one of them
+ * (scripts/playback-position-browser-proof.ts) spans lines and contains its own calls. */
+function socketArguments(code: string): string[] {
+  const open = "new WebSocket(";
+  const args: string[] = [];
+  for (let at = code.indexOf(open); at !== -1; at = code.indexOf(open, at + 1)) {
+    let depth = 0;
+    let i = at + open.length - 1;
+    for (; i < code.length; i++) {
+      if (code[i] === "(") depth++;
+      else if (code[i] === ")" && --depth === 0) {
+        i++;
+        break;
+      }
+    }
+    args.push(code.slice(at + open.length, i - 1));
+  }
+  return args;
+}
+
+/** Does this source dial the DevTools endpoint itself? */
+function opensDevtoolsSocket(source: string): boolean {
+  return socketArguments(codeOnly(source)).some((arg) => DEVTOOLS_ENDPOINT.test(arg));
+}
+
+/** Every `.ts` file under `dir`, recursively - a census that stopped at the top level would miss
+ * `tests/auth/`, and the same hole would reopen one directory down. The name is COMPUTED from the
+ * readDir entry, never a literal, so the walk derives no read relation on the directory. */
+async function* typeScriptFiles(
+  dir: URL,
+  prefix: string,
+): AsyncGenerator<{ name: string; url: URL }> {
+  for await (const entry of Deno.readDir(dir)) {
+    if (entry.isDirectory) {
+      if (entry.name.startsWith(".")) continue;
+      yield* typeScriptFiles(new URL(`${entry.name}/`, dir), `${prefix}${entry.name}/`);
+    } else if (entry.isFile && entry.name.endsWith(".ts")) {
+      yield { name: `${prefix}${entry.name}`, url: new URL(entry.name, dir) };
+    }
+  }
+}
+
+/**
+ * The clients that bound their OWN `cdp()` reply (audio-feed-9go2t), and the ones that hang on
+ * purpose. These lists are the ASSERTION PAYLOAD - what each named file must carry. They are NOT
+ * the population: the census below derives that by walking scripts/ and tests/, so a file added
+ * tomorrow cannot be unlisted and a file listed here that stops being a client is caught too.
+ *
+ * The paths are LITERAL URLs, one per client. A template-built path here would derive a
+ * directory relation on `scripts/` and widen the fast gate's selection for every script change -
+ * the same reason the swept-proof row above spells its two paths out.
+ */
+const boundedClients = [
+  new URL("../scripts/account-mobile-layout-proof.ts", import.meta.url),
+  new URL("../scripts/csp-nonce-browser-proof.ts", import.meta.url),
+  new URL("../scripts/exww-live-claims-browser-proof.ts", import.meta.url),
+  new URL("../scripts/failure-diagnostics-browser-proof.ts", import.meta.url),
+  new URL("../scripts/home-module-browser-proof.ts", import.meta.url),
+  new URL("../scripts/landing-tooltip-browser-proof.ts", import.meta.url),
+  new URL("../scripts/passkey-provider-browser-proof.ts", import.meta.url),
+  new URL("../scripts/playback-position-browser-proof.ts", import.meta.url),
+  new URL("../scripts/repro_b6nr_token_storage.ts", import.meta.url),
+  new URL("../scripts/request-access-browser-proof.ts", import.meta.url),
+  new URL("../scripts/spend-visibility-browser-proof.ts", import.meta.url),
+  new URL("../scripts/tokens-browser-proof.ts", import.meta.url),
+  new URL("../scripts/verify_3asd_bookmarklet_browser.ts", import.meta.url),
+  new URL("../scripts/verify_dfbu_pagehide_browser.ts", import.meta.url),
+  new URL("../scripts/verify_ieek_canonical_urls.ts", import.meta.url),
+  new URL("../scripts/verify_kvnw_account_bookmarklet_browser.ts", import.meta.url),
+  new URL("../scripts/verify_main_l7m1_e2e.ts", import.meta.url),
+  new URL("../tests/listen_activity_test.ts", import.meta.url),
+  new URL("../tests/sticky_scroll_state_test.ts", import.meta.url),
+  new URL("../tests/view_transitions_test.ts", import.meta.url),
+];
+
+/**
+ * The clients that were already bounded before the shared helper existed: `send()`'s signature
+ * defaults `timeoutMs` and its expiry RESOLVES with an error (then throws at the call site), which
+ * is the same guarantee in a different shape, so it cannot satisfy the boundedClients assertions.
+ * The census is what found it: it dials the DevTools endpoint directly and was unlisted while the
+ * hand list was the population. Its claim is checkable, so it is CHECKED rather than annotated.
+ */
+const selfBoundedClients = [new URL("../scripts/regenerate-browser-proof.ts", import.meta.url)];
+
+/**
+ * The clients that must stay UNBOUNDED, because they are the fixture for the hang: a client that
+ * never resolves, or resolves only on demand, is what proves a hung navigation is a named, bounded
+ * failure while the navigate is still in flight. Bounding one of these would manufacture an
+ * unhandled rejection, so each carries the DELIBERATE annotation and a reason instead.
+ */
+const deliberateClients = [
+  new URL("../tests/css_escape_guard_test.ts", import.meta.url),
+  new URL("../scripts/verify_i7vi_browser.ts", import.meta.url),
+  new URL("../scripts/verify_s3uk_real_browser.ts", import.meta.url),
+];
+
 Deno.test(
   "proof-cdp: every private DevTools client bounds its OWN cdp() reply, and the clients that hang on purpose say so (audio-feed-9go2t)",
   async () => {
@@ -1147,32 +1320,6 @@ Deno.test(
     // call site cannot be written unbounded by omission, exactly as the shared client's row
     // above pins it. Source-pinned for the same reason: the behaviour the bound buys is the
     // shared client's own rows, and waiting out a two-minute hang is not a test.
-    //
-    // The paths are LITERAL URLs, one per client. A template-built path here would derive a
-    // directory relation on `scripts/` and widen the fast gate's selection for every script
-    // change - the same reason the swept-proof row above spells its two paths out.
-    const boundedClients = [
-      new URL("../scripts/account-mobile-layout-proof.ts", import.meta.url),
-      new URL("../scripts/csp-nonce-browser-proof.ts", import.meta.url),
-      new URL("../scripts/exww-live-claims-browser-proof.ts", import.meta.url),
-      new URL("../scripts/failure-diagnostics-browser-proof.ts", import.meta.url),
-      new URL("../scripts/home-module-browser-proof.ts", import.meta.url),
-      new URL("../scripts/landing-tooltip-browser-proof.ts", import.meta.url),
-      new URL("../scripts/passkey-provider-browser-proof.ts", import.meta.url),
-      new URL("../scripts/playback-position-browser-proof.ts", import.meta.url),
-      new URL("../scripts/repro_b6nr_token_storage.ts", import.meta.url),
-      new URL("../scripts/request-access-browser-proof.ts", import.meta.url),
-      new URL("../scripts/spend-visibility-browser-proof.ts", import.meta.url),
-      new URL("../scripts/tokens-browser-proof.ts", import.meta.url),
-      new URL("../scripts/verify_3asd_bookmarklet_browser.ts", import.meta.url),
-      new URL("../scripts/verify_dfbu_pagehide_browser.ts", import.meta.url),
-      new URL("../scripts/verify_ieek_canonical_urls.ts", import.meta.url),
-      new URL("../scripts/verify_kvnw_account_bookmarklet_browser.ts", import.meta.url),
-      new URL("../scripts/verify_main_l7m1_e2e.ts", import.meta.url),
-      new URL("../tests/listen_activity_test.ts", import.meta.url),
-      new URL("../tests/sticky_scroll_state_test.ts", import.meta.url),
-      new URL("../tests/view_transitions_test.ts", import.meta.url),
-    ];
     for (const url of boundedClients) {
       const name = url.pathname.split("/").pop() ?? url.pathname;
       const source = await Deno.readTextFile(url);
@@ -1192,11 +1339,6 @@ Deno.test(
     // bounded failure while the navigate is still in flight). It must stay unbounded - and it
     // must SAY so, because an unannotated unbounded await is indistinguishable from the bug
     // above and the next sweep would "fix" it.
-    const deliberateClients = [
-      new URL("../tests/css_escape_guard_test.ts", import.meta.url),
-      new URL("../scripts/verify_i7vi_browser.ts", import.meta.url),
-      new URL("../scripts/verify_s3uk_real_browser.ts", import.meta.url),
-    ];
     for (const url of deliberateClients) {
       const name = url.pathname.split("/").pop() ?? url.pathname;
       const source = await Deno.readTextFile(url);
@@ -1213,5 +1355,91 @@ Deno.test(
       new URL("../tests/listen_activity_test.ts", import.meta.url),
     );
     assertStringIncludes(listenSource, "audio-feed-9go2t: DELIBERATELY unbounded");
+  },
+);
+
+Deno.test(
+  "proof-cdp: the DevTools-client census DERIVES its population from scripts/ and tests/, so an unlisted socket or a removed annotation reds it (audio-feed-h8cam)",
+  async () => {
+    // WHY THIS ROW EXISTS: the row above is source-pinned against a HAND LIST, so it guards the
+    // clients someone remembered to type. A twenty-fifth proof script could open its own
+    // `new WebSocket(page.webSocketDebuggerUrl)` tomorrow and nothing redded - the same
+    // vocabulary failure as the bare-literal and fixture gaps before it. The population here is
+    // DERIVED (readDir + a computed name, so it leaves no read relation and does not widen the
+    // fast gate's selection - tests/css_escape_guard_test.ts made the same call), and the lists
+    // above stay as the assertion payload. Four rules, and they fail in both directions:
+    //
+    //   1. every derived client is CLASSIFIED - the shared client, a bounded one, a deliberate
+    //      one, or a self-bounded one. A new client with none of those is named here.
+    //   2. a DELIBERATE client carries the annotation AND a reason. Deleting the annotation from
+    //      one of them turns a deliberate hang back into the bug, and this names the file.
+    //   3. a SELF-BOUNDED client can prove its bound: a signature default on `timeoutMs` and a
+    //      pending-map entry removed on the timeout path. A claim without the timer behind it is
+    //      the unbounded await with a nicer comment.
+    //   4. every listed name still OPENS a socket. A stale entry keeps asserting a shape about a
+    //      file that no longer has a client, which is how a list rots into decoration.
+    const bounded = new Set(boundedClients.map((url) => baseNameOf(url.pathname)));
+    const deliberate = new Set(deliberateClients.map((url) => baseNameOf(url.pathname)));
+    const selfBounded = new Set(selfBoundedClients.map((url) => baseNameOf(url.pathname)));
+
+    const unclassified: string[] = [];
+    const unannotated: string[] = [];
+    const unproven: string[] = [];
+    const derived: string[] = [];
+    const roots: [URL, string][] = [[SCRIPTS_DIR, "scripts/"], [TESTS_DIR, "tests/"]];
+    for (const [dir, prefix] of roots) {
+      for await (const file of typeScriptFiles(dir, prefix)) {
+        const source = await Deno.readTextFile(file.url);
+        if (!opensDevtoolsSocket(source)) continue;
+        derived.push(baseNameOf(file.name));
+        if (baseNameOf(file.name) === SHARED_CLIENT) continue;
+        if (bounded.has(baseNameOf(file.name))) continue;
+        if (deliberate.has(baseNameOf(file.name))) {
+          if (deliberateReason(source) === null) {
+            unannotated.push(
+              `${file.name}: listed as a DELIBERATE hanger, but it carries no ` +
+                `"${DELIBERATE_ANNOTATION} - <reason>" annotation`,
+            );
+          }
+          continue;
+        }
+        if (selfBounded.has(baseNameOf(file.name))) {
+          if (!/timeoutMs = \d[\d_]*/u.test(source)) {
+            unproven.push(
+              `${file.name}: listed as self-bounded, but no \`timeoutMs = <ms>\` default`,
+            );
+          } else if (!/pending\.delete\(/u.test(source)) {
+            unproven.push(
+              `${file.name}: listed as self-bounded, but its timeout path leaves the pending ` +
+                "entry in the map",
+            );
+          }
+          continue;
+        }
+        unclassified.push(
+          `${file.name}: opens a DevTools WebSocket and is none of the shared client ` +
+            `(scripts/${SHARED_CLIENT}), a bounded client, a DELIBERATE hanger, or a self-bounded ` +
+            `one - bound its reply or annotate it "${DELIBERATE_ANNOTATION} - <reason>"`,
+        );
+      }
+    }
+
+    const stale = [...bounded, ...deliberate, ...selfBounded].filter((name) =>
+      !derived.includes(name)
+    );
+
+    assert(
+      derived.length >= 25,
+      `the census found ${derived.length} DevTools clients in scripts/ and tests/; the walk is ` +
+        "broken, not the tree (audio-feed-9go2t counted 24 private clients plus the shared one)",
+    );
+    assert(unclassified.length === 0, unclassified.join("\n"));
+    assert(unannotated.length === 0, unannotated.join("\n"));
+    assert(unproven.length === 0, unproven.join("\n"));
+    assert(
+      stale.length === 0,
+      `these are listed as DevTools clients but no longer open one - remove the entry or fix ` +
+        `the matcher: ${stale.join(", ")}`,
+    );
   },
 );
