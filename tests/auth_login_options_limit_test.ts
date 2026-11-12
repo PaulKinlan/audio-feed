@@ -47,7 +47,7 @@ function optionsRequest(): Request {
 
 function clientData(type: string, challenge: string): string {
   const json = JSON.stringify({ type, challenge, origin: BASE });
-  return btoa(json).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return btoa(json).replace(/\+/g, "-").replace(/[/]/g, "_").replace(/=+$/, "");
 }
 
 Deno.test("login options: N+1 rapid anonymous requests are refused (audio-feed-plmhk)", async () => {

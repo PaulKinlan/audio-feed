@@ -85,7 +85,7 @@ function call(
 
 function clientData(type: string, challenge: string): string {
   const json = JSON.stringify({ type, challenge, origin: BASE });
-  return btoa(json).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return btoa(json).replace(/\+/g, "-").replace(/[/]/g, "_").replace(/=+$/, "");
 }
 
 // -- account: no session, wrong Origin, wrong user ---------------------------

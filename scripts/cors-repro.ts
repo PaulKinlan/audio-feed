@@ -159,7 +159,7 @@ const storeServer = Deno.serve({
   // friendlier 404 here would let a browser behave differently.
   if (req.method === "OPTIONS") return new Response("preflight refused", { status: 403 });
 
-  const key = new URL(req.url).pathname.replace(/^\//, "");
+  const key = new URL(req.url).pathname.replace(/^[/]/, "");
   const object = await inner.get(key);
   if (!object) return new Response("not found", { status: 404 });
 

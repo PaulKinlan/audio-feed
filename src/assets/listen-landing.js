@@ -32,7 +32,7 @@ const input = /** @type {HTMLInputElement} */ ($("feedUrl"));
   /** Accepts a full feed URL or a bare token, because both are what people have. */
   const tokenFrom = (/** @type {string} */ value) => {
     const trimmed = value.trim();
-    const captured = trimmed.match(/\/feed\/([^/]+)\//)?.[1];
+    const captured = trimmed.match(/[/]feed[/]([^/]+)[/]/)?.[1];
     return captured ? decodeURIComponent(captured) : trimmed;
   };
   $("restore").addEventListener("submit", (event) => {

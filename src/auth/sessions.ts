@@ -37,7 +37,7 @@ export function newSecret(): string {
 export function base64url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return btoa(binary).replace(/\+/g, "-").replace(/[/]/g, "_").replace(/=+$/, "");
 }
 
 /** Mint a session for `userId`. Returns the cookie secret; only its hash is stored. */

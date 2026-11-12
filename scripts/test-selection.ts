@@ -274,7 +274,7 @@ export async function resolverConfigInputs(root: string = ROOT): Promise<string[
     const config = parsed as Record<string, unknown>;
     const lock = config.lock;
     if (lock === true) inputs.add("deno.lock");
-    else if (typeof lock === "string") await readConfig(lock.replace(/^\.\//, ""), depth + 1);
+    else if (typeof lock === "string") await readConfig(lock.replace(/^\.[/]/, ""), depth + 1);
     const extended = config.extends;
     for (
       const entry of Array.isArray(extended)
@@ -283,7 +283,7 @@ export async function resolverConfigInputs(root: string = ROOT): Promise<string[
         ? [extended]
         : []
     ) {
-      if (typeof entry === "string") await readConfig(entry.replace(/^\.\//, ""), depth + 1);
+      if (typeof entry === "string") await readConfig(entry.replace(/^\.[/]/, ""), depth + 1);
     }
   };
   await readConfig("deno.json", 0);
@@ -1446,7 +1446,7 @@ function toRepoPath(
   if (path.startsWith("-")) return null;
   if (!path.includes("/") && !/\.[A-Za-z0-9]{1,5}$/.test(path)) return null;
   if (/^[a-z]+:/i.test(path) && !/^file:/i.test(path)) return null; // http(s):, jsr:, node:, data:
-  path = path.replace(/^file:\/\//, "/");
+  path = path.replace(/^file:[/][/]/, "/");
   if (path.startsWith(root)) return normalisePath(path.slice(root.length));
   if (path.startsWith("./") || path.startsWith("../")) {
     return normalisePath(`${moduleDir ? `${moduleDir}/` : ""}${path}`);
@@ -2520,7 +2520,7 @@ export async function proveDiscoveryMatchesDeno(): Promise<DiscoveryProof> {
     const repoConfig = JSON.parse(
       (await Deno.readTextFile(`${ROOT}deno.json`))
         .split("\n")
-        .filter((line) => !/^\s*\/\//.test(line))
+        .filter((line) => !/^\s*[/][/]/.test(line))
         .join("\n"),
     ) as { exclude?: string[] };
     await Deno.writeTextFile(
@@ -2545,7 +2545,7 @@ export async function proveDiscoveryMatchesDeno(): Promise<DiscoveryProof> {
     const text = new TextDecoder().decode(output.stdout) + new TextDecoder().decode(output.stderr);
     const deno = [...text.matchAll(/^Check\s+(.+)$/gm)]
       .map((m) => (m[1] ?? "").trim())
-      .map((path) => path.replace(/^file:\/\//, ""))
+      .map((path) => path.replace(/^file:[/][/]/, ""))
       .map((path) => path.startsWith(`${dir}/`) ? path.slice(dir.length + 1) : path)
       .sort();
 

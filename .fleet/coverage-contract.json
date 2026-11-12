@@ -58,6 +58,13 @@
     "tests/source_mask_test.ts",
     "tests/fast_check_test.ts"
   ],
+  "scripts/cors-repro.ts": [
+    "tests/audio_cors_test.ts"
+  ],
+  "scripts/test-selection.ts": [
+    "tests/source_scanner_test.ts",
+    "tests/evidence_census_test.ts"
+  ],
   "tests/fixtures/checker_fail_return_child.ts": [
     "tests/proof_helper_test.ts"
   ],

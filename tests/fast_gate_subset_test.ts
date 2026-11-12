@@ -1105,7 +1105,7 @@ Deno.test("the walk skips every directory deno.json excludes (audio-feed-es8y)",
   // that the full gate never runs - property 1 would be violated by configuration drift.
   const raw = await Deno.readTextFile(`${ROOT}deno.json`);
   const json = JSON.parse(
-    raw.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n"),
+    raw.split("\n").filter((line) => !/^\s*[/][/]/.test(line)).join("\n"),
   ) as { exclude?: string[] };
   for (const entry of json.exclude ?? []) {
     const name = entry.replace(/\/$/, "");

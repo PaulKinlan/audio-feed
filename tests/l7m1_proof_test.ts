@@ -589,6 +589,6 @@ Deno.test("audio-feed-admwt: the ESRCH reap ceiling stays derived from the measu
  */
 function codeOnly(source: string): string {
   return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\*[\s\S]*?\*[/]/g, "")
     .replace(/(^|\s)\/\/.*$/gm, "$1");
 }

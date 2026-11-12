@@ -1641,6 +1641,6 @@ Deno.test(
  */
 function codeOnly(source: string): string {
   return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\*[\s\S]*?\*[/]/g, "")
     .replace(/(^|\s)\/\/.*$/gm, "$1");
 }

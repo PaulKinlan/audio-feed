@@ -32,7 +32,7 @@ export interface DeclarationSelectionViolation {
 
 /** `./tests/x.ts` and `tests/x.ts` are the same file: selection compares normalised paths. */
 function normalise(path: string): string {
-  return path.replace(/^\.\//, "");
+  return path.replace(/^\.[/]/, "");
 }
 
 /**
