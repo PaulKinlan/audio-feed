@@ -1,28 +1,37 @@
 {
   "bead": "audio-feed-0cmu",
-  "ranAt": "2026-10-31T18:36:25.931Z",
+  "ranAt": "2026-11-13T06:08:06.229Z",
   "runtime": "deno 2.9.7",
   "property": "After a timed-out attempt the process must end on its own: the caller's lease timer must not be re-ref'd by an aborted AbortSignal.any composite.",
-  "exitIsMeasuredByTheCaller": "This script cannot time its own exit. tests/tts_hardening_test.ts runs the same shape as a child and fails if it has not exited within 15s; on the pre-fix code that child was killed at 20s (measured).",
+  "exitIsMeasuredByTheCaller": "This script cannot time its own exit. tests/tts_hardening_test.ts runs the same shape as a child and fails unless it prints both attempt sentinels and exits 0 by itself; its 20s SIGKILL is a hang guard, not an assertion, and there is deliberately no elapsed-time ceiling (audio-feed-1xfvx). On the pre-fix code that child was killed at 20s (measured).",
   "mechanism": {
     "observation": "A bare AbortSignal.timeout does not hold the loop open; the same timer does once the AbortSignal.any composite around it has aborted. Recorded, not asserted: it is Deno's behaviour, not this repo's, and a future runtime may change it.",
     "unfiredTimeoutAlone": {
       "code": "AbortSignal.timeout(600_000); console.log(\"created\");",
-      "elapsedMs": 115,
+      "elapsedMs": 86,
       "exitCode": 0,
-      "exitedOnItsOwn": true
+      "terminationSignal": null,
+      "exitedOnItsOwn": true,
+      "harnessKillRequested": false,
+      "harnessKillRacedExit": false
     },
     "compositeNeverAborted": {
       "code": "AbortSignal.any([AbortSignal.timeout(600_000)]); console.log(\"created\");",
-      "elapsedMs": 208,
+      "elapsedMs": 127,
       "exitCode": 0,
-      "exitedOnItsOwn": true
+      "terminationSignal": null,
+      "exitedOnItsOwn": true,
+      "harnessKillRequested": false,
+      "harnessKillRacedExit": false
     },
     "compositeAfterAbort": {
       "code": "const any = AbortSignal.any([AbortSignal.timeout(600_000), AbortSignal.timeout(100)]); any.addEventListener(\"abort\", () => console.log(\"aborted\")); await new Promise((r) => setTimeout(r, 300)); console.log(\"work done\");",
-      "elapsedMs": 5005,
+      "elapsedMs": 5011,
       "exitCode": 137,
-      "exitedOnItsOwn": false
+      "terminationSignal": "SIGKILL",
+      "exitedOnItsOwn": false,
+      "harnessKillRequested": true,
+      "harnessKillRacedExit": false
     }
   },
   "cases": {
@@ -49,5 +58,5 @@
       "message": "script request timed out after 200ms"
     }
   },
-  "finishedAtMs": 7903
+  "finishedAtMs": 6270
 }
