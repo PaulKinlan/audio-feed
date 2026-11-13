@@ -1277,6 +1277,197 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "proof-cdp: js() forwards timeoutMs to cdp() - caller's declared budget is the one in force (audio-feed-hspt4)",
+  async () => {
+    // WHY THIS ROW EXISTS (audio-feed-hspt4): js() called cdp("Runtime.evaluate", {...}) without
+    // forwarding its own timeoutMs, so the inner default of HANG_BOUND_MS (120s) silently cut any
+    // js() call whose outer budget was larger. The invariant is that the caller's declared budget
+    // is the one in force.
+    //
+    // Driven on the FAKE clock for the same reason as the cdp() and js() default rows above:
+    // virtual time is deterministic on any host and does not spend two-minute gate slots waiting
+    // out clock time.
+    const ac = new AbortController();
+    let serverPort = 0;
+    const silent = new Map<string, number>();
+    let resolveListening!: () => void;
+    const listening = new Promise<void>((resolve) => resolveListening = resolve);
+    const server = Deno.serve({
+      port: 0,
+      signal: ac.signal,
+      onListen: ({ port }) => {
+        serverPort = port;
+        resolveListening();
+      },
+    }, (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/json/list") {
+        return new Response(
+          JSON.stringify([
+            { type: "page", webSocketDebuggerUrl: `ws://127.0.0.1:${serverPort}/page` },
+          ]),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/page") {
+        const { socket, response } = Deno.upgradeWebSocket(req);
+        socket.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.method === "Page.enable") {
+            socket.send(JSON.stringify({ id: msg.id, result: { enabled: true } }));
+            return;
+          }
+          // Runtime.evaluate (and any unhandled command): counted and deliberately unanswered.
+          const key = msg.params?.expression ?? msg.method;
+          silent.set(key, (silent.get(key) ?? 0) + 1);
+        };
+        return response;
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    try {
+      await listening;
+      const client = await connectCdp({ port: serverPort });
+      try {
+        // 1. BUDGET LARGER THAN DEFAULT (200_000ms): must still be waiting after the default
+        // HANG_BOUND_MS (120s) has passed, and must fail when the 200_000ms budget expires.
+        const largeClock = new FakeTime();
+        let largeError: unknown = null;
+        let largeSettled = false;
+        let largeElapsed = -1;
+        const largeBudgetMs = 200_000;
+        try {
+          const start = Date.now();
+          void client.js("never_answers_large", largeBudgetMs).then(
+            () => {
+              largeSettled = true;
+            },
+            (err: unknown) => {
+              largeSettled = true;
+              largeError = err;
+            },
+          );
+          // Advance past the 120s default: the inner cdp() default must NOT have cut it short.
+          await largeClock.tickAsync(HANG_BOUND_MS);
+          await largeClock.runMicrotasks();
+          assert(
+            !largeSettled,
+            "js() with a 200_000ms budget must still be waiting after HANG_BOUND_MS (120s) has elapsed - " +
+              "the inner cdp() default of 120s must not cut the caller's larger budget",
+          );
+
+          // Advance the remaining time until the 200_000ms budget is reached.
+          await largeClock.tickAsync(largeBudgetMs - HANG_BOUND_MS);
+          await largeClock.runMicrotasks();
+          largeElapsed = Date.now() - start;
+        } finally {
+          largeClock.restore();
+        }
+        assert(
+          largeSettled,
+          "js() must settle within the caller's stated budget of 200_000ms",
+        );
+        assertEquals(
+          largeElapsed,
+          largeBudgetMs,
+          "the bound must fire at the budget the caller stated (200_000ms), not at the shared default",
+        );
+        assert(
+          largeError instanceof CdpHangBoundExceeded,
+          `a never-answered evaluate must reject as CdpHangBoundExceeded, got ${
+            String(largeError)
+          }`,
+        );
+        const largeMessage = (largeError as Error).message;
+        assertStringIncludes(
+          largeMessage,
+          `got no answer in ${largeBudgetMs}ms`,
+        );
+        // Names the caller's line, not the wrapper in scripts/proof-cdp.ts.
+        assert(
+          /tests\/proof_cdp_test\.ts:\d+:\d+/u.test(largeMessage),
+          `the failure must name the proof line that sent the evaluate, got: ${largeMessage}`,
+        );
+        assert(
+          !largeMessage.includes("scripts/proof-cdp.ts"),
+          `the failure must name the call site, not the wrapper that bounded it: ${largeMessage}`,
+        );
+
+        // 2. BUDGET SMALLER THAN DEFAULT (150ms): must fail at 150ms, not at 120s.
+        const smallClock = new FakeTime();
+        let smallError: unknown = null;
+        let smallSettled = false;
+        let smallElapsed = -1;
+        const smallBudgetMs = 150;
+        try {
+          const start = Date.now();
+          void client.js("never_answers_small", smallBudgetMs).then(
+            () => {
+              smallSettled = true;
+            },
+            (err: unknown) => {
+              smallSettled = true;
+              smallError = err;
+            },
+          );
+          await smallClock.tickAsync(smallBudgetMs);
+          await smallClock.runMicrotasks();
+          smallElapsed = Date.now() - start;
+        } finally {
+          smallClock.restore();
+        }
+        assert(
+          smallSettled,
+          "a js() call with a 150ms budget must settle at 150ms, not at 120s",
+        );
+        assertEquals(
+          smallElapsed,
+          smallBudgetMs,
+          "the small js() bound must fire at the bound it was given, not at the 120s default",
+        );
+        assert(
+          smallError instanceof CdpHangBoundExceeded,
+          `a starved evaluate must reject as CdpHangBoundExceeded, got ${String(smallError)}`,
+        );
+        const smallMessage = (smallError as Error).message;
+        assertStringIncludes(
+          smallMessage,
+          `got no answer in ${smallBudgetMs}ms`,
+        );
+        assert(
+          /tests\/proof_cdp_test\.ts:\d+:\d+/u.test(smallMessage),
+          `the failure must name the proof line that sent the evaluate, got: ${smallMessage}`,
+        );
+        assert(
+          !smallMessage.includes("scripts/proof-cdp.ts"),
+          `the failure must name the call site, not the wrapper that bounded it: ${smallMessage}`,
+        );
+
+        // 3. Socket hygiene: each expression was sent exactly once.
+        await client.cdp("Page.enable");
+        assertEquals(silent.get("never_answers_large"), 1);
+        assertEquals(silent.get("never_answers_small"), 1);
+
+        // 4. Source assertion: js() forwards timeoutMs to cdp().
+        const sharedSource = await Deno.readTextFile(
+          new URL("../scripts/proof-cdp.ts", import.meta.url),
+        );
+        assert(
+          /cdp\("Runtime\.evaluate",\s*\{[\s\S]*?\},\s*timeoutMs\)/u.test(sharedSource),
+          'js() must forward `timeoutMs` to cdp("Runtime.evaluate", ..., timeoutMs)',
+        );
+      } finally {
+        client.close();
+      }
+    } finally {
+      ac.abort();
+      await server.finished;
+    }
+  },
+);
+
 /** `scripts/` and `tests/`: the two roots a DevTools client can live in. */
 const SCRIPTS_DIR = new URL("../scripts/", import.meta.url);
 const TESTS_DIR = new URL("../tests/", import.meta.url);
