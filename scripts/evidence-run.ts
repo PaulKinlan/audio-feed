@@ -83,7 +83,9 @@
  * `git merge-base --is-ancestor <record.sha> HEAD`; a sha that is not an ancestor is visibly stale
  * and never silently believed. On the RUN path these are incidents that make the invocation exit
  * non-zero while the proof still runs (running is how a stale or failed record is refreshed): no
- * run.json (when armed, see below); sha not in history or unverifiable; endedAt older than 30 days;
+ * run.json (when armed, see below); sha not in history or unverifiable; a record whose `script` is not
+ * the script its dir declares (`RECORD MISATTRIBUTED` - the field that says WHAT ran, which nothing
+ * checked until this row); endedAt older than 30 days;
  * exit !== 0 or marker === false (124 and 137 stay distinct from a clean exit in the record and in
  * the incident text); any artefact hash mismatch, missing artefact, or unrecorded file. A proof the
  * tier RAN must leave a parseable record afterward - if the writer is broken the tier names "the tier
@@ -932,13 +934,51 @@ export interface RecordValidationContext {
    * different case: shaIsAncestor then reports unverifiable, which is an incident (fail closed).
    */
   historyCheckable: boolean;
+  /**
+   * The script the dir's README declares (`- Script:`), i.e. the proof this dir SAYS it runs. The
+   * record's own `script` field must name it (audio-feed-h22ml script row): a record that names a
+   * different proof is a record of something else, and no other rule can see that. Come from
+   * readDeclaration, never from the record itself.
+   */
+  declaredScript: string;
 }
 
 /**
+ * THE FIELD TABLE (audio-feed-h22ml) - what a record asserts, and which rule makes each assertion
+ * CHECKABLE. "Written" alone is decoration: a reader a year later has no way to tell a wrong value
+ * from a right one, so every field below either names the incident that reds a wrong or missing
+ * value, or says plainly that nothing checks it.
+ *
+ *   field               written by                    checked by
+ *   script              writeRunRecord                RECORD INCOMPLETE / RECORD MISATTRIBUTED
+ *   sha                 writeRunRecord (gitHeadSha)   RECORD STALE / RECORD UNVERIFIABLE (40-hex +
+ *                                                     merge-base --is-ancestor; skipped on a
+ *                                                     root with no git HEAD)
+ *   bound.ms            writeRunRecord                WRITTEN, UNCHECKED
+ *   bound.provenance    writeRunRecord                WRITTEN, UNCHECKED
+ *   startedAt           writeRunRecord                WRITTEN, UNCHECKED (a timestamp: a wrong
+ *                                                     one costs a reader minutes, not belief)
+ *   endedAt             writeRunRecord                RECORD UNDATED / RECORD STALE (30 days)
+ *   exit                writeRunRecord                RECORD INCOMPLETE / RECORD FAILED
+ *   marker              writeRunRecord                RECORD INCOMPLETE / RECORD UNASSERTED
+ *   artefacts           hashEvidenceDir               RECORD GAP / RECORD TAMPERED
+ *   canonicalArtefacts  hashEvidenceDirCanonical      RECORD GAP / RECORD DERIVED CHANGED
+ *   canonicalVersion    writeRunRecord                RECORD UNDATED
+ *
+ * "WRITTEN, UNCHECKED" is a choice for `bound` and `startedAt` (they describe HOW the recorded run
+ * was invoked, and a legitimate re-run may change the bound), and was a HOLE for `script`: the field
+ * that identifies WHAT ran had no rule at all, so a record could name a proof this dir never ran and
+ * pre-flight clean. The fabrication matrix asserts the writer EMITS the declared path, which is not
+ * the same thing as a rule that reds a stored record naming another one - that is the gap the
+ * script row closes.
+ */
+
+/**
  * The failure rules of the record tier (audio-feed-h22ml), each naming its own incident: no record
- * (only when recordsEnforced); unparseable record; sha not an ancestor of HEAD; endedAt older than
- * 30 days; exit !== 0; marker === false; any artefact hash mismatch, missing artefact, or file
- * present but unrecorded. An empty list means the record can be believed.
+ * (only when recordsEnforced); unparseable record; a record that does not name this dir's declared
+ * script; sha not an ancestor of HEAD; endedAt older than 30 days; exit !== 0; marker === false; any
+ * artefact hash mismatch, missing artefact, or file present but unrecorded. An empty list means the
+ * record can be believed.
  */
 export async function validateRunRecord(
   read: RunRecordRead,
@@ -963,6 +1003,24 @@ export async function validateRunRecord(
     return incidents;
   }
   const record = read.record;
+
+  // WHAT RAN (audio-feed-h22ml script row): the record's `script` is the only field that says which
+  // proof produced these artefacts, so it is compared with the dir's own declaration rather than
+  // trusted. Re-pointing a README's `- Script:` at a different proof keeps the OLD record otherwise,
+  // and the old artefacts would then be read as evidence for the new script. Git-independent and
+  // version-independent: it arms with every other existing-record rule.
+  if (typeof record.script !== "string" || record.script.trim() === "") {
+    incidents.push(
+      `RECORD INCOMPLETE: ${ctx.dir} ${RECORD_FILE} has no declared script (the record must name ` +
+        `the proof it ran, or nobody can tell what produced its artefacts)`,
+    );
+  } else if (record.script !== ctx.declaredScript) {
+    incidents.push(
+      `RECORD MISATTRIBUTED: ${ctx.dir} ${RECORD_FILE} records script ${record.script} but the dir ` +
+        `declares ${ctx.declaredScript} - the record describes a proof this dir does not run ` +
+        `(re-run it: deno task evidence --only ${ctx.dir.split("/").pop()})`,
+    );
+  }
 
   if (ctx.historyCheckable) {
     const shaState = await shaIsAncestor(ctx.root, record.sha ?? "");
@@ -1740,6 +1798,7 @@ export async function main(args: string[] = Deno.args): Promise<void> {
             dir: declaration.dir,
             recordsEnforced,
             historyCheckable,
+            declaredScript: declaration.declared,
           })
         ) {
           console.log(
