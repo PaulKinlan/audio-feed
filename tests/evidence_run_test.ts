@@ -1706,6 +1706,215 @@ Deno.test(
   },
 );
 
+/**
+ * The incidents the bound rule owns, out of a full record verdict (audio-feed-wq10h). Narrow on
+ * purpose: the exit incident's own wording mentions "the bound killed the recorded run", so a loose
+ * `includes("bound")` would read the exit rule's finding as the bound rule's.
+ */
+function boundRuleIncidents(incidents: string[]): string[] {
+  return incidents.filter((incident) => /bound\.(?:ms|provenance)|has no bound/.test(incident));
+}
+
+/**
+ * audio-feed-wq10h - THE BOUND IS CHECKED FOR SHAPE, NEVER FOR EQUALITY. bound.ms and
+ * bound.provenance are written by writeRunRecord() on every run and, until this bead, were never
+ * read: a record could carry `"ms": "300000"`, a missing ms, a negative ms or `1e999` and pre-flight
+ * clean. The rule pins what the WRITER can produce - ms a positive finite integer, provenance one of
+ * BOUND_PROVENANCES - and deliberately nothing about which bound a run chose, because a raised
+ * --timeout or a newly declared - Timeout: line legitimately changes it. The rows below red on the
+ * four malformed shapes and stay GREEN on two bounds that differ from each other and from any
+ * remembered value: a check that reds honest re-runs is the wrong check, so that green row is the
+ * point of the whole test. The last row sweeps the real tree, so an existing record that cannot
+ * satisfy the rule is a finding here rather than a surprise in a later run.
+ */
+Deno.test("bound.ms and bound.provenance are shape-checked, so an honest re-run under a different bound stays green (audio-feed-wq10h)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "wq10h-bound-" });
+  try {
+    await Deno.mkdir(join(tempDir, "docs", "evidence", "wq10h"), { recursive: true });
+    const ctx = {
+      root: tempDir,
+      dir: "docs/evidence/wq10h",
+      recordsEnforced: false,
+      historyCheckable: false,
+    };
+    const now = new Date().toISOString();
+    const recordWith = (bound: unknown) => ({
+      state: "ok" as const,
+      record: {
+        script: "scripts/p.ts",
+        sha: "",
+        bound: bound as RunRecord["bound"],
+        startedAt: now,
+        endedAt: now,
+        exit: 0,
+        marker: true,
+        artefacts: {},
+      },
+    });
+    const boundIncidents = async (bound: unknown) =>
+      boundRuleIncidents(await validateRunRecord(recordWith(bound), ctx));
+    const only = async (bound: unknown): Promise<string> => {
+      const incidents = await boundIncidents(bound);
+      assertEquals(
+        incidents.length,
+        1,
+        `one incident per malformed bound, got: ${incidents.join(" | ")}`,
+      );
+      return incidents[0]!;
+    };
+
+    // GREEN: every bound resolveBound() can actually emit, including two that DIFFER from each other
+    // (300s default vs a 600s flag vs a 90s declared bound). No equality rule may red these.
+    assertEquals(
+      await validateRunRecord(recordWith({ ms: 300_000, provenance: "default" }), ctx),
+      [],
+      "a well-formed bound is not an incident of any kind",
+    );
+    assertEquals(await boundIncidents({ ms: 600_000, provenance: "flag" }), []);
+    assertEquals(await boundIncidents({ ms: 90_000, provenance: "declared" }), []);
+
+    // RED: ms as a string - the shape a hand-edited or stringly-typed writer leaves behind.
+    const stringMs = await only({ ms: "300000", provenance: "default" });
+    assertStringIncludes(
+      stringMs,
+      'RECORD INCOMPLETE: docs/evidence/wq10h run.json bound.ms "300000" is not a finite integer',
+    );
+    assertStringIncludes(
+      stringMs,
+      "deno task evidence --only wq10h",
+      "the incident names the repair",
+    );
+
+    // RED: ms missing entirely.
+    assertStringIncludes(
+      await only({ provenance: "default" }),
+      "RECORD INCOMPLETE: docs/evidence/wq10h run.json bound.ms null is not a finite integer",
+    );
+
+    // RED: negative, zero, non-finite, and fractional ms.
+    assertStringIncludes(
+      await only({ ms: -1_000, provenance: "default" }),
+      "bound.ms -1000 is not positive",
+    );
+    assertStringIncludes(
+      await only({ ms: 0, provenance: "default" }),
+      "bound.ms 0 is not positive",
+    );
+    assertStringIncludes(
+      await only({ ms: Number.POSITIVE_INFINITY, provenance: "default" }),
+      "bound.ms Infinity is not a finite integer",
+    );
+    assertStringIncludes(
+      await only({ ms: 1_500.5, provenance: "default" }),
+      "bound.ms 1500.5 is not a finite integer",
+    );
+
+    // RED: provenance missing, blank, or outside the writer's vocabulary. The message names the set,
+    // because "provenance is wrong" is unusable without it.
+    assertStringIncludes(
+      await only({ ms: 300_000 }),
+      "bound.provenance null is not a string naming where the bound came from (one of flag, declared, default",
+    );
+    assertStringIncludes(await only({ ms: 300_000, provenance: "   " }), 'bound.provenance "   "');
+    assertStringIncludes(
+      await only({ ms: 300_000, provenance: "vibes" }),
+      'bound.provenance "vibes" is not one of flag, declared, default',
+    );
+
+    // RED: no bound object at all (absent, null, or a non-object).
+    for (const absent of [undefined, null, 300_000, [300_000]]) {
+      assertStringIncludes(
+        await only(absent),
+        "RECORD INCOMPLETE: docs/evidence/wq10h run.json has no bound",
+      );
+    }
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test(
+  "a real re-run under a raised --timeout pre-flights clean, and a malformed bound reds the run path (audio-feed-wq10h)",
+  async () => {
+    const h = await makeRecordScratch();
+    try {
+      // SEED under the 300s default: the record names ms 300000 / default.
+      const seed = await runTier(h.root);
+      assertEquals(seed.code, 0, `seed run must pass: ${seed.stdout}\n${seed.stderr}`);
+      const seeded = expectOk(await readRunRecord(h.dirAbs));
+      assertEquals(seeded.bound, { ms: 300_000, provenance: "default" });
+
+      // THE HONEST RE-RUN: the same proof, a different bound (600s via --timeout). The pre-flight
+      // reads the OLD record (300000/default) and must NOT red it - the bound changed on purpose.
+      const raised = await runTier(h.root, ["--timeout", "600"]);
+      assertEquals(
+        raised.code,
+        0,
+        `a legitimate re-run under a different bound must stay green: ${raised.stdout}\n${raised.stderr}`,
+      );
+      assertEquals(raised.stdout.includes("record incident"), false, raised.stdout);
+      assertEquals(expectOk(await readRunRecord(h.dirAbs)).bound, {
+        ms: 600_000,
+        provenance: "flag",
+      });
+
+      // RED through the RUN PATH (not just the unit seam): a record whose ms is a string is an
+      // incident that exits 1, names the field, and names the repair command.
+      await mutateRecord(h.dirAbs, {
+        bound: { ms: "600000" as unknown as number, provenance: "flag" },
+      });
+      const malformed = await runTier(h.root, ["--timeout", "600"]);
+      assertEquals(malformed.code, 1, `a malformed bound must exit 1: ${malformed.stdout}`);
+      assertStringIncludes(
+        malformed.stdout,
+        'RECORD INCOMPLETE: docs/evidence/h22ml-scratch run.json bound.ms "600000" is not a finite integer',
+      );
+      assertStringIncludes(
+        malformed.stdout,
+        "produce one: deno task evidence --only h22ml-scratch",
+      );
+      assertStringIncludes(malformed.stdout, "1 record incident(s)");
+
+      // The run that named the incident also rewrote the record, so the next run is clean again.
+      const repaired = await runTier(h.root, ["--timeout", "600"]);
+      assertEquals(
+        repaired.code,
+        0,
+        `the rewritten record must pre-flight clean: ${repaired.stdout}`,
+      );
+    } finally {
+      await h.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "SWEEP ROW (audio-feed-wq10h): every committed run.json names a bound the writer could have produced",
+  async () => {
+    const root = fromFileUrl(new URL("../", import.meta.url));
+    const evidenceRoot = join(root, "docs", "evidence");
+    let checked = 0;
+    for await (const entry of Deno.readDir(evidenceRoot)) {
+      if (!entry.isDirectory) continue;
+      const read = await readRunRecord(join(evidenceRoot, entry.name));
+      // Parseability is the census row's rule; this row only judges a record it can read.
+      if (read.state !== "ok") continue;
+      const dir = `docs/evidence/${entry.name}`;
+      const boundIncidents = boundRuleIncidents(
+        await validateRunRecord(read, {
+          root,
+          dir,
+          recordsEnforced: false,
+          historyCheckable: false,
+        }),
+      );
+      assertEquals(boundIncidents, [], `${dir} names a bound the writer could not have produced`);
+      checked++;
+    }
+    assert(checked > 20, `the sweep must actually see the committed records, saw ${checked}`);
+  },
+);
+
 Deno.test(
   "shaIsAncestor fails closed: malformed and unknown shas are unverifiable, never ancestors (audio-feed-h22ml)",
   async () => {
