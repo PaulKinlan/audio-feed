@@ -458,21 +458,138 @@ export async function deriveUndeclaredEvidence(
   return map;
 }
 
+/**
+ * audio-feed-rtqzf — the shape of a per-run evidence sandbox, DERIVED from the suite that creates one.
+ *
+ * The residue row below may skip only the directory a CONCURRENT run owns, so the shape cannot be restated here:
+ * `tests/declared_proof_helpers_test.ts` composes its sandbox name at runtime
+ * (`docs/evidence/tmp-declared-proof-helpers-${Deno.pid}`) and this reads that template out of its source. A
+ * pattern written out by hand would be a second copy of the name, and the day the sandbox was renamed the row
+ * would match nothing and quietly stop protecting anything. So a template that is missing, or that no longer
+ * starts with `tmp-`, THROWS: the row reds by name and says the sandbox name moved. It never silently matches
+ * nothing.
+ */
+export function scratchSandboxPattern(): RegExp {
+  const body = Deno.readTextFileSync(new URL("./declared_proof_helpers_test.ts", import.meta.url));
+  const template = /`docs\/evidence\/([a-z0-9][a-z0-9-]*?)-\$\{Deno\.pid\}`/.exec(body);
+  const stem = template?.[1];
+  if (stem === undefined || !stem.startsWith("tmp-")) {
+    throw new Error(
+      "cannot derive the evidence sandbox name shape (audio-feed-rtqzf): " +
+        "tests/declared_proof_helpers_test.ts no longer composes a `docs/evidence/tmp-<stem>-${Deno.pid}` " +
+        "directory name. The residue row skips only that sandbox, so it cannot guess the shape - restore the " +
+        `template or update this derivation. Found: ${stem ?? "no matching template"}`,
+    );
+  }
+  return new RegExp(`^${stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`);
+}
+
+/** Whether `/proc/<pid>` can be stat'ed at all on this host under this process's permissions. */
+function procPidsReadable(): boolean {
+  try {
+    Deno.statSync("/proc/self");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * audio-feed-rtqzf — whether the pid a sandbox names is still running, so a leaked sandbox is told apart from a
+ * concurrent one.
+ *
+ * `/proc/<pid>` is asked FIRST: a directory existence check is cheaper than spawning a process, and ENOENT there
+ * is an answer (dead), not an unknown. It is not always readable though - this repo's test permissions are
+ * explicitly not `--allow-all`, which is what `/proc` needs (tests/fast_check_test.ts:1129, audio-feed-kp7l) - so
+ * the probe falls back to `ps -p`, the same process-table query `scripts/proof-helper.ts` uses for the same
+ * reason (audio-feed-wj8o2). Neither failure is allowed to pass silently: a pid that cannot be classified throws,
+ * because "unknown" read as alive would hide a leak and read as dead would red a healthy concurrent run.
+ */
+async function pidIsAlive(pid: number): Promise<boolean> {
+  if (procPidsReadable()) {
+    try {
+      Deno.statSync(`/proc/${pid}`);
+      return true;
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) return false;
+      if (!(err instanceof Deno.errors.NotCapable)) throw err;
+    }
+  }
+  const probe = await new Deno.Command("ps", {
+    args: ["-p", String(pid), "-o", "pid="],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const printed = new TextDecoder().decode(probe.stdout).trim();
+  if (probe.success) return printed !== "";
+  if (probe.code === 1 && printed === "") return false; // ps: no process carries that pid
+  throw new Error(
+    `cannot tell whether pid ${pid} is running, so a leaked evidence sandbox cannot be told from a ` +
+      "concurrent one (audio-feed-rtqzf): ps exited " +
+      `${probe.code}: ${new TextDecoder().decode(probe.stderr).trim()}`,
+  );
+}
+
+/** What an untracked name under docs/evidence is: a concurrent run's sandbox, a leaked one, or plain debt. */
+export type EvidenceResidue =
+  | { kind: "live-sandbox"; pid: number }
+  | { kind: "leaked-sandbox"; pid: number; detail: string }
+  | { kind: "not-a-sandbox" };
+
+/**
+ * audio-feed-rtqzf — judge one untracked directory name under docs/evidence.
+ *
+ * A name the sandbox template matches is skipped ONLY while its pid is alive. A dead pid is a hard-killed run's
+ * leak: `declared_proof_helpers_test` cleans its sandbox in a `finally`, which SIGKILL skips, so nothing else in
+ * this suite would ever look at that directory. A name that is not the sandbox template - including one that
+ * merely starts with `tmp` - is not a sandbox this repo creates, so it stays debt rather than being skipped.
+ *
+ * A recycled pid can make a leaked sandbox read as live. That residue is bounded (one directory) and the
+ * alternative - an age bound - would red a legitimately long concurrent run, so liveness alone decides.
+ */
+export async function classifyEvidenceResidue(name: string): Promise<EvidenceResidue> {
+  const pidText = scratchSandboxPattern().exec(name)?.[1];
+  if (pidText === undefined) return { kind: "not-a-sandbox" };
+  const pid = Number(pidText);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return {
+      kind: "leaked-sandbox",
+      pid,
+      detail: `the sandbox name carries pid \`${pidText}\`, which is not a process id`,
+    };
+  }
+  if (await pidIsAlive(pid)) return { kind: "live-sandbox", pid };
+  return {
+    kind: "leaked-sandbox",
+    pid,
+    detail:
+      `pid ${pid} is not running, so no suite is still cleaning it up: a hard-killed run leaves its ` +
+      "sandbox behind because the cleanup is in a finally block",
+  };
+}
+
 Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)", async () => {
   // audio-feed-9qvz: asked of the INDEX, not of the working directory - see carriedEvidenceDirs.
   const carried = await carriedEvidenceDirs();
 
   // audio-feed-237f, audio-feed-9qvz: directories on disk under docs/evidence must be carried by git.
   // An untracked scratch directory or residue from git rm is forbidden.
-  // Temporary sandbox/scratch directories (e.g. tmp-*) are ignored so parallel suites (e.g. declared_proof_helpers_test)
-  // do not red this check (audio-feed-47e8m).
+  //
+  // audio-feed-47e8m, audio-feed-rtqzf: the ONE thing skipped is a per-run sandbox a CONCURRENT suite is using
+  // right now - a directory named by the sandbox template derived above
+  // (docs/evidence/tmp-declared-proof-helpers-<pid>) whose pid is still running. Everything else is debt, not a
+  // skip: a sandbox whose pid is DEAD is a hard-killed run's leak (the helper's cleanup is in a `finally`, which
+  // SIGKILL skips), and a name carrying no pid at all - or one that merely starts with `tmp`, like `tmpfoo` or a
+  // dot directory - is untracked residue like any other. The skip is the sandbox template, not the `tmp` prefix.
   const staleDebt: string[] = [];
   for await (const entry of Deno.readDir("docs/evidence")) {
     if (!entry.isDirectory) continue;
-    if (entry.name.startsWith("tmp") || entry.name.startsWith(".")) continue;
-    if (!carried.has(entry.name)) {
-      staleDebt.push(entry.name);
-    }
+    if (carried.has(entry.name)) continue;
+    const residue = await classifyEvidenceResidue(entry.name);
+    if (residue.kind === "live-sandbox") continue;
+    staleDebt.push(
+      residue.kind === "leaked-sandbox" ? `${entry.name} (${residue.detail})` : entry.name,
+    );
   }
 
   assertEquals(
@@ -1341,5 +1458,44 @@ Deno.test("audio-feed-vaaj mirror: committed script present in Git index and on 
     );
   } finally {
     await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-rtqzf: a leaked sandbox reds, a concurrent one is skipped, a pid-less name is debt", async () => {
+  const sandboxName = (pid: number) => `tmp-declared-proof-helpers-${pid}`;
+
+  // A CONCURRENT run's sandbox: the template names OUR OWN pid, which is alive, so it is skipped. This is the
+  // direction that keeps a parallel `deno test` from redding a run it does not own (audio-feed-47e8m).
+  assertEquals(
+    await classifyEvidenceResidue(sandboxName(Deno.pid)),
+    { kind: "live-sandbox", pid: Deno.pid },
+    "a sandbox naming a running pid must be skipped as a concurrent run's",
+  );
+
+  // A LEAKED sandbox: a pid that has exited is exactly what a SIGKILLed suite leaves behind, and the `finally`
+  // that would have removed the directory never ran. This direction is the defect the row exists for.
+  const dead = new Deno.Command(Deno.execPath(), {
+    args: ["eval", "0"],
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+  const deadPid = dead.pid;
+  await dead.status;
+  const leaked = await classifyEvidenceResidue(sandboxName(deadPid));
+  assertEquals(
+    leaked.kind,
+    "leaked-sandbox",
+    `a sandbox naming the exited pid ${deadPid} must be reported as debt, not skipped`,
+  );
+  assertEquals(leaked.kind === "leaked-sandbox" ? leaked.pid : -1, deadPid);
+
+  // NO PID: a name the sandbox template does not match is untracked residue like any other. `tmpfoo` is here
+  // because the pre-rtqzf skip matched the `tmp` PREFIX, which would have hidden it; so is a dot directory.
+  for (const name of ["tmpfoo", ".hidden", "tmp-declared-proof-helpers", "audio-feed-l7m1"]) {
+    assertEquals(
+      await classifyEvidenceResidue(name),
+      { kind: "not-a-sandbox" },
+      `${name} carries no sandbox pid, so it must count as debt rather than being skipped`,
+    );
   }
 });
