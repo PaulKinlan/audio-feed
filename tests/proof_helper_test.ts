@@ -1578,8 +1578,8 @@ Deno.test("proof-helper: error precedence: body throw propagates with teardown f
 });
 
 Deno.test("proof-helper: launchChrome rejects without creating profile when Chrome binary discovery fails", async () => {
-  const testPrefix = "audiofeed-disc-fail-inproc-";
-  const fakeHome = "/tmp/nonexistent-audiofeed-inproc-home";
+  const testPrefix = `audiofeed-disc-fail-inproc-${Deno.pid}-`;
+  const fakeHome = `/tmp/nonexistent-audiofeed-inproc-home-${Deno.pid}`;
   try {
     // The cache root and the env are PASSED, not mutated (audio-feed-w5i0m): a global HOME change redirects
     // path resolution for anything spawning a child in a concurrently running module, and a global
@@ -1617,8 +1617,8 @@ Deno.test("proof-helper: launchChrome rejects without creating profile when Chro
 
 Deno.test("proof-helper: subprocess: binary discovery failure exits non-zero and leaves no profile", async () => {
   const fixture = new URL("./fixtures/chrome_discovery_failure_child.ts", import.meta.url).pathname;
-  const testPrefix = "audiofeed-disc-fail-subp-";
-  const fakeHome = "/tmp/nonexistent-audiofeed-subp-home";
+  const testPrefix = `audiofeed-disc-fail-subp-${Deno.pid}-`;
+  const fakeHome = `/tmp/nonexistent-audiofeed-subp-home-${Deno.pid}`;
   try {
     const cmd = new Deno.Command(Deno.execPath(), {
       args: ["run", "-A", "--unstable-kv", fixture, testPrefix],

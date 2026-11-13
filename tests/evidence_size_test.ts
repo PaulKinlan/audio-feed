@@ -464,9 +464,12 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
 
   // audio-feed-237f, audio-feed-9qvz: directories on disk under docs/evidence must be carried by git.
   // An untracked scratch directory or residue from git rm is forbidden.
+  // Temporary sandbox/scratch directories (e.g. tmp-*) are ignored so parallel suites (e.g. declared_proof_helpers_test)
+  // do not red this check (audio-feed-47e8m).
   const staleDebt: string[] = [];
   for await (const entry of Deno.readDir("docs/evidence")) {
     if (!entry.isDirectory) continue;
+    if (entry.name.startsWith("tmp") || entry.name.startsWith(".")) continue;
     if (!carried.has(entry.name)) {
       staleDebt.push(entry.name);
     }
