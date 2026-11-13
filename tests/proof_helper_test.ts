@@ -51,11 +51,28 @@ import {
   startupTimeoutPhaseMessage,
   waitForChromeProfileUnused,
   withChrome,
+  withOwnedWorkload,
+  WorkloadNotReapedError,
   writeEvidenceReadme,
 } from "../scripts/proof-helper.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "../scripts/harness-port.ts";
 import { HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "../scripts/proof-cdp.ts";
 import { GENERATED_BEGIN, GENERATED_END } from "../scripts/evidence-readme.ts";
+
+/**
+ * Whether a pid still answers, checked HERE rather than through the helper under test: a row that
+ * asked withOwnedWorkload's own probe whether withOwnedWorkload cleaned up would be asking the
+ * accused to testify (audio-feed-phicq).
+ */
+function pidStillRuns(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if ((err as { code?: string })?.code === "ESRCH") return false;
+    throw err;
+  }
+}
 
 Deno.test("proof-helper: newestChrome resolves Chrome binary path or throws descriptive error", () => {
   try {
@@ -8527,27 +8544,29 @@ Deno.test({
     // The interesting middle: a process descended from THIS run, carrying the flag, but not the browser under test.
     // Excluding ancestors only must not silence it - an exclusion that walked the whole tree would.
     const otherProfile = `/tmp/audiofeed-ubjt1-middle-${crypto.randomUUID()}`;
-    const child = new Deno.Command("sh", {
-      args: ["-c", "sleep 30", `--user-data-dir=${otherProfile}`],
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
-    try {
-      let reported = true;
-      // 30s background child sleep vs a 20x50ms poll (~2s ceiling): child process outlives poll loop by >10x margin, preventing premature exit under load.
-      for (let attempt = 1; attempt <= 20 && reported; attempt++) {
-        reported = await waitForChromeProfileUnused(otherProfile, { timeoutMs: 50 });
-        if (reported) await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      assertEquals(
-        reported,
-        false,
-        `a child of this run carrying --user-data-dir=${otherProfile} must count as a leftover (ancestors are excluded, descendants are not)`,
-      );
-    } finally {
-      // Reap on our own failure path: a test that leaks what it spawns is the defect it is testing for.
-      await killChromeAndWait(child);
-    }
+    // The child is a background workload this row OWNS (audio-feed-phicq): withOwnedWorkload spawns
+    // it, kills that pid in a finally and confirms the pid is gone, so a failing assertion below can
+    // no longer leave the sleep running. This row used to rely on its own `finally` for that.
+    await withOwnedWorkload(
+      {
+        label: `ubjt1 middle child carrying --user-data-dir=${otherProfile}`,
+        binary: "sh",
+        args: ["-c", "sleep 30", `--user-data-dir=${otherProfile}`],
+      },
+      async () => {
+        let reported = true;
+        // 30s background child sleep vs a 20x50ms poll (~2s ceiling): child process outlives poll loop by >10x margin, preventing premature exit under load.
+        for (let attempt = 1; attempt <= 20 && reported; attempt++) {
+          reported = await waitForChromeProfileUnused(otherProfile, { timeoutMs: 50 });
+          if (reported) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        assertEquals(
+          reported,
+          false,
+          `a child of this run carrying --user-data-dir=${otherProfile} must count as a leftover (ancestors are excluded, descendants are not)`,
+        );
+      },
+    );
   },
 });
 
@@ -8598,6 +8617,94 @@ Deno.test({
       await killChromeAndWait(child);
       await Deno.remove(stopFile).catch(() => {});
     }
+  },
+});
+
+Deno.test({
+  name:
+    "proof-helper: withOwnedWorkload returns only once its generator is gone, confirmed by pid (audio-feed-phicq)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  fn: async () => {
+    // The incident's shape: a CPU spinner a harness started and nothing owned (eight of these ran for
+    // 103 minutes on this VM on 2026-11-13). `sh` runs this loop in its own process, so the pid the
+    // helper owns IS the spinner - nothing hides behind a fork.
+    let spinnerPid = 0;
+    let runningDuringBody = false;
+    await withOwnedWorkload(
+      { label: "phicq harmless spinner (CPU)", binary: "sh", args: ["-c", "while :; do :; done"] },
+      ({ pid }) => {
+        spinnerPid = pid;
+        runningDuringBody = pidStillRuns(pid);
+      },
+    );
+    assert(spinnerPid > 0, "the body must be handed the pid the helper owns");
+    assertEquals(
+      runningDuringBody,
+      true,
+      `the spinner (pid ${spinnerPid}) must be RUNNING while the body runs, or this row proves nothing`,
+    );
+    // THE POINT: the helper has RETURNED and the process is gone. Checked by pid - never by a
+    // `ps | awk` pattern, which is the cleanup that matches its own command line and kills itself.
+    assertEquals(
+      pidStillRuns(spinnerPid),
+      false,
+      `withOwnedWorkload returned while pid ${spinnerPid} still answered: the generator outlived the command that started it`,
+    );
+  },
+});
+
+Deno.test({
+  name:
+    "proof-helper: a generator that survives its kill REDS by name instead of being left behind (audio-feed-phicq)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  fn: async () => {
+    // The failure direction, and it needs the `kill` seam to exist at all: SIGKILL cannot be ignored,
+    // so a real generator cannot be made to survive a working kill. What CAN fail is the kill itself
+    // (a wrong pid, a wrapper that forked, a signal that never lands), and the property pinned here is
+    // that the helper DETECTS that rather than returning.
+    let spinnerPid = 0;
+    const error = await assertRejects(
+      () =>
+        withOwnedWorkload(
+          {
+            label: "phicq unkillable spinner (CPU)",
+            binary: "sh",
+            args: ["-c", "while :; do :; done"],
+          },
+          ({ pid }) => {
+            spinnerPid = pid;
+          },
+          { kill: () => {}, reapTimeoutMs: 300, reapPollMs: 20 },
+        ),
+      WorkloadNotReapedError,
+    );
+    assert(spinnerPid > 0, "the body ran, so the helper owned a pid");
+    assertStringIncludes(error.message, `pid ${spinnerPid}`);
+    assertStringIncludes(
+      error.message,
+      "still running",
+      "the red must say the workload was still running, not merely that something failed",
+    );
+    assertStringIncludes(
+      error.message,
+      `kill -KILL ${spinnerPid}`,
+      "the red must name the cleanup, by pid",
+    );
+    // The red is about a process that REALLY was still alive, or the row would pass on a generator
+    // that had already exited on its own.
+    assertEquals(
+      pidStillRuns(spinnerPid),
+      true,
+      `pid ${spinnerPid} was expected to still be running when the helper redded`,
+    );
+    // This row's own teardown, in the shape the rule prescribes: the pid it spawned, signalled
+    // directly, then confirmed gone. No pattern, no `pkill`.
+    Deno.kill(spinnerPid, "SIGKILL");
+    const deadline = Date.now() + 5_000;
+    while (pidStillRuns(spinnerPid) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assertEquals(pidStillRuns(spinnerPid), false, `row teardown failed to reap pid ${spinnerPid}`);
   },
 });
 

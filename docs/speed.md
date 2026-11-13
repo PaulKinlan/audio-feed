@@ -427,6 +427,39 @@ not see the row the rule is about. A row name is unique and line-independent; `g
 file costs one command and cannot silently point at different code. The same standard applies to any
 row cited from a doc or a bead.
 
+## Background writers and load generators belong to the harness that starts them (audio-feed-phicq)
+
+Two proof rows on 2026-11-13 started their background work with a bare `&` and nothing owned it: a
+concurrent-writer loop (`touch` + `sleep 0.1`) that ran **121 minutes** and eight CPU spinners
+(`while :; do :; done`) that ran **103 minutes**, both long after the command that started them had
+returned. The rows' assertions were correct; the harnesses had no lifetime. The reaper eventually
+killed both, which means a lane lost the CPU it was measuring and the box carried ~8 cores of load
+while other lanes ran suites. On a shared VM that is not a tidiness problem: it is load charged to
+every gate queued behind it, which is why this rule sits in this file rather than in a bead.
+
+The rule, for any proof, test or one-off harness — not only the evidence tier:
+
+1. **A background writer or load generator starts inside a bound and is killed in a trap.** In TS
+   that trap is a `finally`; in shell it is `trap ... EXIT`. `cmd &` with no owner is the defect.
+2. **It must not survive the command that started it.** The command returning IS the contract: when
+   it returns, the workload is gone. Confirm it rather than assuming it — "the kill returned" is
+   not "the process is gone".
+3. **Cleanup must not pattern-match its own command line.** `ps -eo pid,args | awk '/spinner/ {print
+   $1}' | xargs kill` matches the KILLER's own argv, so the cleanup kills itself — measured on
+   2026-11-13 as **exit 137 on the cleanup command, with the generator still running**. Kill the pid
+   you spawned, and nothing else.
+
+`withOwnedWorkload` (`scripts/proof-helper.ts`) is the mechanical form of the rule: it spawns the
+generator as a direct child, runs the body, kills that pid in a `finally`, waits for the child's own
+exit event under `WORKLOAD_REAP_TIMEOUT_MS`, and re-checks the pid. A generator that survives is a
+named `WorkloadNotReapedError`, never a silent return. It also reds a generator that exits while the
+body is still running, because `sh -c 'work &'` returns at once and the body would then assert its
+property with no load at all.
+
+Two limits, said plainly: the `finally` does not run if THIS harness is SIGKILLed (the fleet reaper
+is the backstop, so keep the workload cheap and named), and the helper owns exactly one pid, so a
+generator that forks grandchildren of its own is outside its contract.
+
 ## Real-clock budget rows: the census (`fleet/realtimeclock`, 2026-10-30)
 
 Tonight's gate reds came from one shape: a row armed a product budget on the REAL clock and then

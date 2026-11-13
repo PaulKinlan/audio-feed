@@ -4620,6 +4620,193 @@ export async function killChromeAndWait(chrome: Deno.ChildProcess): Promise<void
   await chrome.status.catch(() => {});
 }
 
+/** A background writer or load generator, as a proof harness has to describe one. */
+export interface BackgroundWorkloadSpec {
+  /** Named in every failure message: what load was running, and for which row. */
+  label: string;
+  binary: string;
+  args: string[];
+  /** Load generators are chatty and a full pipe can block one, so both default to "null". */
+  stdout?: "null" | "piped";
+  stderr?: "null" | "piped";
+}
+
+/** What the body may rely on while its workload runs: the ONE pid this helper owns. */
+export interface OwnedWorkload {
+  pid: number;
+}
+
+export interface BackgroundWorkloadOptions {
+  /** How long the kill may take to take effect before the helper declares it NOT reaped. */
+  reapTimeoutMs?: number;
+  reapPollMs?: number;
+  /** Test seam: the kill mechanism. Defaults to signalling the owned pid with SIGKILL. */
+  kill?: (pid: number) => void;
+}
+
+/**
+ * The generator outlived its kill. This is the one outcome the helper refuses to return on: returning
+ * quietly is how a workload runs for another hundred minutes after the command that started it.
+ */
+export class WorkloadNotReapedError extends Error {
+  readonly pid: number;
+
+  constructor(message: string, pid: number) {
+    super(message);
+    this.name = "WorkloadNotReapedError";
+    this.pid = pid;
+  }
+}
+
+/** How long a killed workload may take to leave before the run reds (audio-feed-phicq). */
+export const WORKLOAD_REAP_TIMEOUT_MS = 5_000;
+
+/** Whether a pid still answers. Signal 0 asks the kernel without delivering anything. */
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if ((err as { code?: string })?.code === "ESRCH") return false;
+    throw err;
+  }
+}
+
+/**
+ * Run `body` with a background writer or load generator that this harness OWNS (audio-feed-phicq).
+ *
+ * THE INCIDENT THIS EXISTS FOR, measured on this VM on 2026-11-13: two proof rows started their
+ * background work with a bare `&` and no owner. A concurrent-writer loop (`touch` + `sleep 0.1`) ran
+ * for 121 minutes and eight CPU spinners (`while :; do :; done`) for 103 minutes — both long after
+ * the command that started them had returned. The rows' assertions were fine; the harnesses had no
+ * lifetime. The fleet reaper eventually killed both, which means a lane lost the CPU it was measuring
+ * and the box carried ~8 cores of load while other lanes ran suites.
+ *
+ * THE CONTRACT: the generator is spawned here as a DIRECT CHILD, and this helper returns only after
+ * it has CONFIRMED that pid is gone. Three rules produce that:
+ *
+ * 1. THE REAP RUNS ON BOTH PATHS - on return AND on throw - so a body that fails its assertion
+ *    still cannot leave its generator behind. (It is written as the block after the body rather
+ *    than a `finally`, because reporting a leak from a `finally` is deno_lint's no-unsafe-finally;
+ *    the guarantee is the `finally` guarantee.)
+ * 2. THE KILL IS BY PID, never by pattern. `ps | awk '/my-generator/ { print $1 }' | xargs kill`
+ *    matches the KILLER's own argv, so the cleanup kills itself — measured on 2026-11-13 as exit 137
+ *    on the cleanup command, with the generator still running. This helper never reads the process
+ *    table; it signals the pid it spawned and nothing else.
+ * 3. THE EXIT IS CONFIRMED, not assumed. "The kill returned" is not "the process is gone", so the
+ *    helper waits for the child's own exit event (bounded) and then re-checks the pid, and a
+ *    generator that survives its kill is a NAMED failure rather than a silent return.
+ *
+ * A generator that EXITS while the body is still running is also a failure, and it is the exact
+ * shape that leaked above: `sh -c 'do-the-work &'` returns at once and the work is orphaned outside
+ * any owner, so the body would assert its property with no load running — a green that agrees with
+ * expectation by accident. Run the workload as one direct child; do not background it yourself.
+ *
+ * NOT COVERED, stated plainly: a SIGKILL of THIS harness executes no `finally`, so it can still leave
+ * the generator to the fleet reaper. Nothing in-process can trap SIGKILL; keeping the workload cheap,
+ * bounded and named is what makes that survivable.
+ */
+export async function withOwnedWorkload<T>(
+  spec: BackgroundWorkloadSpec,
+  body: (workload: OwnedWorkload) => Promise<T> | T,
+  options: BackgroundWorkloadOptions = {},
+): Promise<T> {
+  const reapTimeoutMs = options.reapTimeoutMs ?? WORKLOAD_REAP_TIMEOUT_MS;
+  const reapPollMs = options.reapPollMs ?? 50;
+  const kill = options.kill ?? ((pid: number) => {
+    try {
+      Deno.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone: the kill is never the proof, the pid check below is.
+    }
+  });
+
+  const child = new Deno.Command(spec.binary, {
+    args: spec.args,
+    stdout: spec.stdout ?? "null",
+    stderr: spec.stderr ?? "null",
+  }).spawn();
+  const pid = child.pid;
+
+  // The exit EVENT, not a wall-clock reading: `status` resolves when the child has exited and been
+  // reaped. Same rule removeDirWhenQuiet follows — quiet is an event, never a gap between writes.
+  // Deliberately not awaited: it settles only when the child exits, and the body must run while the
+  // child is alive. The verdicts below read the fact it sets.
+  let exited = false;
+  let exitCode: number | null = null;
+  child.status.then((status) => {
+    exited = true;
+    exitCode = status.code;
+  }).catch(() => {
+    exited = true;
+  });
+
+  const waitForExit = async (timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (exited) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, reapPollMs));
+    }
+  };
+
+  const reap = async (): Promise<void> => {
+    if (!exited) kill(pid);
+    if (!(await waitForExit(reapTimeoutMs))) {
+      throw new WorkloadNotReapedError(
+        `${spec.label}: the background workload (pid ${pid}) was still running ${reapTimeoutMs}ms ` +
+          `after the kill - refusing to return and leave it behind, because it would keep consuming ` +
+          `this VM after the command returns. Kill it by pid: kill -KILL ${pid}`,
+        pid,
+      );
+    }
+    // The exit event says the child is reaped; this says nothing is left answering to that pid. Both,
+    // because a kill that "returned" is neither of them.
+    if (pidIsAlive(pid)) {
+      throw new WorkloadNotReapedError(
+        `${spec.label}: pid ${pid} still answers after its exit event - refusing to return and ` +
+          `leave a workload this harness owns. Kill it by pid: kill -KILL ${pid}`,
+        pid,
+      );
+    }
+  };
+
+  // THE TRAP, written out rather than as a `finally` (deno_lint no-unsafe-finally): the reap below
+  // runs on the success path AND the failure path exactly as a `finally` would, and it can report a
+  // leak without throwing out of a `finally` block.
+  let bodyError: unknown = null;
+  let result: T | undefined;
+  try {
+    result = await body({ pid });
+    // One macrotask flush, not a timing window: the kernel's exit is already observable to the loop,
+    // and this only lets a pending status callback be delivered before the early-exit verdict.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (exited) {
+      throw new Error(
+        `${spec.label}: the background workload (pid ${pid}) exited (code ${exitCode}) while the ` +
+          `body was still running, so the body asserted its property with NO load running. This is ` +
+          `the shape a shell's own '&' produces - the shell exits at once and the work is orphaned ` +
+          `outside this helper. Run the workload as one direct child, without '&'.`,
+      );
+    }
+  } catch (err) {
+    bodyError = err;
+  }
+
+  try {
+    await reap();
+  } catch (reapError) {
+    // A leak is the more dangerous fact, so it is the error that surfaces; the body's own failure
+    // rides along as its cause rather than being lost.
+    if (bodyError !== null && reapError instanceof Error) {
+      (reapError as Error & { cause?: unknown }).cause = bodyError;
+    }
+    throw reapError;
+  }
+  if (bodyError !== null) throw bodyError;
+  return result as T;
+}
+
 /**
  * Remove a directory that a dying process may still be recreating, and report whether it is finally gone
  * (audio-feed-wj8o2).
