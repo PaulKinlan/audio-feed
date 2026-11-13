@@ -7,7 +7,11 @@ import {
   assertThrows,
 } from "@std/assert";
 import { dirname, join, normalize } from "@std/path";
-import { deriveReadRelationReport, isFastGateSelectable } from "../scripts/test-selection.ts";
+import {
+  deriveReadRelationReport,
+  discoverFullGateTestFiles,
+  isFastGateSelectable,
+} from "../scripts/test-selection.ts";
 
 const CONTRACTS_PATH = new URL("./contracts.json", import.meta.url).pathname;
 
@@ -798,6 +802,214 @@ Deno.test("coverage contract validator accepts a path string only when the code 
     `assertStringIncludes(html, \`<link rel="stylesheet" href="\${assetUrl("admin.css")}">\`);`,
   );
   assertEquals(linkTagResult.exercises, true, "a literal inside a link tag must pass");
+});
+
+/**
+ * Targets excluded from strict automated recall enforcement in .fleet/coverage-contract.json.
+ *
+ * Exact recall requires that every suite exercising a target is mapped in the contract.
+ * Targets are excluded only with a specific, reviewable rationale:
+ * 1. Coarse directory prefix relations (src/, scripts/, tests/) are already excluded repository-wide
+ *    because whole-tree scans (throw-site sweeps, CSP header audits, census counts) do not test individual files.
+ * 2. Shared/hub routes (src/routes/listen.ts, src/routes/account_api.ts, src/routes/pwa.ts): imported across
+ *    many routes and tests; the contract maps only the dedicated/primary handler suite.
+ * 3. Broad UI assets (src/assets/listen.js, src/assets/listen.css): linked by multiple UI test suites; the contract
+ *    pins the primary feature/spec suites rather than every UI test that renders the app shell.
+ * 4. Secondary proof observers (scripts/*-proof.ts): primarily executed by tests/proof_cdp_test.ts; secondary
+ *    references in specialized assertion helpers are omitted to avoid over-selection.
+ * 5. Multi-test development utilities (scripts/source-mask.ts, scripts/test-selection.ts): foundational test
+ *    tooling exercising-set is wide across the test-selection test family.
+ */
+export const RECALL_EXCLUSIONS: Record<string, string> = {
+  "src/routes/pwa.ts":
+    "route handler imported by tests/share_target_test.ts in addition to primary suite tests/listen_test.ts",
+  "src/routes/listen.ts":
+    "core route handler imported by 9 secondary test suites; contract maps primary suite tests/listen_reads_test.ts",
+  "src/routes/account_api.ts":
+    "route handler imported by tests/auth_login_options_limit_test.ts and tests/lockout_order_test.ts; contract maps primary suite tests/auth_body_cap_test.ts",
+  "src/assets/listen.js":
+    "shared asset linked by tests/listen_test.ts in addition to the 5 primary mapped suites",
+  "src/assets/listen.css":
+    "shared stylesheet linked across 6 additional UI test suites; contract maps the 5 primary feature suites",
+  "scripts/exww-live-claims-browser-proof.ts":
+    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/exww_mutants_verdict_test.ts is an auxiliary checker",
+  "scripts/landing-tooltip-browser-proof.ts":
+    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/chrome_profile_sweep_sites_test.ts is an auxiliary sweep",
+  "scripts/passkey-provider-browser-proof.ts":
+    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/proof_helper_test.ts is an auxiliary harness",
+  "scripts/verify_main_l7m1_e2e.ts":
+    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/l7m1_proof_test.ts is an auxiliary unit test",
+  "scripts/verify_s3uk_real_browser.ts":
+    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/chrome_profile_sweep_sites_test.ts is an auxiliary sweep",
+  "scripts/source-mask.ts":
+    "shared utility imported by 3 secondary suites (chrome_profile_sweep_sites, evidence_census, prompt_census); contract maps dedicated suites",
+  "scripts/test-selection.ts":
+    "test selection core module exercised by 8 specialized relation/scanner test suites; contract maps primary unit/census suites",
+};
+
+/**
+ * Derives all test suites that genuinely exercise the given target.
+ * Suites whose exercise is purely self-referential contract testing (tests/contracts_test.ts) are excluded.
+ */
+export function deriveExercisingSuitesForTarget(
+  target: string,
+  allSuites: readonly string[],
+  suiteSources?: Map<string, string>,
+): string[] {
+  const result: string[] = [];
+  for (const suite of allSuites) {
+    if (suite === "tests/contracts_test.ts") continue;
+    const source = suiteSources?.get(suite);
+    if (suiteExercisesTarget(suite, target, source).exercises) {
+      result.push(suite);
+    }
+  }
+  return result.sort();
+}
+
+/**
+ * Validates that coverage contract satisfies RECALL: every suite that genuinely exercises an unexcluded
+ * target must be present in that target's mapped suite array.
+ *
+ * Soundness (checked above) ensures that every mapped suite genuinely exercises the target (mapped ⊆ exercising).
+ * Recall (checked here) ensures that every genuine reader is mapped in the contract (exercising ⊆ mapped).
+ * Together, they guarantee that the coverage contract cannot be silently narrowed (audio-feed-5v4uf).
+ */
+export function validateCoverageContractRecall(
+  contract: ContractMapping,
+  allSuites: readonly string[],
+  exclusions: Record<string, string> = RECALL_EXCLUSIONS,
+  suiteSources?: Map<string, string>,
+): void {
+  for (const [target, mappedSuites] of Object.entries(contract)) {
+    if (target in exclusions) continue;
+    const exercising = deriveExercisingSuitesForTarget(target, allSuites, suiteSources);
+    const missing = exercising.filter((s) => !mappedSuites.includes(s));
+    assert(
+      missing.length === 0,
+      `recall failure: ${target} is genuinely exercised by ${
+        missing.join(", ")
+      }, but the coverage contract does not map them (audio-feed-5v4uf)`,
+    );
+  }
+}
+
+let cachedSuiteSources: Map<string, string> | null = null;
+async function getSuiteSources(allSuites: readonly string[]): Promise<Map<string, string>> {
+  if (cachedSuiteSources) return cachedSuiteSources;
+  const sources = new Map<string, string>();
+  for (const suite of allSuites) {
+    if (suite === "tests/contracts_test.ts") continue;
+    const source = await Deno.readTextFile(new URL(`../${suite}`, import.meta.url));
+    sources.set(suite, stripComments(source));
+  }
+  cachedSuiteSources = sources;
+  return sources;
+}
+
+Deno.test("coverage-contract.json enforces recall: unexcluded targets map all of their real exercising suites (audio-feed-5v4uf)", async () => {
+  const coverageContract = loadCoverageContract();
+  const root = new URL("../", import.meta.url).pathname;
+  const allSuites = await discoverFullGateTestFiles(root);
+  const suiteSources = await getSuiteSources(allSuites);
+
+  // 1. Audit exclusions: every entry in RECALL_EXCLUSIONS must be a declared target in coverage-contract.json
+  // with a non-empty, actionable justification.
+  for (const [target, reason] of Object.entries(RECALL_EXCLUSIONS)) {
+    assert(
+      target in coverageContract,
+      `stale recall exclusion: ${target} is in RECALL_EXCLUSIONS but not in coverage-contract.json`,
+    );
+    assert(
+      typeof reason === "string" && reason.trim().length > 0,
+      `recall exclusion for ${target} must provide a non-empty rationale`,
+    );
+  }
+
+  // 2. Validate recall across all unexcluded targets in the real contract:
+  validateCoverageContractRecall(coverageContract, allSuites, RECALL_EXCLUSIONS, suiteSources);
+
+  // Count unexcluded targets to verify the test did not pass vacuously:
+  const unexcludedTargets = Object.keys(coverageContract).filter(
+    (target) => !(target in RECALL_EXCLUSIONS),
+  );
+  assert(
+    unexcludedTargets.length >= 40,
+    `expected at least 40 unexcluded targets covered by recall, found ${unexcludedTargets.length}`,
+  );
+  assert(
+    unexcludedTargets.includes("src/assets/admin.css"),
+    "src/assets/admin.css must be subject to automated recall validation",
+  );
+});
+
+Deno.test("coverage contract recall validator rejects narrowed mappings and allows supersets (audio-feed-5v4uf)", async () => {
+  const coverageContract = loadCoverageContract();
+  const root = new URL("../", import.meta.url).pathname;
+  const allSuites = await discoverFullGateTestFiles(root);
+  const suiteSources = await getSuiteSources(allSuites);
+
+  // NEGATIVE PROOF 1: narrowing src/assets/admin.css from 3 suites to 1 suite (dropping admin_asset_test and admin_ui_test)
+  // must FAIL, naming src/assets/admin.css and the missing suites.
+  const narrowedAdminContract: ContractMapping = {
+    ...coverageContract,
+    "src/assets/admin.css": ["tests/anchor_positioning_test.ts"],
+  };
+
+  assertThrows(
+    () => {
+      validateCoverageContractRecall(
+        narrowedAdminContract,
+        allSuites,
+        RECALL_EXCLUSIONS,
+        suiteSources,
+      );
+    },
+    AssertionError,
+    "src/assets/admin.css is genuinely exercised by tests/admin_asset_test.ts, tests/admin_ui_test.ts, but the coverage contract does not map them",
+    "narrowing src/assets/admin.css from 3 suites to 1 must be rejected naming the target and missing suites",
+  );
+
+  // NEGATIVE PROOF 2: dropping an exercising suite from a fixture target (e.g. tests/fixtures/checker_pass_child.ts)
+  // must also FAIL, naming the fixture target and missing suite.
+  const narrowedFixtureContract: ContractMapping = {
+    ...coverageContract,
+    "tests/fixtures/checker_pass_child.ts": [],
+  };
+
+  assertThrows(
+    () => {
+      validateCoverageContractRecall(
+        narrowedFixtureContract,
+        allSuites,
+        RECALL_EXCLUSIONS,
+        suiteSources,
+      );
+    },
+    AssertionError,
+    "tests/fixtures/checker_pass_child.ts is genuinely exercised by tests/proof_helper_test.ts, but the coverage contract does not map them",
+    "dropping an exercising suite from a fixture must be rejected naming the target and missing suite",
+  );
+
+  // POSITIVE PROOF (superset allowed by recall rule):
+  // The recall rule requires that all genuine readers are mapped (no omissions).
+  // Adding an extra suite to a mapping preserves recall (all exercising suites remain mapped).
+  // Note: Unsound additions are forbidden by the separate soundness check (line 599).
+  const supersetContract: ContractMapping = {
+    ...coverageContract,
+    "src/assets/admin.css": [
+      ...coverageContract["src/assets/admin.css"]!,
+      "tests/non_exercising_superset_test.ts",
+    ],
+  };
+
+  // Must NOT throw under recall validation:
+  validateCoverageContractRecall(
+    supersetContract,
+    allSuites,
+    RECALL_EXCLUSIONS,
+    suiteSources,
+  );
 });
 
 Deno.test("coverage-contract.json covers required browser proof scripts and changed scripts under scripts/ (audio-feed-c0oh9)", async () => {
