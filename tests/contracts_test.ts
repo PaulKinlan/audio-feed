@@ -845,8 +845,9 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     }
     const stem = file.split("/").pop()!.replace(/\.(ts|sh)$/, "");
     const normalizedStem = stem.replace(/-/g, "_");
-    const hasDirectTest = existsOnDisk(`tests/${stem}_test.ts`) ||
-      existsOnDisk(`tests/${normalizedStem}_test.ts`);
+    const directTestNames = directTestFileNames();
+    const hasDirectTest = directTestNames.has(`${stem}_test.ts`) ||
+      directTestNames.has(`${normalizedStem}_test.ts`);
     const hasContractEntry = file in coverageContract || file in contracts;
     assert(
       hasDirectTest || hasContractEntry,
@@ -990,6 +991,23 @@ Deno.test("a declared path that no longer exists is reported by name, not as a r
     "a missing declared path must be an assertion naming the entry, not a NotFound throw",
   );
   assertContractFileExists("tests/contracts_test.ts", "by this row");
+});
+
+Deno.test("the direct-test probe keeps the tests/ directory relation the derivation reads (audio-feed-nmh3v)", async () => {
+  // ROUND 2 of this bead, and the reason this row exists: routing the direct-test probe through a helper
+  // PARAMETER kept every assertion green and silently dropped the `tests/` directory relation this suite
+  // carries - 180 -> 179 keys on the full tree, with nothing in the diff to see. It is a real relation, not a
+  // literal to preserve: which files exist in tests/ is exactly what answers "is there a direct test for
+  // this script?", so a change under tests/ has to keep selecting this suite. Pinned here so the next
+  // refactor of that probe has to red a row instead of quietly narrowing the gate.
+  const root = new URL("../", import.meta.url).pathname;
+  const report = await deriveReadRelationReport(root, ["tests/contracts_test.ts"]);
+  assert(
+    report.relations.get("tests/")?.includes("tests/contracts_test.ts"),
+    `the direct-test probe must keep the tests/ directory relation, saw: ${
+      [...report.relations.keys()].sort().join(", ")
+    }`,
+  );
 });
 
 /**
@@ -1141,6 +1159,37 @@ function existsOnDisk(relativePath: string): boolean {
     if (error instanceof Deno.errors.NotFound) return false;
     throw error;
   }
+}
+
+/**
+ * The directory a direct test for a `scripts/` file lives in, named ONCE.
+ *
+ * audio-feed-nmh3v round 2: this const is also the reference the DERIVED READ RELATION needs. The direct-test
+ * probe used to hold two `new URL(`../tests/<stem>_test.ts`, import.meta.url)` candidates, and the derivation
+ * read the `../tests/` prefix of that template as a directory relation (`tests/` <- this suite) - which is
+ * what selects this suite when anything under tests/ changes. Routing the probe through a helper PARAMETER
+ * hid that literal (a parameter is not a path), so the relation went with it: 180 -> 179 keys on the full
+ * tree, invisible in the diff. Naming the directory here and READING it says the same thing in a form the
+ * derivation can see, and it says it truthfully: the set of files in tests/ is what answers "is there a
+ * direct test for this script?".
+ */
+const DIRECT_TEST_DIR = new URL("../tests/", import.meta.url);
+
+/**
+ * The file names in DIRECT_TEST_DIR, listed once per run. One listing answers the direct-test question for
+ * every changed script, where the probe it replaces stat'd two candidate paths per script and swallowed a
+ * permission error as "no direct test". A missing tests/ directory is not a NotFound to absorb here - it is
+ * the tree being wrong, so the throw propagates.
+ */
+let directTestFileNamesCache: Set<string> | null = null;
+function directTestFileNames(): Set<string> {
+  if (directTestFileNamesCache) return directTestFileNamesCache;
+  const names = new Set<string>();
+  for (const entry of Deno.readDirSync(DIRECT_TEST_DIR)) {
+    if (entry.isFile) names.add(entry.name);
+  }
+  directTestFileNamesCache = names;
+  return names;
 }
 
 /**
