@@ -1,4 +1,11 @@
-import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  AssertionError,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { dirname, join, normalize } from "@std/path";
 import { deriveReadRelationReport, isFastGateSelectable } from "../scripts/test-selection.ts";
 
@@ -25,9 +32,7 @@ Deno.test("contracts.json is valid and targets real suites", () => {
     );
     for (const suite of suites) {
       assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
-      const fullPath = new URL(`../${suite}`, import.meta.url).pathname;
-      const stat = Deno.statSync(fullPath);
-      assert(stat.isFile, `suite ${suite} must exist on disk`);
+      assertContractFileExists(suite, `as a suite for ${pattern} in tests/contracts.json`);
     }
   }
 });
@@ -597,8 +602,10 @@ Deno.test("coverage-contract.json is valid, targets real files and suites, and s
 
   for (const [declaredPath, suites] of Object.entries(contract)) {
     assert(declaredPath.length > 0, "declared path must be non-empty");
-    const targetStat = Deno.statSync(new URL(`../${declaredPath}`, import.meta.url).pathname);
-    assert(targetStat.isFile, `declared path ${declaredPath} must exist on disk`);
+    assertContractFileExists(
+      declaredPath,
+      `by .fleet/coverage-contract.json (mapped to ${suites.join(", ")})`,
+    );
 
     assert(
       Array.isArray(suites) && suites.length > 0,
@@ -607,8 +614,10 @@ Deno.test("coverage-contract.json is valid, targets real files and suites, and s
 
     for (const suite of suites) {
       assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
-      const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
-      assert(suiteStat.isFile, `suite ${suite} must exist on disk`);
+      assertContractFileExists(
+        suite,
+        `as a suite for ${declaredPath} in .fleet/coverage-contract.json`,
+      );
 
       const result = suiteExercisesTarget(suite, declaredPath);
       assert(
@@ -813,8 +822,10 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     );
     for (const suite of suites!) {
       assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
-      const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
-      assert(suiteStat.isFile, `suite ${suite} for ${script} must exist on disk`);
+      assertContractFileExists(
+        suite,
+        `as a suite for the required proof script ${script} in .fleet/coverage-contract.json`,
+      );
       const result = suiteExercisesTarget(suite, script);
       assert(
         result.exercises,
@@ -834,18 +845,9 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     }
     const stem = file.split("/").pop()!.replace(/\.(ts|sh)$/, "");
     const normalizedStem = stem.replace(/-/g, "_");
-    const directTest1 = new URL(`../tests/${stem}_test.ts`, import.meta.url).pathname;
-    const directTest2 = new URL(`../tests/${normalizedStem}_test.ts`, import.meta.url).pathname;
-    let hasDirectTest = false;
-    try {
-      hasDirectTest = Deno.statSync(directTest1).isFile;
-    } catch {
-      try {
-        hasDirectTest = Deno.statSync(directTest2).isFile;
-      } catch {
-        hasDirectTest = false;
-      }
-    }
+    const directTestNames = directTestFileNames();
+    const hasDirectTest = directTestNames.has(`${stem}_test.ts`) ||
+      directTestNames.has(`${normalizedStem}_test.ts`);
     const hasContractEntry = file in coverageContract || file in contracts;
     assert(
       hasDirectTest || hasContractEntry,
@@ -972,6 +974,42 @@ Deno.test("a changed fixture that no longer exists is a deletion, not an unhandl
   assertEquals(existsOnDisk("tests/fixtures"), false, "a directory is not a file");
 });
 
+Deno.test("a declared path that no longer exists is reported by name, not as a raw stat throw (audio-feed-nmh3v)", () => {
+  // The SAME throw existsOnDisk() reads as absence above, asked by the CONTRACT-VALIDATION path, which used
+  // to call `Deno.statSync` directly: deleting a mapped fixture exited with
+  // `error: NotFound: ... stat '.../tests/fixtures/checker_pass_child.ts'` instead of naming the entry.
+  // This row pins both directions of the contract question - a missing declared path FAILS by name (it is
+  // not exempted as a deletion), and a present one does not red a healthy tree.
+  assertThrows(
+    () =>
+      assertContractFileExists(
+        "tests/fixtures/deleted-fixture-probe.html",
+        "by .fleet/coverage-contract.json (mapped to tests/contracts_test.ts)",
+      ),
+    AssertionError,
+    "tests/fixtures/deleted-fixture-probe.html is declared by .fleet/coverage-contract.json (mapped to tests/contracts_test.ts) but does not exist on disk",
+    "a missing declared path must be an assertion naming the entry, not a NotFound throw",
+  );
+  assertContractFileExists("tests/contracts_test.ts", "by this row");
+});
+
+Deno.test("the direct-test probe keeps the tests/ directory relation the derivation reads (audio-feed-nmh3v)", async () => {
+  // ROUND 2 of this bead, and the reason this row exists: routing the direct-test probe through a helper
+  // PARAMETER kept every assertion green and silently dropped the `tests/` directory relation this suite
+  // carries - 180 -> 179 keys on the full tree, with nothing in the diff to see. It is a real relation, not a
+  // literal to preserve: which files exist in tests/ is exactly what answers "is there a direct test for
+  // this script?", so a change under tests/ has to keep selecting this suite. Pinned here so the next
+  // refactor of that probe has to red a row instead of quietly narrowing the gate.
+  const root = new URL("../", import.meta.url).pathname;
+  const report = await deriveReadRelationReport(root, ["tests/contracts_test.ts"]);
+  assert(
+    report.relations.get("tests/")?.includes("tests/contracts_test.ts"),
+    `the direct-test probe must keep the tests/ directory relation, saw: ${
+      [...report.relations.keys()].sort().join(", ")
+    }`,
+  );
+});
+
 /**
  * audio-feed-ami7x: fixtures are where behaviour several suites SPAWN lives, and the coverage contract
  * mapped scripts/ and assets but nothing under tests/fixtures. The host gate's independent oracle
@@ -1094,7 +1132,7 @@ Deno.test("every fixture a suite spawns is declared in .fleet/coverage-contract.
       `${path} declares no gated reader but has a contract entry`,
     );
     assert(
-      Deno.statSync(new URL(`../${harness}`, import.meta.url)).isFile,
+      existsOnDisk(harness),
       `the harness named for ${path} must exist on disk: ${harness}`,
     );
     assert(
@@ -1121,6 +1159,60 @@ function existsOnDisk(relativePath: string): boolean {
     if (error instanceof Deno.errors.NotFound) return false;
     throw error;
   }
+}
+
+/**
+ * The directory a direct test for a `scripts/` file lives in, named ONCE.
+ *
+ * audio-feed-nmh3v round 2: this const is also the reference the DERIVED READ RELATION needs. The direct-test
+ * probe used to hold two `new URL(`../tests/<stem>_test.ts`, import.meta.url)` candidates, and the derivation
+ * read the `../tests/` prefix of that template as a directory relation (`tests/` <- this suite) - which is
+ * what selects this suite when anything under tests/ changes. Routing the probe through a helper PARAMETER
+ * hid that literal (a parameter is not a path), so the relation went with it: 180 -> 179 keys on the full
+ * tree, invisible in the diff. Naming the directory here and READING it says the same thing in a form the
+ * derivation can see, and it says it truthfully: the set of files in tests/ is what answers "is there a
+ * direct test for this script?".
+ */
+const DIRECT_TEST_DIR = new URL("../tests/", import.meta.url);
+
+/**
+ * The file names in DIRECT_TEST_DIR, listed once per run. One listing answers the direct-test question for
+ * every changed script, where the probe it replaces stat'd two candidate paths per script and swallowed a
+ * permission error as "no direct test". A missing tests/ directory is not a NotFound to absorb here - it is
+ * the tree being wrong, so the throw propagates.
+ */
+let directTestFileNamesCache: Set<string> | null = null;
+function directTestFileNames(): Set<string> {
+  if (directTestFileNamesCache) return directTestFileNamesCache;
+  const names = new Set<string>();
+  for (const entry of Deno.readDirSync(DIRECT_TEST_DIR)) {
+    if (entry.isFile) names.add(entry.name);
+  }
+  directTestFileNamesCache = names;
+  return names;
+}
+
+/**
+ * audio-feed-nmh3v: a path a CONTRACT declares must exist, asserted by name.
+ *
+ * The declaration question is not the deletion question answered by `existsOnDisk` on the changed-fixture
+ * path. There, an absent file is a tidy-up and nothing needs exercising. Here the file is what the
+ * declaration POINTS AT: a missing one makes the entry stale, so it is a FAILURE that names the entry - and a
+ * bare `Deno.statSync` cannot say that, because it throws `NotFound` before any assertion can run. That is
+ * exactly what deleting tests/fixtures/checker_pass_child.ts produced before this helper existed:
+ *
+ *   error: NotFound: No such file or directory (os error 2): stat '.../tests/fixtures/checker_pass_child.ts'
+ *
+ * The raw throw is neither a skip nor an exemption: it names an os error instead of the contract entry, so a
+ * reader cannot tell whether the contract, the file or the suite is wrong.
+ */
+function assertContractFileExists(relativePath: string, declaredBy: string): void {
+  assert(
+    existsOnDisk(relativePath),
+    `${relativePath} is declared ${declaredBy} but does not exist on disk: the declaration and the file ` +
+      `have to move together, so this is a FAILURE naming the entry, not a skip. Delete the declaration ` +
+      `together with the file, or restore the file (audio-feed-nmh3v)`,
+  );
 }
 
 function fakeGit(byArgs: Record<string, GitResult>): GitRunner {

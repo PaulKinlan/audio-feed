@@ -273,13 +273,33 @@ Deno.test("audio-feed bd-check: a dashed id and a dashed title are parsed apart"
 const CONTRACT_PATH = ".fleet/coverage-contract.json";
 const DECLARED_PATHS = ["scripts/bd-durability-check.sh", "tests/fixtures/bd_stub.sh"];
 
+/**
+ * Whether an absolute path is a file on disk. audio-feed-nmh3v: `Deno.stat` THROWS `NotFound` for a path a
+ * tidy-up removed, so asking the declaration question with a bare stat reds this suite with
+ * `error: NotFound: ... stat '...'` instead of the assertion naming the declaration. A missing declared path
+ * is a FAILURE here (the declaration and the file move together), not an exemption - the helper only turns
+ * the throw into the `false` the assertion is about, and lets every other error propagate.
+ */
+async function isFileOnDisk(absolutePath: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(absolutePath)).isFile;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
+}
+
 Deno.test("audio-feed bd-check: the coverage declaration names both shell paths and this suite", async () => {
   const contract = JSON.parse(
     await Deno.readTextFile(`${ROOT}/${CONTRACT_PATH}`),
   ) as Record<string, string[]>;
   for (const path of DECLARED_PATHS) {
-    const stat = await Deno.stat(`${ROOT}/${path}`);
-    assert(stat.isFile, `${path} is declared as covered but is not a file in the tree`);
+    assert(
+      await isFileOnDisk(`${ROOT}/${path}`),
+      `${path} is declared as covered but is not a file in the tree (audio-feed-nmh3v): the declaration and ` +
+        `the file have to move together, so a missing one is this FAILURE naming the declaration, not an ` +
+        `unhandled NotFound and not a skip`,
+    );
     assertEquals(
       contract[path],
       ["tests/bd_durability_check_test.ts"],
