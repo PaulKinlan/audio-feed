@@ -43,10 +43,18 @@ waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 | 2 | Feed-token APIs | 5 | `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes` |
 | 3 | Anonymous browser writes | 7 | `POST /api/auth/login/options`, `POST /api/auth/register/options`, `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its OPTIONS alias), `GET /share` |
 | 4 | Session APIs and pages | 16 | `POST /api/auth/logout`, the 9 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
-| 5 | Admin surface | 28 | `GET /admin`, `GET /admin/subscribers(+:id)`, `GET /admin/observability(+/issues, /telemetry)`, the 19 `/api/admin/*` routes, `POST /api/auth/bootstrap`, `GET /api/observability/errors`, `GET /api/observability/summary` |
+| 5 | Admin surface | 28 | `GET /admin`, `GET /admin/subscribers`, `GET /admin/subscribers/:id`, `GET /admin/observability`, `GET /admin/observability/issues`, `GET /admin/observability/telemetry`, the 19 `/api/admin/*` routes, `POST /api/auth/bootstrap`, `GET /api/observability/errors`, `GET /api/observability/summary` |
 | 6 | Ingest fetch (SSRF) | — | the server-side fetch half of boundary 2, plus scheduled feed polling and `POST /api/sources` discovery |
 | 7 | Static, well-known, public pages | 9 | `/`, `/sw.js`, `/manifest.json`, `/robots.txt`, `/icon.svg`, `/assets/:name`, `/.well-known/webauthn`, `/health`, `/assets/voices/:voice` |
 | 8 | Non-HTTP entries | — | `Deno.cron` jobs, feed-poll and synthesis workers, and the admin `poll-now`/`synthesize-now` triggers (counted under boundary 5) |
+
+Two format rules make the table machine-checkable, and `tests/route_census_test.ts`
+("audio-feed-2l2dk: …") parses it through them: a route is a **backticked** span whose text, after
+an optional verb prefix, starts with `/` — never prose, never a shorthand like `(+:id)`; and a group
+of routes named in one entry is either spelled out or claimed as `the N `/prefix/*` routes`, whose
+prefix and N are both checked against the tree. A route appears in exactly one counted row, under the
+boundary that terminates it; rows 6 and 8 count `—` and are halves of counted rows, so they are
+outside the scan and may cite routes in prose.
 
 Boundaries 6 and 8 have no registrations of their own; they are halves and code paths of the counted
 routes, listed separately because the attacker's position there is different, and they are not part
