@@ -37,6 +37,11 @@
  * `until()` already use. No per-method table: `Page.navigate` resolves on navigation COMMIT, so
  * the derived 120s already absorbs a host starved for 8s fifteen times over, and inventing a
  * second set of numbers nobody measured is how a bound becomes a flake.
+ *
+ * `js()` forwards its `timeoutMs` to `cdp("Runtime.evaluate", ..., timeoutMs)` (audio-feed-hspt4),
+ * so an outer budget larger than `HANG_BOUND_MS` is the deadline in force rather than being cut
+ * silently by `cdp()`'s inner default. The failure message names the proof line that asked for
+ * the evaluate, not the wrapper.
  */
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -221,6 +226,7 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
 
   // deno-lint-ignore no-explicit-any
   async function js(expression: string, timeoutMs = HANG_BOUND_MS): Promise<any> {
+    const sentFrom = cdpCallSite(js);
     // The bound is applied by RACING the one evaluate against a timer, the way
     // `fleet/measure-waits` bounded its layout reads: a poll would re-run the read and could
     // report a value from a later state than the call asked about, which is a measurement
@@ -235,7 +241,9 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
               `js: the evaluate of \`${renderExpression(expression)}\` got no answer in ` +
                 `${timeoutMs}ms - the hang bound in force (${HANG_BOUND_MS}ms by default, ` +
                 `15 x the ${MEASURED_STARVED_POLL_MS}ms measured starved-poll floor, ` +
-                `audio-feed-6gst1). This is a HANG bound on ONE Runtime.evaluate, not a latency ` +
+                `audio-feed-6gst1)` +
+                (sentFrom ? `, for the command sent at ${sentFrom}` : "") +
+                `. This is a HANG bound on ONE Runtime.evaluate, not a latency ` +
                 `bound, and this was NOT polled: the expression was evaluated exactly once and ` +
                 `that single evaluate is the one that never came back, so the page's main ` +
                 `thread never answered it.`,
@@ -249,7 +257,7 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
       awaitPromise: true,
       returnByValue: true,
       userGesture: true,
-    });
+    }, timeoutMs);
     // deno-lint-ignore no-explicit-any
     let r: any;
     try {
