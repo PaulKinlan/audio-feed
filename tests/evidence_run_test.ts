@@ -1513,6 +1513,94 @@ Deno.test(
 );
 
 /**
+ * audio-feed-h22ml - THE SCRIPT ROW: A RECORD MUST NAME THE PROOF ITS DIR DECLARES.
+ *
+ * `script` is the only field that says WHAT produced the artefacts, and until this row nothing READ
+ * it: the fabrication matrix asserts the writer EMITS the declared path, but a record already on
+ * disk naming a different proof pre-flighted clean. So re-pointing a README's `- Script:` at a new
+ * proof silently kept the old record, and the old artefacts would be read as evidence for a script
+ * that has never run. A field no rule reads is written, not checked.
+ *
+ * MUTANTS THAT RED IT: (a) `script` naming another proof -> RECORD MISATTRIBUTED below (mutant: drop
+ * the comparison from validateRunRecord and that run exits 0, which is the hole); (b) `script`
+ * deleted -> RECORD INCOMPLETE (mutant: read `record.script ?? ""` and skip the string/empty guard
+ * and a record that names no proof at all validates clean).
+ */
+Deno.test(
+  "MISATTRIBUTED RECORD (audio-feed-h22ml): a record naming a script its dir does not declare reds by name, and a record with no script is incomplete",
+  async () => {
+    const h = await makeRecordScratch();
+    try {
+      const seed = await runTier(h.root);
+      assertEquals(seed.code, 0, `seed run must pass: ${seed.stdout}\n${seed.stderr}`);
+      assertEquals(expectOk(await readRunRecord(h.dirAbs)).script, "scripts/trivial-proof.ts");
+
+      // WHAT RAN: a record whose script is not this dir's declared proof describes a different run.
+      await mutateRecord(h.dirAbs, { script: "scripts/not-the-declared-proof.ts" });
+      const misattributed = await runTier(h.root);
+      assertEquals(
+        misattributed.code,
+        1,
+        `a misattributed record must exit 1: ${misattributed.stdout}\n${misattributed.stderr}`,
+      );
+      assertStringIncludes(
+        misattributed.stdout,
+        "RECORD MISATTRIBUTED: docs/evidence/h22ml-scratch run.json records script " +
+          "scripts/not-the-declared-proof.ts but the dir declares scripts/trivial-proof.ts",
+      );
+      // The incident must name the ONE command that rewrites the record.
+      assertStringIncludes(
+        misattributed.stdout,
+        "deno task evidence --only h22ml-scratch",
+      );
+      // The script rule is the ONLY incident: the mutated record is otherwise honest, so nothing
+      // else in the table may be claiming credit for this red.
+      assertStringIncludes(misattributed.stdout, "1 record incident(s)");
+      // Running is how a wrong record is refreshed: the tier rewrote it, so the next one is clean.
+      assertEquals(
+        expectOk(await readRunRecord(h.dirAbs)).script,
+        "scripts/trivial-proof.ts",
+        "the run must rewrite the record with the script it actually ran",
+      );
+      const afterRewrite = await runTier(h.root);
+      assertEquals(
+        afterRewrite.code,
+        0,
+        `the rewritten record must pre-flight clean: ${afterRewrite.stdout}`,
+      );
+      assertEquals(afterRewrite.stdout.includes("RECORD MISATTRIBUTED"), false);
+
+      // A MISSING SCRIPT FIELD: a record that names no proof cannot be read at all.
+      const withoutScript: Record<string, unknown> = {
+        ...expectOk(await readRunRecord(h.dirAbs)),
+      };
+      delete withoutScript.script;
+      await Deno.writeTextFile(
+        join(h.dirAbs, RECORD_FILE),
+        JSON.stringify(withoutScript, null, 2) + "\n",
+      );
+      const incomplete = await runTier(h.root);
+      assertEquals(
+        incomplete.code,
+        1,
+        `a record with no script must exit 1: ${incomplete.stdout}\n${incomplete.stderr}`,
+      );
+      assertStringIncludes(
+        incomplete.stdout,
+        "RECORD INCOMPLETE: docs/evidence/h22ml-scratch run.json has no declared script",
+      );
+      assertEquals(
+        expectOk(await readRunRecord(h.dirAbs)).script,
+        "scripts/trivial-proof.ts",
+        "the run must leave a record that names its script again",
+      );
+    } finally {
+      await h.cleanup();
+    }
+  },
+);
+
+/**
  * audio-feed-fufd0 - WHAT AN ARTEFACT HASH PROVES, AND THE DIGEST THAT CAN ATTEST REPRODUCIBILITY.
  * `hashEvidenceDir` hashes the bytes on disk at record time, so `artefacts` is a DISK-COINCIDENCE
  * CHECK: audio-feed-icl4's repro.json embeds `capturedAt`, so its raw hash changes every run and
@@ -1639,6 +1727,7 @@ Deno.test(
         dir: "docs/evidence/x",
         recordsEnforced: false,
         historyCheckable: false,
+        declaredScript: "scripts/p.ts",
       };
       assertEquals(
         await validateRunRecord({ state: "missing" }, ctx),
@@ -1670,6 +1759,7 @@ Deno.test(
         dir: "docs/evidence/x",
         recordsEnforced: false,
         historyCheckable: false,
+        declaredScript: "scripts/p.ts",
       };
       const now = new Date().toISOString();
       const base = {
@@ -2173,6 +2263,7 @@ Deno.test("--allow-siblings snapshots the sibling and restores what the run rewr
         dir: "docs/evidence/sib-b",
         recordsEnforced: true,
         historyCheckable: false,
+        declaredScript: "scripts/shared-proof.ts",
       });
       assertEquals(incidents, [], "the sibling's record must still validate after the run");
     }
@@ -2268,6 +2359,7 @@ Deno.test("--allow-siblings restores a sibling README.md and run.json the proof 
         dir: "docs/evidence/sib-b",
         recordsEnforced: true,
         historyCheckable: false,
+        declaredScript: "scripts/shared-proof.ts",
       });
       assertEquals(incidents, [], "the sibling's restored record must still validate");
     }
