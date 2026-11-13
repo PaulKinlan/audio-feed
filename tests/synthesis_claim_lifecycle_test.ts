@@ -2184,17 +2184,26 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
   const put = stores.blobs.put.bind(stores.blobs);
   let putEntered = false;
   let putSignal: AbortSignal | undefined;
+  // THE CAUSE, RECORDED BY THE HOOK ITSELF (audio-feed-09si3): two different failures arrive here
+  // as "the put was rejected" - the deadline aborting a transfer that is parked and undecided (the
+  // property this row is named for), or the hook being handed a signal that was ALREADY aborted
+  // before entry (a pre-put expiry, which its name does not describe). The stub counts which one,
+  // so the assertions below name the path that was taken instead of inferring it from a budget.
+  let abortObservedInFlight = 0;
+  let enteredAlreadyAborted = false;
   stores.blobs.put = (...args) => {
     putEntered = true;
     const opts = args[2] as { contentType?: string; signal?: AbortSignal } | undefined;
     putSignal = opts?.signal;
     return new Promise((resolve, reject) => {
       if (putSignal?.aborted) {
+        enteredAlreadyAborted = true;
         reject(putSignal.reason);
         return;
       }
       const onAbort = () => {
         clearTimeout(safetyTimer);
+        abortObservedInFlight++;
         reject(putSignal?.reason);
       };
       putSignal?.addEventListener("abort", onAbort, { once: true });
@@ -2205,6 +2214,11 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
       }, 5000);
     });
   };
+  // audio-feed-09si3 (classified: TEST CONVENIENCE, not a production budget - mode (ii)). Nothing in
+  // production fixes 250ms: the product's own number is DEFAULT_MAX_INVOCATION_DURATION_MS
+  // (90_000ms, src/config.ts) and the contract under test is the abort's CAUSE, which the
+  // siblings exercise at 80ms/100ms. So the budget below is scenario sizing on a clock this test
+  // owns, never a measurement of how long a real invocation takes.
   // audio-feed-zy3j round three: the budget's clock is one the TEST owns (audio-feed-ugak
   // contract, src/synthesis/limits.ts). With the real scheduler clock the 250ms budget is armed
   // at invocation start and the whole pre-put path (claim, dialogue build, digest, checkpoints)
@@ -2215,9 +2229,11 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
   // Owning the clock turns the deadline into a decision the test makes AFTER observing the
   // put entry, making the row an order assertion instead of a race against host business.
   const time = controlledInvocationClock();
+  // ONE literal for the budget, so the number armed and the number advanced cannot drift apart.
+  const budgetMs = 250;
   const batchPromise = runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-tail-bound-fires",
-    maxInvocationDurationMs: 250,
+    maxInvocationDurationMs: budgetMs,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
@@ -2243,11 +2259,25 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
       })`,
     45_000,
   );
-  // The put is parked in flight; fire the 250ms deadline VIRTUALLY - the abort must win
+  // The put is parked in flight; fire the budget's deadline VIRTUALLY - the abort must win
   // against the in-flight transfer (the mirror property), never before the hook is entered.
-  await time.advance(250);
+  await time.advance(budgetMs);
   const result = await batchPromise;
   assert(putEntered, "put hook must be entered");
+  assertEquals(
+    enteredAlreadyAborted,
+    false,
+    "the put hook must not be entered with an already-aborted signal: that is a PRE-PUT expiry " +
+      "(the deadline fired during claim/build/digest), a path this row's name does not describe " +
+      "(audio-feed-09si3)",
+  );
+  assertEquals(
+    abortObservedInFlight,
+    1,
+    `the deadline must abort the transfer while it is PARKED in flight, exactly once ` +
+      `(abortObservedInFlight=${abortObservedInFlight}; 0 means the rejection came from somewhere ` +
+      `other than this hook's abort event) (audio-feed-09si3)`,
+  );
   assert(putSignal !== undefined, "put hook must receive an AbortSignal");
   assert(putSignal.aborted, "invocation budget deadline must abort the in-flight put");
   assert(
