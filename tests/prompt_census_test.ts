@@ -175,6 +175,36 @@ export function formatSpokenIntro(title: string, author: string): string {
   assertEquals(sites[0]!.foundBy, "declared-marker", "the marker is the detection signal");
 });
 
+Deno.test("a DECLARED site's literals are captured for the cap row, not discarded", () => {
+  // audio-feed-frmva: declared sites used to report an EMPTY literal population, because
+  // literals were collected only for net-found sites. A declared site builds prompt text
+  // out of template literals exactly like a net-found one, so the cap row must have
+  // something to measure here — this is the positive control for that extractor arm.
+  const sites = promptCensusSource(
+    `
+/**
+ * Builds the spoken intro.
+ *
+ * ${TRANSCRIPT_ONLY_MARKER} — spoken text only, no instruction region.
+ */
+export function formatSpokenIntro(title: string, author: string): string {
+  const lines: string[] = [];
+  lines.push(\`\${title}. Published by \${author}.\`);
+  return lines.join(" ");
+}
+`,
+    "src/tts/example.ts",
+  );
+  assertEquals(sites.length, 1);
+  assertEquals(sites[0]!.mitigation, "transcript-only");
+  assertEquals(
+    sites[0]!.literals.length,
+    1,
+    "a declared site's template literal must reach the cap row's population",
+  );
+  assertStringIncludes(sites[0]!.literals[0]!, "Published by");
+});
+
 Deno.test("a declared app-values-only builder is a site BY its marker", () => {
   const sites = promptCensusSource(
     `
@@ -391,6 +421,46 @@ Deno.test("MUTANT: growing one prompt past the cap reds by name", async () => {
   assert(threw, "growing a prompt past DEFAULT_MAX_BODY_CHARS must red the cap check");
 });
 
+Deno.test("MUTANT: growing a literal in a DECLARED site past the cap reds by name", async () => {
+  // THE MUTANT THE BEAD RAN (audio-feed-frmva). Appending a 20,000-character literal to
+  // formatNarrationIntro typed clean and left the whole suite green, because this site's
+  // literal population was empty and the cap row iterated nothing. It reds now.
+  const source = await readRealSource("src/tts/gemini.ts");
+  const before = promptCensusSource(source, "src/tts/gemini.ts")
+    .find((candidate) => candidate.name === "formatNarrationIntro");
+  assert(before !== undefined, "formatNarrationIntro must be found in census");
+  assert(
+    before.literals.length > 0,
+    "the declared site's literal population must be non-empty BEFORE the mutant — an empty one is what made this mutant invisible",
+  );
+
+  const anchor = `  return parts.join(" ");`;
+  const mutant = applyMutant(
+    source,
+    anchor,
+    `  parts.push(\`${"y".repeat(DEFAULT_MAX_BODY_CHARS + 1)}\`);\n${anchor}`,
+  );
+  const site = promptCensusSource(mutant, "src/tts/gemini.ts")
+    .find((candidate) => candidate.name === "formatNarrationIntro");
+  assert(site !== undefined, "the mutated builder must still be FOUND by the net");
+
+  let threw = false;
+  try {
+    assertSitePromptsUnderCap(site, DEFAULT_MAX_BODY_CHARS);
+  } catch (err) {
+    threw = true;
+    assertStringIncludes(
+      (err as Error).message,
+      "src/tts/gemini.ts :: formatNarrationIntro",
+      "failure message must name the oversized DECLARED site",
+    );
+  }
+  assert(
+    threw,
+    "an over-cap literal in a declared (transcript-only) site must red the cap check",
+  );
+});
+
 Deno.test("MUTANT: deleting capped() from a field in buildScriptPrompt fails the cap check", async () => {
   const source = await readRealSource("src/worker/script.ts");
   const anchor = "capped(article.body)";
@@ -498,18 +568,70 @@ Deno.test("REAL TREE: every discovered prompt is at or under the length cap (pro
   const root = new URL("..", import.meta.url).pathname;
   const census = await promptCensus(root);
 
-  // Every discovered prompt site must have all its prompt literals at or under DEFAULT_MAX_BODY_CHARS.
+  // WHAT THIS MEASURES: the literal prompt TEXT of EVERY discovered site — all five of
+  // them, declared sites included (PromptSite.literals is every template literal in the
+  // body; it used to be an empty list for the four declared sites, which made this loop
+  // pass by construction — audio-feed-frmva). A hardcoded 20,000-character literal in any
+  // prompt builder therefore reds here by name.
   //
-  // EXEMPTION / EXCEEDING PROMPT HONESTY:
-  // `src/tts/gemini.ts :: formatNarrationPrompt` builds single-voice narration TTS prompts
-  // (PROMPT-CENSUS:TRANSCRIPT-ONLY) that interpolate full article bodies up to MAX_NARRATION_BYTES
-  // (192,000 text bytes, src/ingest/upload.ts:16, src/tts/gemini.ts:123) for ~4.4-hour episodes.
-  // It is legitimately allowed to exceed DEFAULT_MAX_BODY_CHARS (12,000 chars) at runtime because
-  // it carries spoken narration transcript with no reasoning-LLM instructions; the 12,000 char
-  // cap is the prompt injection mitigation bound specific to buildScriptPrompt (src/worker/script.ts:49).
+  // WHAT IT DOES NOT MEASURE: the values interpolated at runtime. `formatNarrationPrompt`
+  // (transcript-only) interpolates full article bodies up to MAX_NARRATION_BYTES (192,000
+  // text bytes, src/ingest/upload.ts) for ~4.4-hour episodes, and a template hole holds no
+  // text to measure statically. DEFAULT_MAX_BODY_CHARS (12,000 chars) is the injection
+  // bound on the publisher-controlled FIELDS buildScriptPrompt caps through capped();
+  // the TTS builders carry spoken transcript with no instruction region, so that bound
+  // does not apply to their interpolated payloads. Only their literal text is capped here.
   for (const site of census.sites) {
     assertSitePromptsUnderCap(site, DEFAULT_MAX_BODY_CHARS);
   }
+});
+
+/**
+ * Sites where a ZERO-literal population is a DECLARED FACT, keyed "file :: name", each
+ * value the reason it is a fact. EMPTY TODAY, and that is the point: every discovered
+ * site builds prompt text out of at least one template literal, so an empty population
+ * means the EXTRACTOR lost the literals — which is what happened to all four declared
+ * sites in audio-feed-frmva. Add an entry only when a site genuinely composes its prompt
+ * from other constants and holds no literal of its own.
+ */
+const EMPTY_LITERAL_POPULATION_REASONS: Record<string, string> = {};
+
+Deno.test("REAL TREE: every prompt site's literal population is non-empty or declared empty (promptcensus)", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const census = await promptCensus(root);
+
+  const unexplained = census.sites
+    .filter((site) =>
+      site.literals.length === 0 && !(siteKey(site) in EMPTY_LITERAL_POPULATION_REASONS)
+    )
+    .map(siteKey);
+
+  assertEquals(
+    unexplained,
+    [],
+    `A PROMPT SITE HAS NO LITERAL POPULATION: ${unexplained.join(", ") || "(none)"}. The
+length-cap row iterates site.literals, so a site with an empty population makes that row
+pass by construction — it measures nothing while its name claims the site is capped
+(audio-feed-frmva: four of five sites were in that state). Fix the census
+(scripts/prompt-census.ts: PromptSite.literals must be EVERY template literal in the
+body), not the row. If a site genuinely builds its prompt from other constants and holds
+no literal of its own, add it to EMPTY_LITERAL_POPULATION_REASONS in this file with the
+reason — an empty population must be a stated fact, never a silent pass.`,
+  );
+
+  // The declaration must not outlive its fact: a site that grows literals is no longer
+  // legitimately empty, and one that vanished is a key nobody will ever look at again.
+  const stale = Object.keys(EMPTY_LITERAL_POPULATION_REASONS).filter((key) => {
+    const site = census.sites.find((candidate) => siteKey(candidate) === key);
+    return site === undefined || site.literals.length > 0;
+  });
+  assertEquals(
+    stale,
+    [],
+    `STALE EMPTY-LITERAL DECLARATION(S): ${stale.join(", ") || "(none)"}. Each named site
+either now has literals or left the census, so its declared reason is no longer true —
+remove the entry so the fact is measured again.`,
+  );
 });
 
 Deno.test("REAL TREE: buildScriptPrompt applies DEFAULT_MAX_BODY_CHARS cap to all untrusted fields (promptcensus)", async () => {
