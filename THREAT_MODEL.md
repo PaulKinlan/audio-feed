@@ -23,9 +23,10 @@ exported constant in `src/app.ts`). The `router.add("OPTIONS", "/api/reports/csp
 shares the POST handler, so there are **71 distinct handler endpoints**, of which one (`GET
 /__test/throw`, the `AUDIO_FEED_TEST_THROW` trap door inside `createRouter`) exists only when an
 operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
-production attack surface — leaving **70 production entry points**.
+production attack surface — leaving **70 distinct production handler endpoints** (carried by 71
+registrations, because the OPTIONS alias is one of the 71).
 
-**70 production entry points; all 70 covered by one of the eight boundary sections below**; the three
+**71 production registrations; all 71 covered by one of the eight boundary sections below**; the three
 pre-existing decision sections (CSP reports, `/health`, offline cache) are cited from inside them.
 Unmitigated boundaries are labelled as such — none are softened or omitted. A citation should be
 re-derivable by a command; line ranges are the last resort and must say so. Concretely, every
@@ -40,7 +41,7 @@ waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 |---|---|---|---|
 | 1 | Public capability URLs | 6 | `/feed/:token/master.xml`, `/feed/:token/:sourceId/:mode.xml`, `/listen/:token`, `/listen/:token/status`, `POST /listen/:token/episodes/:episodeId/retry`, `/audio/:key+` |
 | 2 | Feed-token APIs | 5 | `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes` |
-| 3 | Anonymous browser writes | 6 | `POST /api/auth/login/options`, `POST /api/auth/register/options`, `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its OPTIONS alias) |
+| 3 | Anonymous browser writes | 7 | `POST /api/auth/login/options`, `POST /api/auth/register/options`, `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its OPTIONS alias), `GET /share` |
 | 4 | Session APIs and pages | 16 | `POST /api/auth/logout`, the 9 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
 | 5 | Admin surface | 28 | `GET /admin`, `GET /admin/subscribers(+:id)`, `GET /admin/observability(+/issues, /telemetry)`, the 19 `/api/admin/*` routes, `POST /api/auth/bootstrap`, `GET /api/observability/errors`, `GET /api/observability/summary` |
 | 6 | Ingest fetch (SSRF) | — | the server-side fetch half of boundary 2, plus scheduled feed polling and `POST /api/sources` discovery |
@@ -48,7 +49,31 @@ waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 | 8 | Non-HTTP entries | — | `Deno.cron` jobs, feed-poll and synthesis workers, and the admin `poll-now`/`synthesize-now` triggers (counted under boundary 5) |
 
 Boundaries 6 and 8 have no registrations of their own; they are halves and code paths of the counted
-routes, listed separately because the attacker's position there is different.
+routes, listed separately because the attacker's position there is different, and they are not part
+of the sum — a route is counted once, under the boundary that terminates it, never twice.
+
+The counted rows sum to the production population, and the sum is checkable rather than trusted:
+**6 + 5 + 7 + 16 + 28 + 9 = 71**, which is exactly what the census command above yields once the one
+non-production registration is removed:
+
+    grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts | grep -v '__test/throw'
+
+That command is the figure beside this table — **71** (the census finds 72; `GET /__test/throw` is the
+`AUDIO_FEED_TEST_THROW` trap door), which is what the rows add up to. The unit is a *registration*,
+the thing the census counts: boundary 3's six route entries fill seven registrations because
+`router.add("OPTIONS", "/api/reports/csp", …)` is a registration the census counts, one that shares
+the CSP POST handler. Subtract that alias and the same 71 registrations are the **70 distinct
+production handler endpoints** the paragraph above derives by its own route. The census those two
+figures are subtracted from, and its per-method split, are pinned by `tests/route_census_test.ts` —
+"audio-feed-q2cf5: the route census total matches src/app.ts", "audio-feed-q2cf5: the route census
+per-method split matches src/app.ts", and "audio-feed-q2cf5: THREAT_MODEL.md publishes the pinned
+census and the command this suite runs" — so a registration added to `src/app.ts` reddens that suite
+by name and sends the reader back here to re-count.
+
+The per-row split is a judgement, not a grep: which boundary terminates a route is a reading, so the
+rows name their routes by pattern instead of tallying them, and adding a route means deciding its
+boundary and moving that row's number by hand. The *total* is mechanical, and that is the check that
+does not depend on anyone's reading.
 
 ### Boundary 1 — Public capability URLs: the token in the path is the whole credential
 
