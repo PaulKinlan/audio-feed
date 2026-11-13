@@ -1,4 +1,11 @@
-import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  AssertionError,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { dirname, join, normalize } from "@std/path";
 import { deriveReadRelationReport, isFastGateSelectable } from "../scripts/test-selection.ts";
 
@@ -25,9 +32,7 @@ Deno.test("contracts.json is valid and targets real suites", () => {
     );
     for (const suite of suites) {
       assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
-      const fullPath = new URL(`../${suite}`, import.meta.url).pathname;
-      const stat = Deno.statSync(fullPath);
-      assert(stat.isFile, `suite ${suite} must exist on disk`);
+      assertContractFileExists(suite, `as a suite for ${pattern} in tests/contracts.json`);
     }
   }
 });
@@ -597,8 +602,10 @@ Deno.test("coverage-contract.json is valid, targets real files and suites, and s
 
   for (const [declaredPath, suites] of Object.entries(contract)) {
     assert(declaredPath.length > 0, "declared path must be non-empty");
-    const targetStat = Deno.statSync(new URL(`../${declaredPath}`, import.meta.url).pathname);
-    assert(targetStat.isFile, `declared path ${declaredPath} must exist on disk`);
+    assertContractFileExists(
+      declaredPath,
+      `by .fleet/coverage-contract.json (mapped to ${suites.join(", ")})`,
+    );
 
     assert(
       Array.isArray(suites) && suites.length > 0,
@@ -607,8 +614,10 @@ Deno.test("coverage-contract.json is valid, targets real files and suites, and s
 
     for (const suite of suites) {
       assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
-      const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
-      assert(suiteStat.isFile, `suite ${suite} must exist on disk`);
+      assertContractFileExists(
+        suite,
+        `as a suite for ${declaredPath} in .fleet/coverage-contract.json`,
+      );
 
       const result = suiteExercisesTarget(suite, declaredPath);
       assert(
@@ -813,8 +822,10 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     );
     for (const suite of suites!) {
       assert(suite.startsWith("tests/"), `suite ${suite} must start with tests/`);
-      const suiteStat = Deno.statSync(new URL(`../${suite}`, import.meta.url).pathname);
-      assert(suiteStat.isFile, `suite ${suite} for ${script} must exist on disk`);
+      assertContractFileExists(
+        suite,
+        `as a suite for the required proof script ${script} in .fleet/coverage-contract.json`,
+      );
       const result = suiteExercisesTarget(suite, script);
       assert(
         result.exercises,
@@ -834,18 +845,8 @@ Deno.test("coverage-contract.json covers required browser proof scripts and chan
     }
     const stem = file.split("/").pop()!.replace(/\.(ts|sh)$/, "");
     const normalizedStem = stem.replace(/-/g, "_");
-    const directTest1 = new URL(`../tests/${stem}_test.ts`, import.meta.url).pathname;
-    const directTest2 = new URL(`../tests/${normalizedStem}_test.ts`, import.meta.url).pathname;
-    let hasDirectTest = false;
-    try {
-      hasDirectTest = Deno.statSync(directTest1).isFile;
-    } catch {
-      try {
-        hasDirectTest = Deno.statSync(directTest2).isFile;
-      } catch {
-        hasDirectTest = false;
-      }
-    }
+    const hasDirectTest = existsOnDisk(`tests/${stem}_test.ts`) ||
+      existsOnDisk(`tests/${normalizedStem}_test.ts`);
     const hasContractEntry = file in coverageContract || file in contracts;
     assert(
       hasDirectTest || hasContractEntry,
@@ -972,6 +973,25 @@ Deno.test("a changed fixture that no longer exists is a deletion, not an unhandl
   assertEquals(existsOnDisk("tests/fixtures"), false, "a directory is not a file");
 });
 
+Deno.test("a declared path that no longer exists is reported by name, not as a raw stat throw (audio-feed-nmh3v)", () => {
+  // The SAME throw existsOnDisk() reads as absence above, asked by the CONTRACT-VALIDATION path, which used
+  // to call `Deno.statSync` directly: deleting a mapped fixture exited with
+  // `error: NotFound: ... stat '.../tests/fixtures/checker_pass_child.ts'` instead of naming the entry.
+  // This row pins both directions of the contract question - a missing declared path FAILS by name (it is
+  // not exempted as a deletion), and a present one does not red a healthy tree.
+  assertThrows(
+    () =>
+      assertContractFileExists(
+        "tests/fixtures/deleted-fixture-probe.html",
+        "by .fleet/coverage-contract.json (mapped to tests/contracts_test.ts)",
+      ),
+    AssertionError,
+    "tests/fixtures/deleted-fixture-probe.html is declared by .fleet/coverage-contract.json (mapped to tests/contracts_test.ts) but does not exist on disk",
+    "a missing declared path must be an assertion naming the entry, not a NotFound throw",
+  );
+  assertContractFileExists("tests/contracts_test.ts", "by this row");
+});
+
 /**
  * audio-feed-ami7x: fixtures are where behaviour several suites SPAWN lives, and the coverage contract
  * mapped scripts/ and assets but nothing under tests/fixtures. The host gate's independent oracle
@@ -1094,7 +1114,7 @@ Deno.test("every fixture a suite spawns is declared in .fleet/coverage-contract.
       `${path} declares no gated reader but has a contract entry`,
     );
     assert(
-      Deno.statSync(new URL(`../${harness}`, import.meta.url)).isFile,
+      existsOnDisk(harness),
       `the harness named for ${path} must exist on disk: ${harness}`,
     );
     assert(
@@ -1121,6 +1141,29 @@ function existsOnDisk(relativePath: string): boolean {
     if (error instanceof Deno.errors.NotFound) return false;
     throw error;
   }
+}
+
+/**
+ * audio-feed-nmh3v: a path a CONTRACT declares must exist, asserted by name.
+ *
+ * The declaration question is not the deletion question answered by `existsOnDisk` on the changed-fixture
+ * path. There, an absent file is a tidy-up and nothing needs exercising. Here the file is what the
+ * declaration POINTS AT: a missing one makes the entry stale, so it is a FAILURE that names the entry - and a
+ * bare `Deno.statSync` cannot say that, because it throws `NotFound` before any assertion can run. That is
+ * exactly what deleting tests/fixtures/checker_pass_child.ts produced before this helper existed:
+ *
+ *   error: NotFound: No such file or directory (os error 2): stat '.../tests/fixtures/checker_pass_child.ts'
+ *
+ * The raw throw is neither a skip nor an exemption: it names an os error instead of the contract entry, so a
+ * reader cannot tell whether the contract, the file or the suite is wrong.
+ */
+function assertContractFileExists(relativePath: string, declaredBy: string): void {
+  assert(
+    existsOnDisk(relativePath),
+    `${relativePath} is declared ${declaredBy} but does not exist on disk: the declaration and the file ` +
+      `have to move together, so this is a FAILURE naming the entry, not a skip. Delete the declaration ` +
+      `together with the file, or restore the file (audio-feed-nmh3v)`,
+  );
 }
 
 function fakeGit(byArgs: Record<string, GitResult>): GitRunner {
