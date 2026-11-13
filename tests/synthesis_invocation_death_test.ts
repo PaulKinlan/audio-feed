@@ -370,26 +370,34 @@ boundedRow(
     // never uploaded. The other regression that must red: keep the condition but wait out the
     // put-start bound instead of breaking on the settle, and the red arrives seconds later saying
     // "the put never started", which blames starvation instead of the settled batch that caused it.
-    // Both are why this row asserts the reason STRING and WHEN it arrives, not just exit 1.
+    // Both are why this row asserts the reason STRING, not just exit 1.
     //
     // The starved condition is SIMULATED, never slept for: ESTIMATED_TURN_MS_ENV raises the child's
     // per-turn estimate above its whole 4000ms budget, so the claim loop's preflight
     // (`remaining < estimate + flushMargin`) breaks WITHOUT claiming and the batch settles in
     // milliseconds - a faithful model of the starved host whose earlier stages ate the budget. The
-    // put-start bound is INJECTED (10s, ~40x what the abort costs) so "at once" is measured against
-    // a bound this row chose rather than against host luck.
+    // put-start bound is INJECTED (10s, far above what the in-process abort costs) so the bound's
+    // text cannot be mistaken for the settle's.
+    //
+    // NO ELAPSED FIGURE IS ASSERTED (audio-feed-bmqv2, replacing `elapsed < boundMs / 2`). The
+    // property is that the abort was TRIGGERED by the settle rather than by the bound, and the
+    // assertions below state it as evidence a clock cannot fake: the settled-batch cause PRESENT,
+    // the put-start bound's text ABSENT, and the job it abandoned named.
+    // `elapsed < boundMs / 2` restated that same property as a guess about host scheduling - and a
+    // guess has no failure mode of its own: once the cause is proven, every elapsed figure is
+    // consistent with a CORRECT abort, so the ceiling could only ever fire on a correct settle
+    // that a starved lane scheduled late. Same shape as audio-feed-gqdug: derive the fact from an
+    // observation, not a clock.
     const rowName =
       "audio-feed-zpyx0: a batch that SETTLES before the put aborts at once, by name, and names the job";
     const boundMs = 10_000;
     const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-zpyx0-", suffix: ".kv" });
     try {
-      const startedAt = Date.now();
       const child = spawnChild(kvPath, "survive", 7, {
         [ESTIMATED_TURN_MS_ENV]: "60000",
         [SURVIVE_PUT_START_WAIT_MS_ENV]: String(boundMs),
       });
       const output = await childOutputWithin(child, rowName);
-      const elapsed = Date.now() - startedAt;
       const out = new TextDecoder().decode(output.stdout);
       const err = new TextDecoder().decode(output.stderr);
       const status = await child.status;
@@ -408,11 +416,6 @@ boundedRow(
       );
       // WHICH JOB was abandoned: the episode and its owner, not just the batch's outcome.
       assertStringIncludes(err, 'episode "episode-1" of user "user-1"');
-      // BY ORDER, NOT BY PATIENCE: the settle is the trigger, so the red lands far inside the bound.
-      assert(
-        elapsed < boundMs / 2,
-        `the abort must fire on the SETTLE, not on the ${boundMs}ms bound (took ${elapsed}ms)`,
-      );
       assertEquals(
         out.includes("SURVIVE:"),
         false,
@@ -428,14 +431,21 @@ boundedRow(
   "audio-feed-wjtpb: survive control fails within bound when child is genuinely wedged",
   async () => {
     // When the child genuinely wedges before starting the put, the put never starts.
-    // The watchdog/bound must expire and exit 1 with SURVIVE-FATAL within the configured bound.
+    // The watchdog/bound must expire and exit 1 with SURVIVE-FATAL, naming the bound in force.
+    //
+    // The BOUND IS ASSERTED THROUGH ITS OWN REPORT, NOT THROUGH THE CLOCK (audio-feed-bmqv2,
+    // replacing `elapsed < 10_000` for a 100ms bound). `SURVIVE-FATAL: the put never started
+    // within 100ms` is emitted by exactly one site in the child - the watchdog that compares the
+    // clock against this row's injected bound - so the string says the bound fired AND which bound
+    // it was; 10s was a second, unrelated guess about the host (1.25x this repo's own measured
+    // 8s starved-poll floor, so a starved lane could red a correct abort). Pinning the value keeps
+    // the reduction honest: a child that reported a different bound, or a different cause, reds.
     const kvPath = await Deno.makeTempFile({
       prefix: "audio-feed-wjtpb-wedge-",
       suffix: ".kv",
     });
     try {
       const boundMs = 100;
-      const startedAt = Date.now();
       const child = spawnChild(kvPath, "survive", 1, {
         [STAGE_WEDGE_ENV]: "1",
         [SURVIVE_PUT_START_WAIT_MS_ENV]: String(boundMs),
@@ -444,16 +454,11 @@ boundedRow(
         child,
         "audio-feed-wjtpb: survive control fails within bound when child is genuinely wedged",
       );
-      const elapsed = Date.now() - startedAt;
       const err = new TextDecoder().decode(output.stderr);
       const status = await child.status;
 
       assertEquals(status.code, 1, `wedged child must exit 1 (stderr: ${err})`);
-      assertStringIncludes(err, "SURVIVE-FATAL: the put never started");
-      assert(
-        elapsed < 10_000,
-        `wedged child must fail within bound (bound: ${boundMs}ms, took ${elapsed}ms)`,
-      );
+      assertStringIncludes(err, `SURVIVE-FATAL: the put never started within ${boundMs}ms`);
     } finally {
       await Deno.remove(kvPath).catch(() => {});
     }
@@ -637,21 +642,26 @@ boundedRow(
     // runs). The bound is injected so the proof costs 50ms rather than the derived 120s; the
     // derived default is pinned by the row below, so an injected bound here cannot hide a
     // weakened default.
+    //
+    // NO ELAPSED FIGURE IS ASSERTED (audio-feed-bmqv2, replacing `elapsed < 5_000` for a 50ms
+    // bound): `rowHangMessage` is constructed in exactly ONE place in tests/fixtures/row_watchdog.ts
+    // - inside the rejecting setTimeout - so receiving it at all proves the bound, and not the
+    // body, settled the race; the three string assertions above it pin the row name and the
+    // injected bound. The elapsed ceiling added a second, weaker statement of the same property
+    // as a guess about the host, and 5s against a 50ms bound is inside this repo's own measured
+    // starved-poll window (8s).
     const rowName = "audio-feed-g7vfw parked-mutant";
     const boundMs = 50;
-    const startedAt = Date.now();
     let red: unknown;
     try {
       await withRowBound(rowName, () => new Promise<never>(() => {}), boundMs);
     } catch (err) {
       red = err;
     }
-    const elapsed = Date.now() - startedAt;
     assert(red instanceof Error, "a parked row MUST red; returning would be the silent pass");
     assertStringIncludes(red.message, `row "${rowName}"`);
     assertStringIncludes(red.message, `bound of ${boundMs}ms`);
     assertStringIncludes(red.message, "audio-feed-g7vfw");
-    assert(elapsed < 5_000, `the bound must fire near ${boundMs}ms, took ${elapsed}ms`);
   },
 );
 
