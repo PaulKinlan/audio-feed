@@ -47,6 +47,15 @@
  * assumed; the only way a discovered site has no literals is if its body really holds
  * none, which the consuming test asserts with a named reason.
  *
+ * WHAT THE CAP DOES NOT BOUND (audio-feed-fmlyl): a site sends ONE assembled string — its
+ * literals plus the values in their holes plus fence tags and join separators. The per-literal
+ * cap measures each literal, so five 11,900-character literals pass every row and assemble into
+ * a ~60,000-character prompt. The assembled total is a SEPARATE fact, and it is pinned per site
+ * in tests/prompt_census_test.ts: bounded-by-construction sites carry an arithmetic row
+ * (measured literal text plus declared maxima for every value and separator, against a stated
+ * ceiling), and the rest carry a named UNCHECKED verdict with the reason no static arithmetic
+ * exists — never a green row that reads as if the cap covered them.
+ *
  * DECLARED LIMITS, because a census with unstated holes is worse than none:
  * - A prompt built as ONE interleaved template literal (instructions and ${values} in
  *   the same literal) with no instruction block is NOT caught by the text net — the
@@ -56,6 +65,11 @@
  *   pinned in the consuming test row.
  * - Only function declarations are enumerated (the shape of every prompt builder in
  *   this repo); only the src/ tree is walked.
+ * - The assembled-total arithmetic is per SITE and lives in the consuming test: the census
+ *   measures literals, it cannot see which literals concatenate into one sent string or how
+ *   large a hole's value can get. The test's verdict table is therefore hand-written (audited
+ *   against the builder's source), and its UNCHECKED entries are the sites where that audit
+ *   found no static bound.
  * - Regex literals are not masked (maskNonCode's own limit), so a regex containing a
  *   backtick could confuse literal pairing. None in this repo does.
  * - THE MARKERS ARE TRUSTED, NOT VERIFIED: a site that copies a census marker onto a

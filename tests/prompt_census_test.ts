@@ -28,6 +28,7 @@ import {
 } from "../scripts/prompt-census.ts";
 import { maskNonCode } from "../scripts/source-mask.ts";
 import { DEFAULT_MAX_BODY_CHARS } from "../src/worker/script.ts";
+import { MAX_TTS_INPUT_BYTES, MAX_TTS_SEGMENTS } from "../src/tts/gemini.ts";
 
 /** One entry of the pinned census: "file :: name" and the mechanism that makes it safe. */
 interface ExpectedSite {
@@ -581,9 +582,290 @@ Deno.test("REAL TREE: every discovered prompt is at or under the length cap (pro
   // bound on the publisher-controlled FIELDS buildScriptPrompt caps through capped();
   // the TTS builders carry spoken transcript with no instruction region, so that bound
   // does not apply to their interpolated payloads. Only their literal text is capped here.
+  //
+  // WHAT IT ALSO DOES NOT MEASURE, and what this row's name used to imply it did: the
+  // ASSEMBLED prompt. Five 11,900-character literals pass every pass of this loop and
+  // assemble into a ~60,000-character prompt (audio-feed-fmlyl). This row bounds literals;
+  // the assembled total is bounded — or declared unchecked — by the row below, per site.
   for (const site of census.sites) {
     assertSitePromptsUnderCap(site, DEFAULT_MAX_BODY_CHARS);
   }
+});
+
+/**
+ * WHAT BOUNDS A SITE'S ASSEMBLED PROMPT — the question the per-literal row cannot answer.
+ *
+ * A site sends ONE string, assembled from its template literals plus the values that land in
+ * their holes, plus the fence tags and join separators around them. The cap is applied to each
+ * literal, so it does not bound that total: five 11,900-character literals pass every literal
+ * and send ~60,000 characters (audio-feed-fmlyl). Every site is therefore in exactly ONE of
+ * the two states below, and neither state is allowed to read as if the cap covered it:
+ *
+ * - BOUNDED BY CONSTRUCTION. `ASSEMBLED_PROMPT_BOUNDS` names every character the site adds
+ *   outside its literals — capped publisher fields, fence tags, join separators, app-configured
+ *   labels — and the ceiling the assembled total must stay at or under. The row sums the
+ *   MEASURED literal text plus those declared maxima and reds naming the site, the total and
+ *   the ceiling, so a literal that grows past the site's headroom is a red, not a green.
+ * - NOT CHECKABLE STATICALLY. `UNCHECKED_ASSEMBLED_PROMPTS` says so, per site, with the reason
+ *   — and where the real bound lives at runtime it names that guard too. These sites are NOT
+ *   passing rows: nothing here asserts their assembled length, and the reason is what a reader
+ *   gets instead of a green tick.
+ */
+
+/**
+ * HEADROOM FOR A HOLE WHOSE VALUE THIS REPO DOES NOT CAP: dialogue speaker labels.
+ *
+ * `buildScriptPrompt` interpolates `expert.name` and `foil.name`, which come from the episode's
+ * dialogue config, never from the publisher — this repo's presets are "Alex" and "Sam", and the
+ * longest label any caller passes is app-configured. 64 characters is an ASSUMPTION about app
+ * config, stated here rather than buried in the arithmetic; it is not an enforced cap, which is
+ * why the ceiling below keeps headroom beyond it.
+ */
+const SPEAKER_LABEL_MAX_CHARS = 64;
+
+/**
+ * THE INSTRUCTION-TEXT ALLOWANCE: how many characters of prompt literal text a bounded site may
+ * add on top of the values its arithmetic already counts. Today's longest builder spends well
+ * under it; a literal that pushes a site past it is a deliberate decision, made by raising the
+ * allowance in this table rather than by shipping a prompt nobody measured.
+ */
+const INSTRUCTION_TEXT_ALLOWANCE = 4_000;
+
+interface AssembledOverhead {
+  /** What the characters are, in the words a reader auditing the arithmetic needs. */
+  what: string;
+  maxChars: number;
+  /** Why that maximum holds — the construction that makes it a bound, not a guess. */
+  reason: string;
+}
+
+interface AssembledPromptBound {
+  /** "file :: name", matching the census key. */
+  where: string;
+  /** Every character the site adds OUTSIDE its template literals (holes and syntax included). */
+  overhead: AssembledOverhead[];
+  /** The assembled total must stay at or under this, with the reason for the number. */
+  ceiling: number;
+  ceilingReason: string;
+}
+
+const ASSEMBLED_PROMPT_BOUNDS: AssembledPromptBound[] = [
+  {
+    where: "src/worker/script.ts :: buildScriptPrompt",
+    overhead: [
+      {
+        what: "the four capped publisher fields (title, author, summary, body)",
+        maxChars: 4 * DEFAULT_MAX_BODY_CHARS,
+        reason:
+          "every field goes through fencedRegion(...) with capped(field), and capped slices to bodyChars (DEFAULT_MAX_BODY_CHARS by default), so four fields cannot exceed four caps",
+      },
+      {
+        what: "fence tag pairs around those four fields",
+        maxChars: 128,
+        reason:
+          "the eight fixed tags (<article_title>…</article_body>) total 128 characters; they are plain string literals, so the census's template-literal population does not see them",
+      },
+      {
+        what: "dialogue speaker labels",
+        maxChars: 5 * SPEAKER_LABEL_MAX_CHARS,
+        reason:
+          "expert.name appears twice and foil.name three times; the labels are app-configured and never publisher-supplied (see SPEAKER_LABEL_MAX_CHARS)",
+      },
+      {
+        what: "the maxTurns digit",
+        maxChars: 2,
+        reason:
+          "createGroundedScriptGenerator rejects a maxTurns that is not an integer from 2 to 32, so the interpolated number is at most two digits",
+      },
+    ],
+    ceiling: 4 * DEFAULT_MAX_BODY_CHARS + INSTRUCTION_TEXT_ALLOWANCE,
+    ceilingReason:
+      "four capped publisher fields plus the instruction-text allowance; the field caps are the repo's existing injection bound and the allowance is the deliberate room for prompt wording",
+  },
+];
+
+/**
+ * SITES WHOSE ASSEMBLED TOTAL NOTHING HERE CHECKS, each with the reason it cannot be checked
+ * statically. Keyed the same way as the census. These are named limitations, NOT passing rows.
+ */
+const UNCHECKED_ASSEMBLED_PROMPTS: Record<string, string> = {
+  "src/worker/script.ts :: createGroundedScriptGenerator":
+    "the retry body embeds JSON.stringify of the model turns received so far, whose length is the model's output at runtime; SCRIPT_MAX_OUTPUT_TOKENS bounds the tokens REQUESTED, not the characters received, so no static arithmetic exists on this site. The prompt part it prepends is buildScriptPrompt's output, bounded by the row above.",
+  "src/tts/gemini.ts :: formatNarrationIntro":
+    `title, author and sourceName reach this site with no cap (only lead is sliced, at 300 characters upstream), so the assembled intro is unbounded here. The send IS bounded, at runtime rather than by construction, and downstream of this site: synthesizeNarration segments the prompt with splitTextUnderByteBudget(prompt, MAX_TTS_INPUT_BYTES) and throws when the segments exceed MAX_TTS_SEGMENTS. That bound is ${MAX_TTS_INPUT_BYTES} bytes per request, not DEFAULT_MAX_BODY_CHARS.`,
+  "src/tts/gemini.ts :: formatNarrationPrompt":
+    "the assembled narration prompt is the intro (unbounded here) plus the article body, which is bounded upstream at MAX_NARRATION_BYTES (192,000 text bytes, src/ingest/upload.ts) — sixteen times DEFAULT_MAX_BODY_CHARS, by design, because a four-hour episode is not an injection payload. The runtime bound on what is sent is the segmenter (splitTextUnderByteBudget with MAX_TTS_INPUT_BYTES, refused above MAX_TTS_SEGMENTS), asserted in tests/tts_long_input_test.ts.",
+  "src/tts/gemini.ts :: formatDialoguePrompt":
+    "turns come from input.turns or input.script (generated model output) or from the article (title and summary uncapped; only body slices 0-400 and 400-1600 are bounded), so the assembled turn text is unbounded here; synthesizeDialogue applies the same runtime segmenter bound as narration.",
+};
+
+function assembledPromptChars(site: PromptSite, bound: AssembledPromptBound): {
+  literalChars: number;
+  separatorChars: number;
+  overheadChars: number;
+  total: number;
+} {
+  // The backticks are syntax, not prompt text; the interior is what the model or TTS engine
+  // receives. Holes still count their SOURCE characters here, which over-states the sent text
+  // (an interpolated value can be shorter than its expression) — the arithmetic must not
+  // under-count.
+  const literalChars = site.literals.reduce(
+    (sum, literal) => sum + Math.max(0, literal.length - 2),
+    0,
+  );
+  // The pieces are joined with "\n". Empty literals are filtered out before the join, and each
+  // fence pair contributes its tags as separate pieces, so one newline per literal plus twelve
+  // for the fence gaps is an upper bound for this builder shape.
+  const separatorChars = site.literals.length + 12;
+  const overheadChars = bound.overhead.reduce((sum, part) => sum + part.maxChars, 0);
+  return {
+    literalChars,
+    separatorChars,
+    overheadChars,
+    total: literalChars + separatorChars + overheadChars,
+  };
+}
+
+function assertAssembledPromptUnderCeiling(site: PromptSite, bound: AssembledPromptBound): void {
+  const chars = assembledPromptChars(site, bound);
+  if (chars.total > bound.ceiling) {
+    throw new Error(
+      `ASSEMBLED PROMPT EXCEEDS ITS CEILING: ${
+        siteKey(site)
+      } assembles ${chars.total} characters ` +
+        `(${chars.literalChars} of template-literal text + ${chars.separatorChars} of join separators + ` +
+        `${chars.overheadChars} of ${bound.overhead.map((part) => part.what).join(", ")}), ` +
+        `over its ceiling of ${bound.ceiling}. The per-literal cap of ${DEFAULT_MAX_BODY_CHARS} ` +
+        `does not bound this total — that is why this row exists.`,
+    );
+  }
+}
+
+Deno.test("REAL TREE: every prompt site's ASSEMBLED total is bounded by construction or declared unchecked (promptcensus)", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const census = await promptCensus(root);
+  const keys = census.sites.map(siteKey);
+
+  const boundedKeys = ASSEMBLED_PROMPT_BOUNDS.map((bound) => bound.where);
+  const uncheckedKeys = Object.keys(UNCHECKED_ASSEMBLED_PROMPTS);
+
+  // No site may fall between the two states: an unaccounted site would mean the cap row is the
+  // only thing its name has, which is the defect this row exists to close.
+  const uncovered = keys.filter(
+    (key) => !boundedKeys.includes(key) && !uncheckedKeys.includes(key),
+  );
+  assertEquals(
+    uncovered,
+    [],
+    `PROMPT SITE(S) WITH NO ASSEMBLED-PROMPT VERDICT: ${uncovered.join(", ") || "(none)"}. Every
+census site sends one assembled string, and the per-literal cap does not bound it. Add the site
+to ASSEMBLED_PROMPT_BOUNDS with its arithmetic (if the total is bounded by construction) or to
+UNCHECKED_ASSEMBLED_PROMPTS with the reason it cannot be checked — a named limitation, not a
+silent pass.`,
+  );
+
+  const countedTwice = boundedKeys.filter((key) => uncheckedKeys.includes(key));
+  assertEquals(
+    countedTwice,
+    [],
+    `SITE CLAIMED BOTH BOUNDED AND UNCHECKED: ${countedTwice.join(", ") || "(none)"}. Decide which
+is true; a site cannot be covered and declared uncovered at once.`,
+  );
+
+  const stale = [...boundedKeys, ...uncheckedKeys].filter((key) => !keys.includes(key));
+  assertEquals(
+    stale,
+    [],
+    `STALE ASSEMBLED-PROMPT VERDICT(S): ${stale.join(", ") || "(none)"} no longer names a census
+site, so its verdict is checked against nothing — remove it or fix the key.`,
+  );
+
+  for (const [key, reason] of Object.entries(UNCHECKED_ASSEMBLED_PROMPTS)) {
+    assert(reason.trim().length > 0, `${key} is declared unchecked with no reason`);
+  }
+});
+
+Deno.test("REAL TREE: the bounded site's assembled prompt fits its ceiling (promptcensus)", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const census = await promptCensus(root);
+  for (const bound of ASSEMBLED_PROMPT_BOUNDS) {
+    const site = census.sites.find((candidate) => siteKey(candidate) === bound.where);
+    assert(site !== undefined, `${bound.where} vanished from the census`);
+    assertAssembledPromptUnderCeiling(site, bound);
+  }
+});
+
+Deno.test("REAL TREE: the declared runtime bound on the TTS prompts is the segmenter, and it still refuses (promptcensus)", async () => {
+  // The unchecked narration sites name a runtime guard instead of a static bound. A named
+  // mechanism that silently changed is worse than no name, so the guard is read here: the
+  // segmenter ceiling is arithmetic over two constants, and synthesizeNarration still refuses
+  // past it. This does NOT bound the assembled prompt statically — the unchecked rows above say
+  // so — it keeps the reason they give honest.
+  assertEquals(
+    MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS,
+    192_000,
+    "the narration ceiling the unchecked verdicts cite is MAX_TTS_INPUT_BYTES x MAX_TTS_SEGMENTS",
+  );
+  const source = await readRealSource("src/tts/gemini.ts");
+  assertStringIncludes(
+    source,
+    "splitTextUnderByteBudget(prompt, MAX_TTS_INPUT_BYTES)",
+    "the narration prompt is still segmented at MAX_TTS_INPUT_BYTES where it is sent",
+  );
+  assertStringIncludes(
+    source,
+    "segments.length > MAX_TTS_SEGMENTS",
+    "the segment count is still refused past MAX_TTS_SEGMENTS",
+  );
+});
+
+Deno.test("MUTANT: growing a literal past the assembled ceiling reds naming site, total and ceiling", async () => {
+  const source = await readRealSource("src/worker/script.ts");
+  const anchor = "`RESEARCH REQUIREMENTS:`";
+  const bound = ASSEMBLED_PROMPT_BOUNDS.find((candidate) =>
+    candidate.where === "src/worker/script.ts :: buildScriptPrompt"
+  );
+  assert(bound !== undefined, "buildScriptPrompt must have a declared assembled bound");
+
+  const before = promptCensusSource(source, "src/worker/script.ts")
+    .find((site) => site.name === "buildScriptPrompt");
+  assert(before !== undefined, "buildScriptPrompt must be found in census");
+  // The realistic shape of the bug: one more instruction literal, not a long one — five of
+  // these at 11,900 characters each is how audio-feed-fmlyl's ~60,000-character prompt passes
+  // every per-literal row.
+  assertAssembledPromptUnderCeiling(before, bound);
+
+  const grown = "`" + "x".repeat(5_000) + " RESEARCH REQUIREMENTS:`";
+  const mutant = applyMutant(source, anchor, grown);
+  const site = promptCensusSource(mutant, "src/worker/script.ts")
+    .find((candidate) => candidate.name === "buildScriptPrompt");
+  assert(site !== undefined, "the mutated builder must still be FOUND by the census");
+
+  let threw = false;
+  try {
+    assertAssembledPromptUnderCeiling(site, bound);
+  } catch (err) {
+    threw = true;
+    assertStringIncludes(
+      (err as Error).message,
+      "src/worker/script.ts :: buildScriptPrompt",
+      "the failure must name the site whose assembled total broke",
+    );
+    assertStringIncludes(
+      (err as Error).message,
+      `over its ceiling of ${bound.ceiling}`,
+      "the failure must cite the ceiling",
+    );
+    assertStringIncludes(
+      (err as Error).message,
+      "assembles ",
+      "the failure must state the assembled total",
+    );
+  }
+  assert(
+    threw,
+    "adding 5,000 characters of prompt text must red the assembled-total row — the per-literal cap still passes it, which is the whole point",
+  );
 });
 
 /**
