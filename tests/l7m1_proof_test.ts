@@ -196,7 +196,11 @@ function assertScratchOutsideRepo(dir: string): void {
 async function scriptsListing(): Promise<string[]> {
   const names: string[] = [];
   for await (const entry of Deno.readDir(new URL("../scripts/", import.meta.url))) {
-    names.push(entry.name);
+    // Narrowed from whole-directory diffing to scratch/mutant files this proof could leave behind.
+    // Asserting the whole scripts/ tree unchanged reds when a concurrent suite touches scripts/ (audio-feed-47e8m).
+    if (entry.name.startsWith("mutant") || entry.name.includes("l7m1-proof-test")) {
+      names.push(entry.name);
+    }
   }
   return names.sort();
 }
