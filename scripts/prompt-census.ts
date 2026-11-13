@@ -38,6 +38,15 @@
  * fencedRegion(); transcript-only or app-values-only — declared by marker; otherwise
  * unmitigated, which is the row-red state.
  *
+ * WHAT A SITE EXPOSES TO THE LENGTH-CAP ROW. `PromptSite.literals` is EVERY template
+ * literal in the body, for declared sites as well as net-found ones. It used to be the
+ * instruction-marker subset, computed only when the text net fired, so all four
+ * declared sites reported zero literals and the cap row iterated an empty list — it
+ * passed by construction, and a 20,000-character literal appended to a TTS builder
+ * stayed green (audio-feed-frmva). The population is now measured rather than
+ * assumed; the only way a discovered site has no literals is if its body really holds
+ * none, which the consuming test asserts with a named reason.
+ *
  * DECLARED LIMITS, because a census with unstated holes is worse than none:
  * - A prompt built as ONE interleaved template literal (instructions and ${values} in
  *   the same literal) with no instruction block is NOT caught by the text net — the
@@ -107,7 +116,17 @@ export interface PromptSite {
   mitigation: PromptMitigation;
   /** How the site was found: the text net (either firing shape) or a declaration marker. */
   foundBy: "instruction-block" | "interleaved-output-contract" | "declared-marker";
-  /** The mixing literals found in the function, raw text, for failure messages. */
+  /**
+   * EVERY template literal in the function's body, raw text, in source order.
+   *
+   * All of them, not a filtered subset, and for every site however it was found. The
+   * literals are the prompt text this site sends to a model or a TTS engine, so the
+   * length-cap row measures them directly; a filter that decided which literal is
+   * "prompt-y" would be the clever text detector this census refuses to build, and a
+   * site whose population came out empty would make that row pass by construction
+   * (audio-feed-frmva). A site is a site because it builds prompt text, so a declared
+   * site contributes its literals exactly like a net-found one.
+   */
   literals: string[];
 }
 
@@ -284,11 +303,6 @@ export function promptCensusSource(
     if (!netFound && declared === null) continue;
 
     const mitigation: PromptMitigation = fenced ? "fenced" : declared ?? "unmitigated";
-    const mixingLiterals = netFound
-      ? bodyLiterals.filter((text) =>
-        INSTRUCTION_MARKER_RE.test(text) || OUTPUT_CONTRACT_RE.test(text)
-      )
-      : [];
 
     sites.push({
       file: relativePath,
@@ -299,7 +313,7 @@ export function promptCensusSource(
         : netFound && declared === null
         ? "instruction-block"
         : "declared-marker",
-      literals: mixingLiterals,
+      literals: bodyLiterals,
     });
   }
   return sites;
