@@ -87,7 +87,10 @@
  * the script its dir declares (`RECORD MISATTRIBUTED` - the field that says WHAT ran, which nothing
  * checked until this row); endedAt older than 30 days;
  * exit !== 0 or marker === false (124 and 137 stay distinct from a clean exit in the record and in
- * the incident text); any artefact hash mismatch, missing artefact, or unrecorded file. A proof the
+ * the incident text); a bound whose SHAPE the writer could not have produced - ms not a positive
+ * finite integer, or provenance outside BOUND_PROVENANCES (audio-feed-wq10h, and deliberately not an
+ * equality check: a re-run under a raised --timeout is honest work, and a rule that reds it is the
+ * wrong rule); any artefact hash mismatch, missing artefact, or unrecorded file. A proof the
  * tier RAN must leave a parseable record afterward - if the writer is broken the tier names "the tier
  * ran <dir> and wrote no record" and goes red (that guarantee is NEVER gated: it is the detector for
  * the exact "ran and wrote nothing" silence this bead exists to close).
@@ -533,6 +536,13 @@ export interface MalformedTimeout {
 
 export type BoundProvenance = "flag" | "declared" | "default";
 
+/**
+ * The COMPLETE provenance vocabulary, in the order resolveBound() can choose it (audio-feed-wq10h).
+ * The writer's type is a three-literal union, so the set is knowable rather than free text, and the
+ * record check pins it: a record naming anything else describes a bound this tier never resolved.
+ */
+export const BOUND_PROVENANCES: readonly BoundProvenance[] = ["flag", "declared", "default"];
+
 export interface ResolvedBound {
   timeoutMs: number;
   boundSec: number;
@@ -943,6 +953,62 @@ export interface RecordValidationContext {
   declaredScript: string;
 }
 
+/** The one command that rewrites a dir's record: the repair every bound incident names. */
+function recordRepairHint(dir: string): string {
+  return `produce one: deno task evidence --only ${dir.split("/").pop()}`;
+}
+
+/**
+ * THE BOUND'S SHAPE, NEVER ITS VALUE (audio-feed-wq10h). Every bound the writer emits comes from
+ * resolveBound(), so `ms` is a positive finite integer and `provenance` is one of
+ * BOUND_PROVENANCES. What must NOT be checked is equality against a remembered bound: a re-run
+ * under a raised --timeout, or a dir that gains a `- Timeout:` line, is honest work and changes the
+ * bound on purpose. So this names a bound the writer could not have produced - a string ms, a
+ * missing field, a negative or non-finite ms, an unknown provenance - and says nothing about which
+ * bound the run legitimately chose.
+ */
+function boundShapeIncidents(dir: string, bound: unknown): string[] {
+  const repair = recordRepairHint(dir);
+  if (typeof bound !== "object" || bound === null || Array.isArray(bound)) {
+    return [
+      `RECORD INCOMPLETE: ${dir} ${RECORD_FILE} has no bound ` +
+      `(a record must name the ms the run was allowed and where that bound came from; ${repair})`,
+    ];
+  }
+  const incidents: string[] = [];
+  const { ms, provenance } = bound as { ms?: unknown; provenance?: unknown };
+  // Named as the record itself would spell it, so a JSON `1e999` (which parses to Infinity) reads as
+  // Infinity in the incident rather than as the null JSON.stringify would print.
+  const shownMs = typeof ms === "number" ? String(ms) : JSON.stringify(ms ?? null);
+  if (typeof ms !== "number" || !Number.isFinite(ms) || !Number.isInteger(ms)) {
+    incidents.push(
+      `RECORD INCOMPLETE: ${dir} ${RECORD_FILE} bound.ms ${shownMs} ` +
+        `is not a finite integer (a bound is a whole number of milliseconds; ${repair})`,
+    );
+  } else if (ms <= 0) {
+    incidents.push(
+      `RECORD INCOMPLETE: ${dir} ${RECORD_FILE} bound.ms ${shownMs} is not positive ` +
+        `(a bound of zero or less bounds nothing; ${repair})`,
+    );
+  }
+  if (typeof provenance !== "string" || provenance.trim() === "") {
+    incidents.push(
+      `RECORD INCOMPLETE: ${dir} ${RECORD_FILE} bound.provenance ${
+        JSON.stringify(provenance ?? null)
+      } ` +
+        `is not a string naming where the bound came from ` +
+        `(one of ${BOUND_PROVENANCES.join(", ")}; ${repair})`,
+    );
+  } else if (!(BOUND_PROVENANCES as readonly string[]).includes(provenance)) {
+    incidents.push(
+      `RECORD INCOMPLETE: ${dir} ${RECORD_FILE} bound.provenance ${JSON.stringify(provenance)} ` +
+        `is not one of ${BOUND_PROVENANCES.join(", ")} (the tier resolves every bound to one of ` +
+        `these; ${repair})`,
+    );
+  }
+  return incidents;
+}
+
 /**
  * THE FIELD TABLE (audio-feed-h22ml) - what a record asserts, and which rule makes each assertion
  * CHECKABLE. "Written" alone is decoration: a reader a year later has no way to tell a wrong value
@@ -976,7 +1042,8 @@ export interface RecordValidationContext {
 /**
  * The failure rules of the record tier (audio-feed-h22ml), each naming its own incident: no record
  * (only when recordsEnforced); unparseable record; a record that does not name this dir's declared
- * script; sha not an ancestor of HEAD; endedAt older than 30 days; exit !== 0; marker === false; any
+ * script (audio-feed-h22ml); sha not an ancestor of HEAD; endedAt older than 30 days; exit !== 0;
+ * marker === false; a bound that is not the shape the writer produces (audio-feed-wq10h); any
  * artefact hash mismatch, missing artefact, or file present but unrecorded. An empty list means the
  * record can be believed.
  */
@@ -1003,6 +1070,7 @@ export async function validateRunRecord(
     return incidents;
   }
   const record = read.record;
+  incidents.push(...boundShapeIncidents(ctx.dir, record.bound));
 
   // WHAT RAN (audio-feed-h22ml script row): the record's `script` is the only field that says which
   // proof produced these artefacts, so it is compared with the dir's own declaration rather than
