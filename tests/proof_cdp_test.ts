@@ -30,9 +30,14 @@
  * - the exported MEASURED_STARVED_POLL_MS / HANG_BOUND_MS pair is still 8s and 15x it
  * - the product-budget GUARD is pinned, not only the budgets it accepts: the exported
  *   assertBudgetBelowHang THROWS for a budget at or above the ceiling (checked at the ceiling
- *   and above it, naming the budget and the ceiling) and does not throw for the real budgets, and
- *   the import-time loop still applies it. Ceiling as a parameter is what lets the row drive a
- *   budget over the bound without mutating a source constant at test time (audio-feed-zkto5)
+ *   and above it, naming the budget and the ceiling) and does not throw for the real budgets.
+ *   Ceiling as a parameter is what lets the row drive a budget over the bound without mutating a
+ *   source constant at test time (audio-feed-zkto5)
+ * - the import-time APPLICATION is observed, never grepped (audio-feed-qfwgi): the exported
+ *   assertAllProductBudgetsBelowHang THROWS when handed a budget at the ceiling, and
+ *   APPLIED_PRODUCT_BUDGETS - the report the import call itself produced - names the three real
+ *   budgets at the real HANG_BOUND_MS, so a call left in the source but never executed (an `if
+ *   (false)`, an early return) reds this row instead of passing it
  * - close() closes the WebSocket cleanly
  *
  * No Chrome is needed: the hang bound is a race against a timer over the CDP round-trip, so a
@@ -55,6 +60,8 @@ import {
   withHangBound,
 } from "../scripts/proof-cdp.ts";
 import {
+  APPLIED_PRODUCT_BUDGETS,
+  assertAllProductBudgetsBelowHang,
   assertBudgetBelowHang,
   BOOTSTRAP_REDIRECT_LATENCY_MS,
   buildPlaybackPlayingMessage,
@@ -740,13 +747,54 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
         assertStringIncludes(overCeiling.message, `${overCeilingMs}ms`);
         assertStringIncludes(overCeiling.message, `${HANG_BOUND_MS}ms`);
       }
-      // The rule is only enforced where it is APPLIED. The import-time loop is what makes a bad
-      // constant fail at import instead of at a browser row nobody re-derives, and deleting the
-      // loop while keeping the function would leave every suite green again.
-      const budgetsSource = await Deno.readTextFile(
-        new URL("../scripts/proof-latency-budgets.ts", import.meta.url),
+      // 15b2. The rule is only enforced where it is APPLIED, so the import-time application is
+      // pinned by OBSERVING it rather than by reading this file's source text (audio-feed-qfwgi).
+      // The row that used to stand here asserted the string "assertBudgetBelowHang(name,
+      // budgetMs);" and stayed green when that exact call was made unreachable -
+      // `if (false) assertBudgetBelowHang(name, budgetMs);` - because a text pin can see the
+      // characters and not which branch runs. The realistic edit is not a deletion; it is an early
+      // return, a condition, or a refactor that leaves the call in place and never executes it.
+      //
+      // The step the import runs is exported, so the row drives THAT step with a budget at the
+      // ceiling and asserts it throws: the throw is the effect the import exists to produce, and
+      // it comes from the same code path, so deadening the step reds the row.
+      const overCeilingApplication = assertThrows(
+        () => assertAllProductBudgetsBelowHang({ PLAYBACK_ADVANCE_WAIT_MS: HANG_BOUND_MS }),
+        Error,
+        undefined,
+        "the import-time application step must REJECT a product budget at the hang ceiling, not " +
+          "just contain a call that would",
       );
-      assertStringIncludes(budgetsSource, "assertBudgetBelowHang(name, budgetMs);");
+      assertStringIncludes(overCeilingApplication.message, "PLAYBACK_ADVANCE_WAIT_MS");
+      assertStringIncludes(overCeilingApplication.message, `${HANG_BOUND_MS}ms`);
+
+      // The WIRING, observed and not grepped: `APPLIED_PRODUCT_BUDGETS` is the report the import
+      // call itself produced, so it cannot exist unless the application actually ran - over the
+      // three real budgets, at the real `HANG_BOUND_MS`. A deadened loop, an early return, or a
+      // call deleted while its text survives leaves nothing here, and this row says so by name.
+      assertEquals(
+        APPLIED_PRODUCT_BUDGETS,
+        [
+          {
+            name: "PLAYBACK_ADVANCE_WAIT_MS",
+            budgetMs: PLAYBACK_ADVANCE_WAIT_MS,
+            ceilMs: HANG_BOUND_MS,
+          },
+          {
+            name: "PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS",
+            budgetMs: PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
+            ceilMs: HANG_BOUND_MS,
+          },
+          {
+            name: "BOOTSTRAP_REDIRECT_LATENCY_MS",
+            budgetMs: BOOTSTRAP_REDIRECT_LATENCY_MS,
+            ceilMs: HANG_BOUND_MS,
+          },
+        ],
+        "the import-time check must have APPLIED the ceiling rule to all three product budgets at " +
+          "the real HANG_BOUND_MS: this report is produced by that call running, so an empty or " +
+          "short report means the loop at import no longer checks what it claims to (audio-feed-qfwgi)",
+      );
       const playbackProof = await Deno.readTextFile(
         new URL("../scripts/playback-csp-browser-proof.ts", import.meta.url),
       );

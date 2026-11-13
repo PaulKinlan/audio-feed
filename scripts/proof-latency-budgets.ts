@@ -101,9 +101,46 @@ const PRODUCT_BUDGETS: Record<string, number> = {
   PLAYBACK_ADVANCE_SAMPLE_BUDGET_MS,
   BOOTSTRAP_REDIRECT_LATENCY_MS,
 };
-for (const [name, budgetMs] of Object.entries(PRODUCT_BUDGETS)) {
-  assertBudgetBelowHang(name, budgetMs);
+
+/** One product budget the ceiling rule was applied to, and the ceiling it was judged against. */
+export type AppliedProductBudget = {
+  name: string;
+  budgetMs: number;
+  ceilMs: number;
+};
+
+/**
+ * Apply the ceiling rule to EVERY product budget, and report what was applied.
+ *
+ * This is the import-time check itself, exported so a row drives the same step the import runs
+ * instead of grepping for its call site: hand it a map with a budget at or above the ceiling and
+ * it THROWS, by name and by value (audio-feed-qfwgi). Handed nothing, it applies the real
+ * `PRODUCT_BUDGETS` map at the real `HANG_BOUND_MS`, which is what the import below does.
+ *
+ * The return value is what makes the WIRING observable rather than only the rule: a report can
+ * only be produced by the step actually running, so `APPLIED_PRODUCT_BUDGETS` below is evidence
+ * that the import-time check executed over these budgets and this ceiling. A loop deadened behind
+ * a condition, an early return, or a call deleted while its text survives leaves no report.
+ */
+export function assertAllProductBudgetsBelowHang(
+  budgets: Record<string, number> = PRODUCT_BUDGETS,
+  ceilMs: number = HANG_BOUND_MS,
+): AppliedProductBudget[] {
+  return Object.entries(budgets).map(([name, budgetMs]) => {
+    assertBudgetBelowHang(name, budgetMs, ceilMs);
+    return { name, budgetMs, ceilMs };
+  });
 }
+
+/**
+ * The budgets the import-time check applied, in order, with the ceiling each was judged against.
+ *
+ * Produced by executing {@linkcode assertAllProductBudgetsBelowHang} at import: the value cannot
+ * exist without the check having run, so it is what the test row observes in place of reading this
+ * file's source text.
+ */
+export const APPLIED_PRODUCT_BUDGETS: readonly AppliedProductBudget[] =
+  assertAllProductBudgetsBelowHang();
 
 /** Which sample evaluate starved when reading playback state. */
 export type StarvedSampleRead = {
