@@ -1,15 +1,19 @@
 {
   "script": "scripts/repro_0cmu_linger.ts",
-  "sha": "36f19e07f8361d5b4f2d94e36922fe29e72728e4",
+  "sha": "fda1706b3cbf21a39b28a034077e2c35797e7c73",
   "bound": {
     "ms": 300000,
     "provenance": "default"
   },
-  "startedAt": "2026-10-31T18:36:17.838Z",
-  "endedAt": "2026-10-31T18:36:26.129Z",
+  "startedAt": "2026-11-13T06:07:59.885Z",
+  "endedAt": "2026-11-13T06:08:06.310Z",
   "exit": 0,
   "marker": true,
   "artefacts": {
-    "repro.json": "sha256:2f119dc6a5f44d33fe1152d5c5ea13e5f1d66ab90be315be8a6385382bc6add6"
-  }
+    "repro.json": "sha256:c011da9a446731835b578e00a20a95831bfff5b089179944df4da8db5ee29a43"
+  },
+  "canonicalArtefacts": {
+    "repro.json": "sha256:d22ee7825a1334077014fbe9c6eec3ee94aecda7cc7fb2077faaf0b7106f1317"
+  },
+  "canonicalVersion": 2
 }

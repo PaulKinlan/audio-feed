@@ -46,7 +46,17 @@ const hanging = (status: number, statusText: string): typeof fetch =>
       ),
     )) as typeof fetch;
 
-/** Runs a `deno eval` child under a bound and reports whether it exited on its own. */
+/**
+ * Runs a `deno eval` child under a hang bound and reports HOW IT TERMINATED.
+ *
+ * "Exited on its own" is read from the child's own termination report — `signal`, which the kernel
+ * fills in only when a signal ended the process — not from a clock reading and not from the
+ * harness's intent. The old wall-clock margin (`elapsedMs < boundMs - 500`) reported a child the
+ * host merely ran slowly as if it had been killed (audio-feed-gqdug), the same false red
+ * audio-feed-1xfvx removed from the tts_hardening child guard. `harnessKillRequested` is kept as
+ * the harness's own record (the corroborating fact, not the predicate); `harnessKillRacedExit`
+ * exposes the one case the two can disagree — the bound fired after the child had already gone.
+ */
 async function childProbe(code: string, boundMs: number): Promise<Record<string, unknown>> {
   const job = new Deno.Command(Deno.execPath(), {
     args: ["eval", code],
@@ -54,22 +64,30 @@ async function childProbe(code: string, boundMs: number): Promise<Record<string,
     stderr: "piped",
   })
     .spawn();
-  // "Exited on its own" is a kill fact, not a clock reading: the parent knows whether its own
-  // SIGKILL-at-bound had to run, and that flag decides the field. The old wall-clock margin
-  // (`elapsedMs < boundMs - 500`) reported a child the host merely ran slowly as if it had been
-  // killed — a spurious failure on a loaded evidence box, the same false red audio-feed-1xfvx
-  // removed from the tts_hardening child guard, which reads the kill/exit facts instead
-  // (tests/tts_hardening_test.ts). A child cannot be killed by a timer that never fired.
-  let killedAtBound = false;
+  let harnessKillRequested = false;
   const kill = setTimeout(() => {
-    killedAtBound = true;
-    job.kill("SIGKILL");
+    harnessKillRequested = true;
+    // `kill` throws once the child has terminated, and an uncaught throw in a timer callback would
+    // crash the probe on a child that behaved correctly. The termination report below decides the
+    // field, so a lost race here is recorded, never fatal.
+    try {
+      job.kill("SIGKILL");
+    } catch {
+      // Already gone: `signal` is null and the exit code says how it actually ended.
+    }
   }, boundMs);
   const started = performance.now();
-  const { code: exitCode } = await job.output();
+  const { code: exitCode, signal } = await job.output();
   clearTimeout(kill);
-  const elapsedMs = Math.round(performance.now() - started);
-  return { code, elapsedMs, exitCode, exitedOnItsOwn: !killedAtBound };
+  return {
+    code,
+    elapsedMs: Math.round(performance.now() - started),
+    exitCode,
+    terminationSignal: signal,
+    exitedOnItsOwn: signal === null,
+    harnessKillRequested,
+    harnessKillRacedExit: harnessKillRequested && signal === null,
+  };
 }
 
 // A regression leaves the process alive; fail loudly instead of hanging a lane for the lease.
@@ -229,8 +247,9 @@ const report = {
     "not be re-ref'd by an aborted AbortSignal.any composite.",
   exitIsMeasuredByTheCaller:
     "This script cannot time its own exit. tests/tts_hardening_test.ts runs the same shape as a " +
-    "child and fails if it has not exited within 15s; on the pre-fix code that child was killed " +
-    "at 20s (measured).",
+    "child and fails unless it prints both attempt sentinels and exits 0 by itself; its 20s SIGKILL " +
+    "is a hang guard, not an assertion, and there is deliberately no elapsed-time ceiling " +
+    "(audio-feed-1xfvx). On the pre-fix code that child was killed at 20s (measured).",
   mechanism,
   cases: { caseTtsRequest, caseWorkerBatch, caseScriptStage },
   finishedAtMs: Math.round(performance.now()),
