@@ -819,32 +819,40 @@ Deno.test("coverage contract validator accepts a path string only when the code 
  *    references in specialized assertion helpers are omitted to avoid over-selection.
  * 5. Multi-test development utilities (scripts/source-mask.ts, scripts/test-selection.ts): foundational test
  *    tooling exercising-set is wide across the test-selection test family.
+ *
+ * Every reason carries a `secondary:` clause naming, by full test path, exactly the derived exercising suites
+ * that the contract deliberately leaves unmapped (audio-feed-if6w0). That clause is the checkable half of the
+ * rationale: validateRecallExclusionReasons re-derives the exercising set and reds when a named suite stopped
+ * exercising the target, when a new exercising suite is unnamed, and when an exclusion is no longer justified at
+ * all - so an exclusion whose rationale evaporated has to be removed rather than inherited forever. Prose counts
+ * ("9 secondary suites", "5 primary suites") are deliberately gone: they were unverifiable, and the named list
+ * says the same thing in a form the test can check.
  */
 export const RECALL_EXCLUSIONS: Record<string, string> = {
   "src/routes/pwa.ts":
-    "route handler imported by tests/share_target_test.ts in addition to primary suite tests/listen_test.ts",
+    "route handler mapped through its primary suite tests/listen_test.ts; tests/share_target_test.ts imports it for one share-target assertion and is deliberately left unmapped; secondary: tests/share_target_test.ts",
   "src/routes/listen.ts":
-    "core route handler imported by 9 secondary test suites; contract maps primary suite tests/listen_reads_test.ts",
+    "core route handler mapped through its primary suite tests/listen_reads_test.ts; the shared-app UI suites below import it only to have the app shell render and are deliberately left unmapped; secondary: tests/anchor_positioning_test.ts, tests/content_visibility_test.ts, tests/dialog_closedby_test.ts, tests/listen_activity_test.ts, tests/listen_landing_asset_test.ts, tests/listen_read_limit_test.ts, tests/share_test.ts, tests/sticky_scroll_state_test.ts, tests/tokens_test.ts",
   "src/routes/account_api.ts":
-    "route handler imported by tests/auth_login_options_limit_test.ts and tests/lockout_order_test.ts; contract maps primary suite tests/auth_body_cap_test.ts",
+    "route handler mapped through its primary suite tests/auth_body_cap_test.ts; the auth-adjacent suites below import it for their own subject and are deliberately left unmapped; secondary: tests/auth_login_options_limit_test.ts, tests/lockout_order_test.ts",
   "src/assets/listen.js":
-    "shared asset linked by tests/listen_test.ts in addition to the 5 primary mapped suites",
+    "shared asset linked by its mapped feature suites and by tests/listen_test.ts, which renders the app shell rather than the asset's own behaviour, and is deliberately left unmapped; secondary: tests/listen_test.ts",
   "src/assets/listen.css":
-    "shared stylesheet linked across 6 additional UI test suites; contract maps the 5 primary feature suites",
+    "shared stylesheet linked by its mapped feature suites and by the UI suites below, which render the app shell rather than the stylesheet's own behaviour, and are deliberately left unmapped; secondary: tests/assets_test.ts, tests/dialog_closedby_test.ts, tests/select_test.ts, tests/sticky_scroll_state_test.ts, tests/tokens_test.ts, tests/view_transitions_test.ts",
   "scripts/exww-live-claims-browser-proof.ts":
-    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/exww_mutants_verdict_test.ts is an auxiliary checker",
+    "browser proof executed by the mapped harness tests/proof_cdp_test.ts; tests/exww_mutants_verdict_test.ts only reads its verdict and is deliberately left unmapped; secondary: tests/exww_mutants_verdict_test.ts",
   "scripts/landing-tooltip-browser-proof.ts":
-    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/chrome_profile_sweep_sites_test.ts is an auxiliary sweep",
+    "browser proof executed by the mapped harness tests/proof_cdp_test.ts; tests/chrome_profile_sweep_sites_test.ts only names it in a sweep and is deliberately left unmapped; secondary: tests/chrome_profile_sweep_sites_test.ts",
   "scripts/passkey-provider-browser-proof.ts":
-    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/proof_helper_test.ts is an auxiliary harness",
+    "browser proof executed by the mapped harness tests/proof_cdp_test.ts; tests/proof_helper_test.ts only references it from an auxiliary harness and is deliberately left unmapped; secondary: tests/proof_helper_test.ts",
   "scripts/verify_main_l7m1_e2e.ts":
-    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/l7m1_proof_test.ts is an auxiliary unit test",
+    "browser proof executed by the mapped harness tests/proof_cdp_test.ts; tests/l7m1_proof_test.ts only checks its unit-level pieces and is deliberately left unmapped; secondary: tests/l7m1_proof_test.ts",
   "scripts/verify_s3uk_real_browser.ts":
-    "browser proof primarily executed by tests/proof_cdp_test.ts; tests/chrome_profile_sweep_sites_test.ts is an auxiliary sweep",
+    "browser proof executed by the mapped harness tests/proof_cdp_test.ts; tests/chrome_profile_sweep_sites_test.ts only names it in a sweep and is deliberately left unmapped; secondary: tests/chrome_profile_sweep_sites_test.ts",
   "scripts/source-mask.ts":
-    "shared utility imported by 3 secondary suites (chrome_profile_sweep_sites, evidence_census, prompt_census); contract maps dedicated suites",
+    "shared utility imported by the mapped suites tests/source_mask_test.ts and tests/fast_check_test.ts and by the census/sweep suites below, which only read generated masks and are deliberately left unmapped; secondary: tests/chrome_profile_sweep_sites_test.ts, tests/evidence_census_test.ts, tests/prompt_census_test.ts",
   "scripts/test-selection.ts":
-    "test selection core module exercised by 8 specialized relation/scanner test suites; contract maps primary unit/census suites",
+    "test selection core module mapped through its primary suites tests/source_scanner_test.ts and tests/evidence_census_test.ts; the specialised relation/scanner suites below import it to exercise one scanner each and are deliberately left unmapped; secondary: tests/bare_name_relation_test.ts, tests/dynamic_regexp_population_test.ts, tests/evidence_run_test.ts, tests/fast_gate_subset_test.ts, tests/read_relation_hints_test.ts, tests/spawn_relation_test.ts, tests/strip_comments_unterminated_test.ts, tests/verify_script_ledger_test.ts",
 };
 
 /**
@@ -865,6 +873,106 @@ export function deriveExercisingSuitesForTarget(
     }
   }
   return result.sort();
+}
+
+/**
+ * Parses the `secondary:` clause of a recall-exclusion reason (audio-feed-if6w0).
+ *
+ * The clause is the machine-checkable half of the rationale: it names, by full test path, the exercising suites
+ * the contract deliberately leaves unmapped. A reason without it is unverifiable, not merely terse.
+ */
+export function parseRecallSecondarySuites(reason: string): string[] | null {
+  const match = /\bsecondary:\s*([^;]+)\s*$/.exec(reason.trim());
+  if (!match?.[1]) return null;
+  return match[1]
+    .split(",")
+    .map((suite) => suite.trim())
+    .filter((suite) => suite.length > 0);
+}
+
+/** Any full test path named anywhere in a reason's prose, `secondary:` clause included. */
+const RECALL_REASON_TEST_PATH = /\btests\/[A-Za-z0-9_.\-/]+_test\.ts\b/g;
+
+/**
+ * Validates that every recall exclusion's REASON still holds (audio-feed-if6w0).
+ *
+ * The older audit only caught an excluded target leaving the contract. It could not catch an exclusion whose
+ * rationale evaporated - e.g. every suite that used to import src/routes/listen.ts moves on, the exclusion stays,
+ * and a target full recall could now cover is out of the strict set forever. This re-derives the exercising set
+ * per exclusion and reds when:
+ * 1. the reason has no `secondary:` clause, so nothing about it can be checked;
+ * 2. no exercising suite is left unmapped - the exclusion is unjustified and must be removed;
+ * 3. the reason names a suite that does not (or no longer) exercise the target;
+ * 4. an exercising, unmapped suite is not named by the reason.
+ * All four are collected and reported together so one run says everything that drifted.
+ */
+export function validateRecallExclusionReasons(
+  contract: ContractMapping,
+  allSuites: readonly string[],
+  exclusions: Record<string, string> = RECALL_EXCLUSIONS,
+  suiteSources?: Map<string, string>,
+): void {
+  const failures: string[] = [];
+  for (const [target, reason] of Object.entries(exclusions)) {
+    const exercising = deriveExercisingSuitesForTarget(target, allSuites, suiteSources);
+    const mapped = contract[target] ?? [];
+    const derivedSecondary = exercising.filter((suite) => !mapped.includes(suite));
+    const namedSecondary = parseRecallSecondarySuites(reason);
+
+    if (namedSecondary === null) {
+      failures.push(
+        `unverifiable recall exclusion: ${target}'s reason has no "secondary:" clause naming the suites it leaves unmapped, so nothing checks the exclusion is still needed: "${reason}" (audio-feed-if6w0)`,
+      );
+      continue;
+    }
+    if (derivedSecondary.length === 0) {
+      // The strongest form of evaporating rationale: nothing is left unmapped, so the exclusion is dead weight.
+      // The reason's own claims are repeated here so the failure names what stopped exercising it, not just the
+      // target - a bare "remove it" would not say which citation went stale.
+      const vanishedNames = namedSecondary.filter((suite) => !exercising.includes(suite));
+      failures.push(
+        `stale recall exclusion: ${target} is no longer justified - every suite that exercises it (${
+          exercising.join(", ") || "none"
+        }) is already mapped in the contract, so remove it from RECALL_EXCLUSIONS (audio-feed-if6w0)` +
+          (vanishedNames.length > 0
+            ? `; the reason still names ${vanishedNames.join(", ")}, which no longer exercises it`
+            : ""),
+      );
+      continue;
+    }
+
+    const staleNames = namedSecondary.filter((suite) => !exercising.includes(suite));
+    if (staleNames.length > 0) {
+      failures.push(
+        `stale recall exclusion: ${target}'s reason names ${
+          staleNames.join(", ")
+        }, which no longer exercises it (derived exercising suites: ${
+          exercising.join(", ")
+        }) - restate the reason or remove the exclusion (audio-feed-if6w0)`,
+      );
+    }
+    const unnamedSecondary = derivedSecondary.filter((suite) => !namedSecondary.includes(suite));
+    if (unnamedSecondary.length > 0) {
+      failures.push(
+        `incomplete recall exclusion: ${target}'s reason does not name ${
+          unnamedSecondary.join(", ")
+        }, which exercises it and is left unmapped - map it in the contract or name it in the reason (audio-feed-if6w0)`,
+      );
+    }
+    const proseStale = [...reason.matchAll(RECALL_REASON_TEST_PATH)]
+      .map((match) => match[0]!)
+      .filter((suite) => !exercising.includes(suite) && !staleNames.includes(suite));
+    if (proseStale.length > 0) {
+      failures.push(
+        `stale recall exclusion: ${target}'s reason also names ${
+          [...new Set(proseStale)].join(", ")
+        }, which does not exercise it (derived exercising suites: ${
+          exercising.join(", ")
+        }) (audio-feed-if6w0)`,
+      );
+    }
+  }
+  assert(failures.length === 0, failures.join("\n"));
 }
 
 /**
@@ -913,18 +1021,17 @@ Deno.test("coverage-contract.json enforces recall: unexcluded targets map all of
   const allSuites = await discoverFullGateTestFiles(root);
   const suiteSources = await getSuiteSources(allSuites);
 
-  // 1. Audit exclusions: every entry in RECALL_EXCLUSIONS must be a declared target in coverage-contract.json
-  // with a non-empty, actionable justification.
-  for (const [target, reason] of Object.entries(RECALL_EXCLUSIONS)) {
+  // 1. Audit exclusions: every entry in RECALL_EXCLUSIONS must be a declared target in coverage-contract.json.
+  for (const target of Object.keys(RECALL_EXCLUSIONS)) {
     assert(
       target in coverageContract,
       `stale recall exclusion: ${target} is in RECALL_EXCLUSIONS but not in coverage-contract.json`,
     );
-    assert(
-      typeof reason === "string" && reason.trim().length > 0,
-      `recall exclusion for ${target} must provide a non-empty rationale`,
-    );
   }
+
+  // 1b. And every exclusion's REASON must still hold against the exercising sets derived from the tree
+  // (audio-feed-if6w0), not just the target still being in the contract.
+  validateRecallExclusionReasons(coverageContract, allSuites, RECALL_EXCLUSIONS, suiteSources);
 
   // 2. Validate recall across all unexcluded targets in the real contract:
   validateCoverageContractRecall(coverageContract, allSuites, RECALL_EXCLUSIONS, suiteSources);
@@ -940,6 +1047,110 @@ Deno.test("coverage-contract.json enforces recall: unexcluded targets map all of
   assert(
     unexcludedTargets.includes("src/assets/admin.css"),
     "src/assets/admin.css must be subject to automated recall validation",
+  );
+});
+
+Deno.test("recall exclusions are re-checked against the exercising set their reason names (audio-feed-if6w0)", () => {
+  // Synthetic tree so each rule can be falsified without touching the repository's own suites.
+  const suites = ["tests/main_test.ts", "tests/secondary_test.ts"];
+  const exercisingSources = new Map<string, string>([
+    ["tests/main_test.ts", `import { handle } from "../src/x.ts";`],
+    ["tests/secondary_test.ts", `import { handle } from "../src/x.ts";`],
+  ]);
+  const contract: ContractMapping = { "src/x.ts": ["tests/main_test.ts"] };
+  const holdingReason =
+    "core module mapped through its primary suite tests/main_test.ts; tests/secondary_test.ts uses it too and is deliberately left unmapped; secondary: tests/secondary_test.ts";
+
+  // POSITIVE CONTROL: the reason's claims all hold, so nothing throws.
+  validateRecallExclusionReasons(
+    contract,
+    suites,
+    { "src/x.ts": holdingReason },
+    exercisingSources,
+  );
+
+  // NEGATIVE 1: the reason names a suite that does not exercise the target. Before audio-feed-if6w0 this was
+  // accepted - the string was only asserted non-empty - so an exclusion could cite proof that did not exist.
+  assertThrows(
+    () =>
+      validateRecallExclusionReasons(
+        contract,
+        suites,
+        {
+          "src/x.ts": holdingReason.replace(
+            "secondary: tests/secondary_test.ts",
+            "secondary: tests/other_test.ts",
+          ),
+        },
+        exercisingSources,
+      ),
+    AssertionError,
+    "names tests/other_test.ts, which no longer exercises it",
+    "a reason naming a suite that does not exercise the target must be rejected naming it",
+  );
+
+  // NEGATIVE 2: the named secondary suite stops importing the target, so its exercise evaporates. The exclusion
+  // now rests on a reason that is no longer true, which is exactly the drift the bead is about.
+  const evaporatedSources = new Map(exercisingSources);
+  evaporatedSources.set("tests/secondary_test.ts", `import { other } from "../src/y.ts";`);
+  assertThrows(
+    () =>
+      validateRecallExclusionReasons(
+        contract,
+        suites,
+        { "src/x.ts": holdingReason },
+        evaporatedSources,
+      ),
+    AssertionError,
+    "names tests/secondary_test.ts, which no longer exercises it",
+    "a secondary suite that stops importing the target must red the exclusion that cites it",
+  );
+
+  // NEGATIVE 3: a reason with no `secondary:` clause cannot be checked at all, so it is rejected outright.
+  assertThrows(
+    () =>
+      validateRecallExclusionReasons(
+        contract,
+        suites,
+        { "src/x.ts": "shared module imported by several suites" },
+        exercisingSources,
+      ),
+    AssertionError,
+    'unverifiable recall exclusion: src/x.ts\'s reason has no "secondary:" clause',
+    "a reason that names no suites must be rejected as unverifiable",
+  );
+
+  // NEGATIVE 4: every exercising suite is mapped, so the exclusion is not justified at all - it has to be
+  // removed, which is the state the bead says must never persist silently.
+  assertThrows(
+    () =>
+      validateRecallExclusionReasons(
+        { "src/x.ts": ["tests/main_test.ts", "tests/secondary_test.ts"] },
+        suites,
+        { "src/x.ts": holdingReason },
+        exercisingSources,
+      ),
+    AssertionError,
+    "stale recall exclusion: src/x.ts is no longer justified - every suite that exercises it (tests/main_test.ts, tests/secondary_test.ts) is already mapped",
+    "an exclusion whose every exercising suite is mapped must be rejected as stale",
+  );
+
+  // NEGATIVE 5: an exercising, unmapped suite the reason does not name - a new suite importing the target - is
+  // reported too, so the reason cannot silently go out of date as the tree grows.
+  const grownSuites = [...suites, "tests/newcomer_test.ts"];
+  const grownSources = new Map(exercisingSources);
+  grownSources.set("tests/newcomer_test.ts", `import { handle } from "../src/x.ts";`);
+  assertThrows(
+    () =>
+      validateRecallExclusionReasons(
+        contract,
+        grownSuites,
+        { "src/x.ts": holdingReason },
+        grownSources,
+      ),
+    AssertionError,
+    "does not name tests/newcomer_test.ts, which exercises it and is left unmapped",
+    "a new exercising suite must be named by the reason or mapped in the contract",
   );
 });
 
