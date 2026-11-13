@@ -8655,6 +8655,123 @@ Deno.test({
 
 Deno.test({
   name:
+    "proof-helper: a body that THROWS still leaves no generator running, and its own error reaches the caller (audio-feed-alcbm)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  fn: async () => {
+    // THE THIRD EXIT PATH, and the one a real proof takes the moment its assertion fails. The helper
+    // reaps in three situations - the body returns, the generator exits early, the body itself throws
+    // - and the two rows above both have bodies that complete normally. So a helper that reaped only
+    // on the success path stayed green here, which is exactly backwards: a body that throws is the
+    // path that fires when something is WRONG, when a spinning generator is most likely to survive.
+    // Both facts are asserted below, and the pid is checked with this file's own probe, never with
+    // the helper's.
+    const bodyCause = new Error("alcbm: the reason the body threw");
+    let spinnerPid = 0;
+    let runningDuringBody = false;
+
+    // This row's own teardown, in the shape the rule prescribes: the pid it spawned, signalled
+    // directly, then confirmed gone. No pattern, no `pkill` - and it asserts nothing, so it is safe
+    // to run from a `finally` after the row has already failed.
+    const killPidAndWait = async (pid: number): Promise<void> => {
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch {
+        return; // already gone
+      }
+      const deadline = Date.now() + 5_000;
+      while (pidStillRuns(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+
+    const error = await assertRejects(
+      () =>
+        withOwnedWorkload(
+          {
+            label: "alcbm spinner whose body throws (CPU)",
+            binary: "sh",
+            args: ["-c", "while :; do :; done"],
+          },
+          ({ pid }) => {
+            spinnerPid = pid;
+            runningDuringBody = pidStillRuns(pid);
+            throw new Error("alcbm: the body failed on purpose", { cause: bodyCause });
+          },
+        ),
+      Error,
+      "the body failed on purpose",
+    );
+    try {
+      assert(spinnerPid > 0, "the body ran, so the helper owned a pid");
+      assertEquals(
+        runningDuringBody,
+        true,
+        `the spinner (pid ${spinnerPid}) must be RUNNING while the body throws, or this row proves nothing`,
+      );
+      // (a) THE BODY'S ERROR IS NOT SWALLOWED. A helper that swallowed it would replace the caller's
+      // real failure with silence - or with a leak error about a generator that is fine - and the
+      // proof that just failed would read as a different failure than the one it hit.
+      assert(
+        !(error instanceof WorkloadNotReapedError),
+        `the body's error must reach the caller, not be replaced by a leak error: ${error.message}`,
+      );
+      assertEquals(
+        (error as Error).cause,
+        bodyCause,
+        "the body's own cause must survive the reap unchanged - the helper neither drops nor rewraps it",
+      );
+      // (b) THE GENERATOR IS GONE. This is the assertion the missing reap reds on, naming the pid
+      // that is still answering.
+      assertEquals(
+        pidStillRuns(spinnerPid),
+        false,
+        `withOwnedWorkload threw for a failing body while pid ${spinnerPid} still answered: the ` +
+          `generator outlived the body that failed, which is the leak this helper exists to prevent`,
+      );
+    } finally {
+      // A helper that SKIPS this reap (the mutant this row exists to red) must not leak the very
+      // spinner the row just proved it leaked.
+      await killPidAndWait(spinnerPid);
+    }
+
+    // THE DOCUMENTED cause direction, pinned where it is actually true: when the reap itself fails on
+    // a body that threw, the leak is the error that surfaces and the body's failure rides along as
+    // its cause (scripts/proof-helper.ts, the `catch (reapError)` branch). Note what is NOT asserted
+    // above: on the successful-reap path the helper rethrows the body's error AS ITSELF, so its
+    // `cause` is whatever the body set - it is not wrapped in a second error carrying the body error.
+    let leakPid = 0;
+    const bodyError = new Error("alcbm: the body failed while the kill was broken");
+    const leakError = await assertRejects(
+      () =>
+        withOwnedWorkload(
+          {
+            label: "alcbm unkillable spinner whose body throws (CPU)",
+            binary: "sh",
+            args: ["-c", "while :; do :; done"],
+          },
+          ({ pid }) => {
+            leakPid = pid;
+            throw bodyError;
+          },
+          { kill: () => {}, reapTimeoutMs: 300, reapPollMs: 20 },
+        ),
+      WorkloadNotReapedError,
+    );
+    try {
+      assertStringIncludes(leakError.message, `pid ${leakPid}`);
+      assertEquals(
+        leakError.cause,
+        bodyError,
+        "the leak is the error that surfaces, and the body's failure must ride along as its cause",
+      );
+    } finally {
+      await killPidAndWait(leakPid);
+    }
+  },
+});
+
+Deno.test({
+  name:
     "proof-helper: a generator that survives its kill REDS by name instead of being left behind (audio-feed-phicq)",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   fn: async () => {
