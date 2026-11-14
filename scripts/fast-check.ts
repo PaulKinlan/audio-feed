@@ -1139,6 +1139,83 @@ export function planForFailedRelation(failure: string): { testFiles: null; reaso
   return { testFiles: null, reason: `the data read relation could not be derived (${failure})` };
 }
 
+/** The coverage contract as the selector reads it: changed path -> the suites DECLARED to cover it. */
+export type DeclaredCoverage = Map<string, string[]>;
+
+/**
+ * THE DECLARED COVERAGE CHANNEL (audio-feed-lnto8): `.fleet/coverage-contract.json` entries for the files that
+ * actually changed.
+ *
+ * WHY THE SELECTOR HAS TO READ IT. The contract is the mapping the fleet's coverage reporter uses to decide
+ * whether a changed path was placed by the run: it takes the entry's suites as the CANDIDATES for that path and
+ * reports the path "unmapped" when none of them executed. The selector used to ignore the same file entirely, so
+ * for a standalone `scripts/*-browser-proof.ts` — nothing imports it, so the import graph selects nothing, and the
+ * suites that merely read it as data (census, script ledger) are not its mapped suite — the gate ran a plan that
+ * could never satisfy the entry. Every change to one of those proofs therefore produced a green run with a
+ * standing `COVERAGE WARNING: N unmapped changed file(s)`, which is a warning nobody reads by the time it matters.
+ *
+ * A DECLARATION THE GATE DOES NOT HONOUR IS NOT COVERAGE, and the fix is to run the suite the contract names
+ * rather than to quiet the reporter: `tests/proof_cdp_test.ts` genuinely exercises those proofs (it reads each
+ * one's source and asserts its CDP reply bound), which is what tests/contracts_test.ts already re-derives for
+ * every entry. An entry is therefore checkable in both directions — tests/fast_check_test.ts reds when a declared
+ * suite stops being selected, and an entry the plan never reaches can only exist while this channel is broken.
+ *
+ * WHAT IT DOES NOT COVER: a key with a glob (`src/storage/kv/**`) is a directory declaration and is matched
+ * exactly here, so it declares nothing for a single file under it — the derived relations already select those
+ * suites, and a glob key never names one path. A path with no entry stays undeclared, so a FIFTH manual proof
+ * dropped into `scripts/` still warns: this channel adds coverage, it never silences the absence of it.
+ */
+export function declaredCoverageFor(
+  changed: readonly string[],
+  contract: Readonly<Record<string, readonly string[]>>,
+): DeclaredCoverage {
+  const declared: DeclaredCoverage = new Map();
+  for (const file of changed) {
+    const suites = contract[file];
+    if (suites?.length) declared.set(file, [...suites]);
+  }
+  return declared;
+}
+
+/**
+ * The suites a DECLARED entry names that the plan already selects WITHOUT it (audio-feed-lnto8).
+ *
+ * The mirror of audio-feed-if6w0's stale-exclusion rule, and the same lesson: a declaration whose rationale has
+ * evaporated must be removed rather than inherited. When a target is already selected by the derived relations,
+ * an entry for it changes nothing about what the gate runs, so the entry is a claim about a gap that is not there.
+ * `selectedWithout` is `null` for a FULL plan, which selects everything and so makes no declaration redundant.
+ */
+export function redundantDeclaredSuites(
+  mapped: readonly string[],
+  selectedWithout: readonly string[] | null,
+): string[] {
+  if (selectedWithout === null) return [];
+  const selected = new Set(selectedWithout);
+  return mapped.filter((suite) => selected.has(suite));
+}
+
+/**
+ * The declared coverage for one change set, read from the repository's coverage contract.
+ *
+ * A contract that is absent or unparseable declares NOTHING, which is the pre-audio-feed-lnto8 behaviour: the run
+ * then reports those paths unmapped, loudly, rather than pretending a mapping it could not read. The file's own
+ * validity is asserted by tests/contracts_test.ts, so a broken contract is a red suite, not a quiet gate.
+ */
+export async function loadDeclaredCoverage(
+  root: string = ROOT,
+  changed: readonly string[] = [],
+): Promise<DeclaredCoverage> {
+  const text = await Deno.readTextFile(`${root}.fleet/coverage-contract.json`).catch(() => null);
+  if (text === null) return new Map();
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return declaredCoverageFor(changed, parsed as Record<string, readonly string[]>);
+  } catch {
+    return new Map();
+  }
+}
+
 export function planTests(
   changed: string[],
   reverse: Map<string, string[]>,
@@ -1147,6 +1224,7 @@ export function planTests(
   configPaths: readonly string[] = [],
   unresolvedReads: readonly string[] = [],
   computedImportSuites: readonly string[] = [],
+  declared: DeclaredCoverage = new Map(),
 ): { testFiles: string[] | null; reason: string } {
   // The family list is a NET; the DERIVED set of config files the resolver actually reads (configPaths) is
   // what keeps it honest - a resolver input the family does not name still forces the full suite.
@@ -1161,6 +1239,9 @@ export function planTests(
   }
 
   const codeChanged = changed.filter((f) => f.endsWith(".ts"));
+
+  /** Every suite the coverage contract declares for a changed file (audio-feed-lnto8), for both branches below. */
+  const declaredSuites = [...new Set([...declared.values()].flat())].sort();
 
   // audio-feed-40ch FOUND THIS BY MEASURING THE PLANNER RATHER THAN THE RELATION: a guard here used to return
   // the FULL suite for every non-.ts file under src/ or tests/ BEFORE the relation below was consulted, which
@@ -1181,12 +1262,16 @@ export function planTests(
   // whatever it looks like (audio-feed-38sn), and inertContradictions() below makes an inversion of that
   // order a NAMED failure instead of a silent empty selection.
   const data = classifyNonTsChanges(changed, readRelations);
-  if (data.unclassified.length) {
+  // A DECLARED entry is a reader too (audio-feed-lnto8): the contract maps a non-TypeScript path to a suite that
+  // genuinely exercises it (a `.sh` fixture its suite spawns), and that is exactly the fact "no derived reader"
+  // was asserting the absence of. Without this the unclassified fallback widened before the declaration was read.
+  const unclassifiedData = data.unclassified.filter((f) => !declared.get(f)?.length);
+  if (unclassifiedData.length) {
     return {
       testFiles: null,
       reason:
         `non-TypeScript file(s) with no derived reader (nothing is declared unread, so an unread path always runs the FULL suite): ${
-          data.unclassified.join(", ")
+          unclassifiedData.join(", ")
         }`,
     };
   }
@@ -1201,8 +1286,11 @@ export function planTests(
   // tests/ starts transitively through other helpers - and the relation, never widened by class.)
 
   if (!codeChanged.length) {
-    if (data.suites.length) {
-      const selected = new Set(data.suites);
+    if (data.suites.length || declaredSuites.length) {
+      // The declared channel rides alongside the derived data readers (audio-feed-lnto8): a contract entry for a
+      // non-TypeScript path is a mapping the fleet reporter judges the run against, so the plan has to run it here
+      // too - a `.sh` fixture's entry was unreachable from the code branch and would have warned forever.
+      const selected = new Set([...data.suites, ...declaredSuites]);
       if (changed.some((f) => f.startsWith("tests/"))) {
         selected.add("tests/fast_gate_subset_test.ts");
       }
@@ -1277,6 +1365,11 @@ export function planTests(
   for (const file of codeChanged) {
     for (const suite of suitesObserving(file, readRelations)) tests.add(suite);
   }
+  // THE THIRD CHANNEL: THE COVERAGE CONTRACT'S OWN DECLARATION (audio-feed-lnto8). The fleet reporter takes an
+  // entry's suites as the candidates for that path and calls the path unmapped when none of them ran, so a gate
+  // that ignores the entry can never clear it. Reading it here is what makes the entry a mapping the gate
+  // HONOURS rather than a claim about the reporter; see declaredCoverageFor for why those proofs needed it.
+  for (const suite of declaredSuites) tests.add(suite);
 
   // audio-feed-x4kc: Any change under tests/ can alter what a suite reads (or change test assertions/invariants
   // that relation-policing suites depend on) without touching scripts/test-selection.ts.
@@ -1329,13 +1422,19 @@ export function planTests(
   // the scanners anyway, so sru1b's scanners run either way - selection was never the thing at
   // stake here. Non-TypeScript data is the deliberate exception (audio-feed-a5n0q, coord ruling):
   // classifyNonTsChanges keeps the prefix match because a tree scanner genuinely text-reads data.
+  // A declared entry answers "is this source file reached?" as well: the contract's suite genuinely exercises the
+  // target (re-derived by tests/contracts_test.ts), so a path with a declaration is not uncovered even when the
+  // import graph sees nothing — which is exactly the standalone-proof case (audio-feed-lnto8).
   const stillUncovered = uncovered.filter((f) =>
-    !named.get(f)?.length && !suitesObservingExact(f, readRelations).length
+    !named.get(f)?.length && !suitesObservingExact(f, readRelations).length &&
+    !declared.get(f)?.length
   );
   if (stillUncovered.length) {
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
   }
   const dataNote = data.suites.length ? ` + data: ${data.suites.join(", ")}` : "";
+  const declaredFiles = [...declared.keys()].filter((f) => declared.get(f)!.length);
+  const declaredNote = declaredFiles.length ? ` + declared: ${declaredFiles.join(", ")}` : "";
 
   // Condition 2 again, for the case that reaches here: a changed .ts file the graph cannot connect to any
   // suite (a standalone scripts/ module nothing imports) selects nothing. The old carve-out treated that
@@ -1352,7 +1451,7 @@ export function planTests(
   }
   return {
     testFiles: [...tests].sort(),
-    reason: `affected by: ${codeChanged.join(", ")}${dataNote}${computedImportNote}`,
+    reason: `affected by: ${codeChanged.join(", ")}${dataNote}${declaredNote}${computedImportNote}`,
   };
 }
 
@@ -1603,6 +1702,9 @@ ${auditUniverseDrift}`);
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
+    // The declared coverage for THIS change set (audio-feed-lnto8): read here so the plan can honour the same
+    // entries the fleet's coverage reporter judges the run against.
+    const declared = await loadDeclaredCoverage(ROOT, changed);
     plan = planTests(
       changed,
       reverse,
@@ -1611,6 +1713,7 @@ ${auditUniverseDrift}`);
       resolverInputs,
       inertBlockingReads,
       relationReport.computedImportSuites,
+      declared,
     );
   }
   const { testFiles, reason } = plan;

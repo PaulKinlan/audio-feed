@@ -17,6 +17,7 @@ import { blankCommentsOnly, maskNonCode } from "../scripts/source-mask.ts";
 import {
   allTestFiles,
   changedFiles,
+  declaredCoverageFor,
   detectStaleRun,
   extractFailingTests,
   failureMarkers,
@@ -31,6 +32,7 @@ import {
   planTests,
   PROCESS_GLOBAL_SUITES,
   reachableTests,
+  redundantDeclaredSuites,
   reverseGraph,
   run,
   splitProcessGlobalSuites,
@@ -1203,6 +1205,128 @@ Deno.test("planTests: a tests/ helper selects its OBSERVERS, not the FULL suite 
   const unobserved = planTests(["tests/helpers/orphan.ts"], new Map(), NO_NAMED);
   assertEquals(unobserved.testFiles, null);
   assert(unobserved.reason.includes("no test reaches"), unobserved.reason);
+});
+
+Deno.test("planTests: a DECLARED coverage entry selects its suite for a proof nothing imports (audio-feed-lnto8)", () => {
+  // THE BEAD'S REPRO. scripts/landing-tooltip-browser-proof.ts is a manual-only browser proof: nothing imports
+  // it, so the import graph selects nothing, and the only suites the derived relation names are the ones that
+  // READ the script as data (census, script ledger). .fleet/coverage-contract.json maps it to
+  // tests/proof_cdp_test.ts - the suite that reads its source and asserts its CDP reply bound - and the fleet's
+  // coverage reporter takes that entry as the candidate list, so a gate that never runs proof_cdp_test.ts can
+  // never place the file: a green run with a standing "COVERAGE WARNING: N unmapped changed file(s)".
+  const proof = "scripts/landing-tooltip-browser-proof.ts";
+  const readers = new Map([[proof, ["tests/evidence_census_test.ts"]]]);
+  const contract = { [proof]: ["tests/proof_cdp_test.ts"] };
+
+  // WITHOUT the declaration: the data readers only. This is the mutant the channel has to survive - the
+  // reporter's mapped suite is absent, which is precisely the standing warning.
+  const undeclared = planTests([proof], new Map(), NO_NAMED, readers);
+  assertEquals(undeclared.testFiles, ["tests/evidence_census_test.ts"]);
+  assert(
+    !undeclared.testFiles!.includes("tests/proof_cdp_test.ts"),
+    "the mutant must NOT select the declared suite, or the next row proves nothing",
+  );
+
+  // WITH the declaration: the contract's suite joins the plan, and the plan says why.
+  const declared = planTests(
+    [proof],
+    new Map(),
+    NO_NAMED,
+    readers,
+    [],
+    [],
+    [],
+    declaredCoverageFor([proof], contract),
+  );
+  assertEquals(declared.testFiles, ["tests/evidence_census_test.ts", "tests/proof_cdp_test.ts"]);
+  assert(declared.reason.includes(`+ declared: ${proof}`), declared.reason);
+
+  // A path with NO entry stays undeclared: a fifth manual proof dropped into scripts/ still selects only its
+  // data readers, so its change still reaches the reporter's unmapped warning.
+  const undeclaredProof = "scripts/fifth-manual-proof.ts";
+  assertEquals(
+    planTests(
+      [undeclaredProof],
+      new Map(),
+      NO_NAMED,
+      new Map([
+        [undeclaredProof, ["tests/evidence_census_test.ts"]],
+      ]),
+    ).testFiles,
+    ["tests/evidence_census_test.ts"],
+    "an entryless path must not acquire coverage from a neighbour's declaration",
+  );
+});
+
+Deno.test("planTests: a declared coverage entry also places a NON-TypeScript path (audio-feed-lnto8)", () => {
+  // The data branch returns early, and it used to consult only the derived data readers. A `.sh` fixture or a
+  // baselined PNG with a contract entry was therefore unplaceable by the code channel AND by this one - the
+  // same standing warning, in a branch the declaration never reached.
+  const fixture = "tests/fixtures/fake_chrome.sh";
+  const declared = declaredCoverageFor([fixture], { [fixture]: ["tests/proof_helper_test.ts"] });
+  assertEquals(
+    planTests([fixture], new Map(), NO_NAMED, new Map(), [], [], [], declared).testFiles,
+    ["tests/fast_gate_subset_test.ts", "tests/proof_helper_test.ts"],
+  );
+});
+
+Deno.test("planTests: a declaration the plan already selects is REDUNDANT, and names itself (audio-feed-lnto8)", () => {
+  // The if6w0 shape applied to a declared mapping: an entry whose rationale has evaporated must be removed, not
+  // inherited. scripts/proof-latency-budgets.ts is imported by tests/proof_cdp_test.ts, so the graph selects that
+  // suite already - declaring it changes nothing about what the gate runs and claims a gap that is not there.
+  const imported = "scripts/proof-latency-budgets.ts";
+  const graph = new Map([[imported, ["tests/proof_cdp_test.ts"]]]);
+  const declared = declaredCoverageFor([imported], { [imported]: ["tests/proof_cdp_test.ts"] });
+  const withDeclaration = planTests([imported], graph, NO_NAMED, new Map(), [], [], [], declared);
+  const withoutDeclaration = planTests([imported], graph, NO_NAMED);
+
+  assertEquals(
+    withDeclaration.testFiles,
+    withoutDeclaration.testFiles,
+    "the entry selects nothing new",
+  );
+  assertEquals(
+    redundantDeclaredSuites(["tests/proof_cdp_test.ts"], withoutDeclaration.testFiles),
+    ["tests/proof_cdp_test.ts"],
+  );
+  // A FULL plan selects everything, so it cannot make a declaration redundant - the rule must not fire there.
+  assertEquals(redundantDeclaredSuites(["tests/proof_cdp_test.ts"], null), []);
+});
+
+Deno.test("audio-feed-lnto8: every coverage-contract entry's suites are selected for a change to its target", () => {
+  // The declared-and-checked half. The contract is the fleet reporter's candidate list; if the plan stops
+  // honouring an entry, the entry becomes a claim the gate cannot satisfy and the path warns forever. Empty
+  // graphs on purpose: this asks only whether the DECLARATION reaches the plan, so it reds when the channel is
+  // removed and when an entry names a suite the fast gate can never select - not on the size of the closure.
+  const contract = JSON.parse(
+    Deno.readTextFileSync(new URL("../.fleet/coverage-contract.json", import.meta.url)),
+  ) as Record<string, string[]>;
+  assert(Object.keys(contract).length > 0, "the coverage contract must not be empty");
+  const failures: string[] = [];
+  for (const [target, suites] of Object.entries(contract)) {
+    if (!target.endsWith(".ts")) continue; // the data branch is pinned by the row above
+    const plan = planTests(
+      [target],
+      new Map(),
+      NO_NAMED,
+      new Map(),
+      [],
+      [],
+      [],
+      declaredCoverageFor([target], contract),
+    );
+    const selected = new Set(plan.testFiles ?? []);
+    for (const suite of suites) {
+      if (!selected.has(suite)) {
+        failures.push(`${target} declares ${suite}, which the plan did not select`);
+      }
+    }
+  }
+  assertEquals(
+    failures,
+    [],
+    "a coverage-contract entry whose suite the fast gate never selects is a standing COVERAGE WARNING",
+  );
 });
 
 Deno.test("planTests: docs-only runs nothing; an EMPTY change set runs the full suite (es8y)", () => {
