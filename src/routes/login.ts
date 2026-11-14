@@ -13,7 +13,13 @@ import type { RouteContext } from "../router.ts";
 import { sessionUser } from "../auth/sessions.ts";
 import { jsonForScript } from "./html.ts";
 import { esc } from "./html.ts";
-import { PASSKEY_CLIENT, renderShell, type Viewer, viewerOf } from "./shell.ts";
+import {
+  PASSKEY_CLIENT,
+  renderShell,
+  SAME_ORIGIN_PATH_CLIENT,
+  type Viewer,
+  viewerOf,
+} from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 
 /**
@@ -126,6 +132,7 @@ export function renderLoginPage(o: { viewer: Viewer | null; next: string; nonce:
   const script = `(() => {
   "use strict";
   const NEXT = ${jsonForScript(o.next)};
+${SAME_ORIGIN_PATH_CLIENT}
 ${PASSKEY_CLIENT}
   const $ = (id) => document.getElementById(id);
   const say = (el, tone, text) => { el.dataset.tone = tone; el.textContent = text; };

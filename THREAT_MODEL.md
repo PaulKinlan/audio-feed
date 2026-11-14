@@ -711,7 +711,7 @@ its concrete code anchor, and the exact command to verify the claim.
 | 3 | Service Worker shell cache prefix refuse list (`SENSITIVE_PREFIXES`) | `SENSITIVE_PREFIXES` is a static constant in worker source code acting as an admission refuse guard in `/sw.js` to exclude capability and authenticated routes from `audio-feed-shell-v2`; it is not mutable database state or user-controlled configuration. | `SENSITIVE_PREFIXES` in `src/routes/pwa.ts` — its definition, its injection into the `/sw.js` template, and the admission check | `grep -n -C 1 'SENSITIVE_PREFIXES' src/routes/pwa.ts` (confirms definition array, `/sw.js` template injection, and cache admission check) |
 | 4 | Keyword and pattern hits on documentation, comments, and audit records | Text occurrences of security terminology (e.g. CSRF, SSRF, XSS, tokens, exploits) in markdown files (`docs/`, `THREAT_MODEL.md`, `README.md`) and code comments are architectural documentation, threat model definitions, and audit explanations, not executable runtime code or exposed endpoints. | `docs/**`, `*.md`, and the JSDoc block above `SENSITIVE_PREFIXES` in `src/routes/pwa.ts` | `git ls-files 'docs/**' '*.md' | grep -vE '\.(ts|js)$'` (confirms documentation files are non-executable text) and `grep -n -B 17 'export const SENSITIVE_PREFIXES' src/routes/pwa.ts` (confirms the cited code hit is inside a JSDoc block comment) |
 | 5 | Static literal regular expression execution on length-bounded inputs (`RegExp.prototype.exec`, `RegExp.prototype.test`, `String.prototype.match`, `matchAll`) | Regular expressions across routing, key parsing, HTTP headers, rate limiting, and synthesis chunking execute static literal patterns without nested quantifiers over short, length-bounded inputs (URL paths, HTTP headers, XML tags from S3, IP addresses, bounded text chunks, model output). The regex execution class is NOT safe by construction: complex multi-line patterns like markdown code block extraction in `src/tts/gemini.ts` exhibited quadratic complexity under measurement and were replaced with a bounded hand-written scanner (`tests/c0gj_linear_complexity_test.ts`). | Whole runtime (`src/`, `main.ts`) | `grep -rnE '\.(exec|match|matchAll)\(' src/ main.ts` (36 matches at `34ae917d`, verified 2026-11-10; 25 static literal regex executions across 14 files, 9 Cache/Client/Storage calls, 2 URLPattern exec calls; 11 regex execution sites sit outside original 7 sampled anchors, 0 unanchored quadratic patterns) |
-| 6 | Client-side browser `fetch()` invocations in frontend scripts — the modules under `src/assets/` and the inline scripts embedded in route modules | Every browser-side `fetch()` call in the frontend enumerates to one of: a same-origin `/api/...` path literal, a `/api/...` literal prefix concatenated with `encodeURIComponent()` segments, `ORIGIN + ...` (the origin the page was rendered with), or a capability audio URL this server minted (`episode.audioUrl`). Three wrappers forward a CALLER-supplied path into `fetch()` — `api(path, options)` in `src/assets/admin.js`, `send(method, path, body)` in `src/routes/account.ts` and `post(path, body)` in `PASSKEY_CLIENT` (`src/routes/shell.ts`) — so the guarantee is a property of their call sites, not of the wrapper signatures; the row 6 note below states the constraint those call sites satisfy today. | The 9 `fetch(` call sites in `src/assets/admin.js`, `home.js`, `cwv.js`, `listen.js` (3), `src/routes/account.ts` (2) and `src/routes/shell.ts` — enumerated by the command in the next column | `grep -rn 'fetch(' src/assets/ src/routes/ --exclude=pwa.ts` (15 hits at `07d8e60a`, verified 2026-11-10: 9 `fetch()` call sites — 6 in `src/assets/`, 3 inline in `src/routes/account.ts` and `src/routes/shell.ts` — plus 6 comment lines; the 4 `fetch(request)` service-worker passthroughs in `src/routes/pwa.ts` are row 7). **This command is `fetch(`-scoped: it enumerates the three wrapper DEFINITIONS above, not their call sites, so it cannot establish a call-site count — use the four-step method in "Register row 6 in detail" below.** |
+| 6 | Client-side browser `fetch()` invocations in frontend scripts — the modules under `src/assets/` and the inline scripts embedded in route modules | Every browser-side `fetch()` call in the frontend enumerates to one of: a same-origin `/api/...` path literal, a `/api/...` literal prefix concatenated with `encodeURIComponent()` segments, `ORIGIN + ...` (the origin the page was rendered with), or a capability audio URL this server minted (`episode.audioUrl`). Three wrappers forward a CALLER-supplied path into `fetch()` — `api(path, options)` in `src/assets/admin.js`, `send(method, path, body)` in `src/routes/account.ts` and `post(path, body)` in `PASSKEY_CLIENT` (`src/routes/shell.ts`) — and since audio-feed-fg18i all three run that path through `assertSameOriginPath()` (`src/assets/same-origin-path.js`), which THROWS unless the path is a single-slash same-origin route: the constraint is enforced by the wrapper, not by the discipline of its call sites. `tests/same_origin_path_test.ts` derives the wrapper population and every call site from source and reds by file and line on a path literal that escapes. The row 6 note below states both halves and what remains. | The 9 `fetch(` call sites in `src/assets/admin.js`, `home.js`, `cwv.js`, `listen.js` (3), `src/routes/account.ts` (2) and `src/routes/shell.ts` — enumerated by the command in the next column — plus the guard those three wrappers call, `assertSameOriginPath` in `src/assets/same-origin-path.js`, composed in front of `admin.js` by `src/routes/assets.ts` and inlined on the login and account pages as `SAME_ORIGIN_PATH_CLIENT` (`src/routes/shell.ts`) | `grep -rn 'fetch(' src/assets/ src/routes/ --exclude=pwa.ts` (15 hits at `07d8e60a`, verified 2026-11-10: 9 `fetch()` call sites — 6 in `src/assets/`, 3 inline in `src/routes/account.ts` and `src/routes/shell.ts` — plus 6 comment lines; the 4 `fetch(request)` service-worker passthroughs in `src/routes/pwa.ts` are row 7). **This command is `fetch(`-scoped: it enumerates the three wrapper DEFINITIONS above, not their call sites, so it cannot establish a call-site count — use the four-step method in "Register row 6 in detail" below.** The call sites and the guard are checked by `tests/same_origin_path_test.ts` ("audio-feed-fg18i: every derived wrapper call site passes a single-slash same-origin path"), which derives them from source: 3 wrappers, 40 call sites at `fleet/fetch-path`. |
 | 7 | Service Worker fetch event listener request passthroughs | The service worker's `fetch` handler uses `fetch(request)` as a standard passthrough for un-cached network requests, navigation requests, and network-first strategies; it does not redirect requests to third-party hosts or bypass security headers. | The 4 `fetch(request)` passthroughs in `boundOfflineAudio`, `src/routes/pwa.ts` — enumerated by the command in the next column | `grep -n 'fetch(request)' src/routes/pwa.ts` (verifies all 4 fetch handlers pass through un-cached requests to origin) |
 | 8 | Outbound S3/R2 client storage requests with path-shaped object keys | Storage operations target operator-configured endpoints (`#config.endpoint`) and enforce `assertSafeBlobKey(key)` prior to URL construction and SigV4 signing, preventing path traversal, dot segments (`..`), empty segments, or prefix escapes. | `#encodeKey` and `#objectUrl` on `S3BlobStore` (`src/storage/s3.ts`), and `assertSafeBlobKey` (`src/storage/blob_key.ts`) | `grep -n -C 2 'assertSafeBlobKey' src/storage/s3.ts src/storage/blob_key.ts` (confirms validation is executed in `#encodeKey` before `#objectUrl` builds request) |
 | 9 | Offline evidence capture scripts and artifacts under `docs/evidence/**` | Artifacts under `docs/evidence/` are offline proof outputs (run records, PNG screenshots) committed for build and verification evidence; they are never mounted as static routes or served by the application HTTP server. | Offline directory `docs/evidence/**` | `grep -rn 'docs/evidence' src/ main.ts` (0 matches at `6ca30737`, verified 2026-11-09; confirms path is never referenced in server routing or static serving) |
@@ -757,7 +757,8 @@ so it enumerates the three wrapper DEFINITIONS, not their call sites, and cannot
 call-site count — a reader who runs only the row re-derives "0 `post(` sites". Use the four steps
 above; the row's check cell says so too.
 
-Because the helpers accept any string, the guarantee row 6 records is a constraint on the CALL SITES:
+Until audio-feed-fg18i the helpers accepted any string, so the guarantee row 6 recorded was a
+constraint on the CALL SITES:
 **a path argument must be a same-origin string that begins with a single `/` — `//host/...` or a
 scheme is a protocol-relative or absolute URL to another host and must never appear — and no part of
 it may come from an attacker- or operator-supplied host.** What the row's enumeration actually shows
@@ -801,12 +802,69 @@ omitting all 11 `post(` sites):
   `fetch("/api/upload")`, two `ORIGIN + "/listen/..."` calls (`ORIGIN` is the origin the page was
   rendered with), and `fetch(episode.audioUrl)` (a capability URL this server minted).
 
-Residual, stated rather than softened: nothing enforces that constraint today, and the 11 `post(`
-sites are the sharpest evidence of it — they went uncounted in this very note until `a0f55db1`. No
-test inspects these call sites, so a future caller passing a server- or user-influenced absolute URL
-would issue that request from the page — `fetch()` defaults to `credentials: "same-origin"`, so
-cookies would not ride along, but the request, including whatever the caller put in its path or body,
-would reach that origin, and this register would still be citing an enumeration that cannot see the
-defect. Closing it needs enforcement in `src/` — a typed union of literal route strings on the three
-helpers, or a test asserting every `api(`/`send(`/`post(` path argument starts with a single `/` —
-not another edit to this file.
+**Enforcement (audio-feed-fg18i) — the constraint above is checked now, in two halves.**
+
+`assertSameOriginPath()` in `src/assets/same-origin-path.js` is the single canonical guard, and all
+three helpers run the caller's path through it before `fetch()` sees it:
+
+    fetch(assertSameOriginPath(path), { ... })
+
+It refuses anything that is not a same-origin absolute route: a non-string; a path not starting with
+`/` (`x`, `../x` — relative to the page); a path starting with `//` (a network-path reference to
+another host); and any path containing a backslash, a C0 control character or DEL. The last two are
+the ones a naive guard misses: the URL parser treats `\` as a path separator for http(s) and DELETES tabs and
+newlines anywhere in a URL, so `/\evil.example/x` and `/<TAB>/evil.example/x` are both spellings of
+`//evil.example/x` that survive a guard which only tests `startsWith("/")` and `startsWith("//")`.
+The guard is composed in front of `src/assets/admin.js` by `src/routes/assets.ts` (the console module
+binds to it through `globalThis`, the same contract as `askConfirm`) and inlined on the login and
+account pages as `SAME_ORIGIN_PATH_CLIENT` (`src/routes/shell.ts`), so all three helpers run these
+same bytes.
+
+`tests/same_origin_path_test.ts` is the static half, derived rather than listed:
+
+- a WRAPPER is a function declaration whose parameter list binds `path` and whose body forwards it to
+  `fetch()` — the shape that makes the request, not a hand-kept list of three names. Renaming or
+  removing one reds the population row; a fourth wrapper is admitted only after it is wired through
+  the guard. The `path` argument's POSITION is read from the declaration (`send(method, path, body)`
+  is position 1), so it is not a constant either.
+- a wrapper's CALL SITES are the files that can see it: its own file, plus — for a helper declared
+  inside a template literal assigned to an exported constant — every file that interpolates
+  `${THAT_CONST}` into its own script. That is what makes the 11 `post(` sites in `login.ts` and
+  `account.ts` findable at all; nothing is hand-listed, and a page that starts splicing the helper
+  is covered without editing the test.
+- each call site's path argument must begin with a string literal that is a single-slash same-origin
+  route (the guard's rule, applied earlier and with file:line in the failure), or be wrapped in
+  `assertSameOriginPath(...)`. Prose that mentions a helper name (`" post(s) queued"`) is not a call.
+- one whole-tree row covers the shape the derivation cannot see: no `fetch()` in `src/` may take the
+  bare identifier `path`, which is what an arrow-function wrapper (`const api = (path) => fetch(path)`)
+  would leave behind.
+
+The population this derives at `fleet/fetch-path` is 3 wrappers and **40 call sites — 16 `api(`,
+13 `send(`, 11 `post(`**, the same 40 enumerated by hand at `a0f55db1`; the suite floors the count at
+40 so a scan that silently stopped finding the population cannot pass. A mutant that added
+`send("GET", "//evil.example/x")` to `src/routes/account.ts` reddened the row with
+`src/routes/account.ts:561 — send("GET", "//evil.example/x") — the path literal "//evil.example/x" is
+not a single-slash same-origin route, so fetch() would resolve it off this origin`.
+
+What that enforcement does NOT buy, stated rather than softened:
+
+- **It is a runtime check, not a build-time one.** The typed union the first revision of this
+  paragraph offered as option one is not available here, and that is a fact about where this code
+  lives, not a preference: two of the three helpers are declared INSIDE template literals
+  (`src/routes/account.ts`'s inline script, `PASSKEY_CLIENT`) and the third is a `.js` asset served
+  as text, so no TypeScript compiler sees any of them and a union type would have been checked at
+  zero of the 40 real call sites. The escaping call therefore throws when it RUNS. The derived test
+  is the early warning, and it reads literal and guard-wrapped arguments only: a call site that
+  computes its path some other way is covered at runtime by the guard, not statically.
+- **The guard is on the three wrappers.** A page that writes `fetch(someVariable)` directly is not
+  covered by it — the whole-tree row above only forbids the forwarded-parameter shape, `fetch(path)`.
+  Every direct `fetch()` on these pages currently passes a literal (`/api/upload`, `/api/request-access`,
+  `/api/cwv`, `ORIGIN + …`, `episode.audioUrl`), and that remains a property of those call sites.
+- **Origin equality is established by shape, not by comparison.** The guard does not build a URL and
+  compare its origin with `location.origin`; it refuses the shapes (`//`, `\`, control characters,
+  missing leading `/`) that make resolution leave the origin. A path that passes it is absolute on
+  this origin by construction, which is why the check needs no origin value to be available where it
+  runs.
+- **`fetch()` defaults to `credentials: "same-origin"`**, so cookies never rode along on an escaping
+  request. The defect was the request itself — including whatever the caller put in its path or body
+  — reaching a host the caller chose.

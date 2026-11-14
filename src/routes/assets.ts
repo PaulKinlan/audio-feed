@@ -21,6 +21,12 @@ import listenLandingCss from "../assets/listen-landing.css" with { type: "text" 
 import listenLandingJs from "../assets/listen-landing.js" with { type: "text" };
 import adminCss from "../assets/admin.css" with { type: "text" };
 import adminJs from "../assets/admin.js" with { type: "text" };
+// The same-origin path guard (audio-feed-fg18i): the console's `api(path, options)` forwards its
+// caller's path into fetch(), and THREAT_MODEL.md register row 6 requires that path to be an
+// absolute single-slash same-origin route. Composed first, like the confirm client below, because
+// the console module binds to it through globalThis; shell.ts embeds the same bytes inline on the
+// login and account pages.
+import sameOriginPathJs from "../assets/same-origin-path.js" with { type: "text" };
 // The admin console module is COMPOSED (audio-feed-3xq part 4c): the canonical confirm client
 // ships in front of the console code as one served module, the same way listen.css below
 // composes the design tokens in front of the page stylesheet. One source, many surfaces:
@@ -71,8 +77,10 @@ const ASSETS: Record<string, { body: string; contentType: string }> = {
   // audio-feed-3xq part 4a: the console's client, extracted from admin.ts's template string.
   // Like listen.js it is a self-contained module — no imports — because a verbatim-served file
   // cannot address another hashed asset by name.
+  // audio-feed-fg18i: the path guard is composed in front of both, so `api()` (in admin.js) and
+  // the confirm client run against one copy of each.
   "admin.js": {
-    body: `${confirmSharedJs}\n${adminJs}`,
+    body: `${sameOriginPathJs}\n${confirmSharedJs}\n${adminJs}`,
     contentType: "text/javascript; charset=utf-8",
   },
   // audio-feed-lkmuq: the canonical confirm-dialog client served standalone so the

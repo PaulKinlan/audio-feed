@@ -32,6 +32,23 @@ const confirmWith =
     /** @type {any} */ (globalThis).askConfirm
   );
 
+/**
+ * The same-origin path guard, composed in front of this file at serve time from
+ * src/assets/same-origin-path.js (audio-feed-fg18i). Same globalThis contract as `confirmWith`
+ * above: this file is checked standalone as an ES module, so it cannot see the composed prefix's
+ * module scope.
+ *
+ * Why this name and not `assertSameOriginPath`: the served bytes are also evaluated as a plain
+ * FUNCTION BODY by tests/admin_script.ts, where the prefix's function declaration and this file's
+ * top-level names are one scope — a `const assertSameOriginPath` here would be a redeclaration
+ * syntax error there. The inline pages keep the guard's own name, because their scripts run it from
+ * the same scope it is declared in.
+ * @type {(path: string) => string}
+ */
+const requireSameOriginPath = /** @type {(path: string) => string} */ (
+  /** @type {any} */ (globalThis).assertSameOriginPath
+);
+
 // ── Session identity, the admin token, and the API wrapper ───────────────
 /**
  * The console's data, injected as JSON rather than as code (audio-feed-3xq part 4a).
@@ -202,12 +219,16 @@ if (SIGNED_IN) {
 
 /**
  * Every admin call goes through here, carrying session cookie auth.
+ * The path must be a same-origin absolute route: requireSameOriginPath() — the guard from
+ * src/assets/same-origin-path.js, composed in front of this file by src/routes/assets.ts — throws
+ * on anything that would resolve to another origin (THREAT_MODEL.md register row 6,
+ * audio-feed-fg18i).
  * @param {string} path
  * @param {RequestInit} [options]
  * @returns {Promise<any>} the parsed JSON body
  */
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(requireSameOriginPath(path), {
     ...options,
     headers: {
       "content-type": "application/json",
