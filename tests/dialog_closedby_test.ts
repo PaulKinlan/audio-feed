@@ -8,7 +8,7 @@
 // - Headless Chrome proves light-dismiss and Escape behavior
 
 import { assert, assertEquals } from "@std/assert";
-import { withChrome } from "../scripts/proof-helper.ts";
+import { discoverChromeBinary, withChrome } from "../scripts/proof-helper.ts";
 import { connectCdp } from "../scripts/proof-cdp.ts";
 import { renderShell } from "../src/routes/shell.ts";
 import { CONFIRM_DIALOG_CLIENT } from "../src/routes/shell.ts";
@@ -135,7 +135,7 @@ Deno.test("closedby: headless Chrome reflects closedBy property and attribute (a
   // profile, which only one process can hold at a time - so this suite collided with any other Chrome in the
   // run. scripts/proof-helper.ts isolates its own launches for the same reason; this module did not.
   const profileDir = await Deno.makeTempDir({ prefix: "dialog-closedby-chrome-" });
-  const command = new Deno.Command("google-chrome-stable", {
+  const command = new Deno.Command(discoverChromeBinary(), {
     args: [
       "--headless=new",
       "--disable-gpu",

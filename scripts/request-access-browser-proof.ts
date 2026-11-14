@@ -28,8 +28,8 @@ import { approveUser } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import {
   createTempChromeProfile,
+  discoverChromeBinary,
   killChromeAndWait,
-  newestChrome,
   removeDirWhenQuiet,
   runProof,
   waitForChromeProfileUnused,
@@ -78,7 +78,7 @@ await runProof("request-access-browser-proof", async (checker) => {
 
   // -- launch chrome ------------------------------------------------------------
 
-  const chrome = new Deno.Command(newestChrome(), {
+  const chrome = new Deno.Command(discoverChromeBinary(), {
     args: [
       "--headless=new",
       "--no-sandbox",

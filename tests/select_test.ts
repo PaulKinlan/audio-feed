@@ -11,6 +11,7 @@ import { assetUrl, handleAsset } from "../src/routes/assets.ts";
 import type { RouteContext } from "../src/router.ts";
 import { shippedCss } from "./admin_css.ts";
 import { makeUser } from "./fixtures.ts";
+import { discoverChromeBinary } from "../scripts/proof-helper.ts";
 
 const adminHtml = renderAdminPage({
   nonce: "test-nonce",
@@ -82,7 +83,7 @@ Deno.test("customizable select: headless Chrome computes appearance: base-select
   // profile, which only one process can hold at a time - so this suite collided with any other Chrome in the
   // run. scripts/proof-helper.ts isolates its own launches for the same reason; this module did not.
   const profileDir = await Deno.makeTempDir({ prefix: "select-chrome-" });
-  const evaluateCommand = new Deno.Command("google-chrome-stable", {
+  const evaluateCommand = new Deno.Command(discoverChromeBinary(), {
     args: [
       "--headless=new",
       "--disable-gpu",

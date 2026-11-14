@@ -23,8 +23,8 @@ import type { AppConfig, Stores } from "../src/config.ts";
 import { makeUser } from "../tests/fixtures.ts";
 import {
   createTempChromeProfile,
+  discoverChromeBinary,
   killChromeAndWait,
-  newestChrome,
   removeDirWhenQuiet,
   runProof,
   waitForChromeProfileUnused,
@@ -57,7 +57,7 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
   config.port = PORT;
   config.publicBaseUrl = BASE;
 
-  const chrome = new Deno.Command(newestChrome(), {
+  const chrome = new Deno.Command(discoverChromeBinary(), {
     args: [
       "--headless=new",
       "--no-sandbox",
