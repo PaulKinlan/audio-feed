@@ -56,6 +56,23 @@
  * ceiling), and the rest carry a named UNCHECKED verdict with the reason no static arithmetic
  * exists — never a green row that reads as if the cap covered them.
  *
+ * WHAT THAT ARITHMETIC IS DERIVED FROM, and what it used to count by hand (audio-feed-ye2uj).
+ * The literal population of that arithmetic was measured; the overhead beside it was a
+ * hand-maintained table — "four publisher fields, 128 fence-tag characters, five speaker
+ * labels, two maxTurns digits" — so a FIFTH publisher field added through the same
+ * fenced-and-capped path added no census-visible literal and no counted overhead, and the row
+ * stayed green until someone remembered to edit the table. Two measurements replace those
+ * counts: fencedPublisherFields() reads the fencedRegion() call sites out of the builder's own
+ * body (how many fields, which tag pair each writes, whether the value is capped), and
+ * literalHoles() reads the holes out of the site's literal population (which labels the builder
+ * actually interpolates, and which app-computed values reach a literal). A new field or label
+ * therefore moves the arithmetic without anyone editing a table. What is NOT derivable stays a
+ * DECLARED ASSUMPTION in the consuming test, named with its value and its reason: how many
+ * characters an app-configured label may have, how many digits maxTurns may take, how much
+ * instruction text the allowance grants, and how many publisher fields the CEILING is willing to
+ * pay for — a bound the builder's structure cannot answer, because structure says what the
+ * prompt does today, not what the product is allowed to spend.
+ *
  * DECLARED LIMITS, because a census with unstated holes is worse than none:
  * - A prompt built as ONE interleaved template literal (instructions and ${values} in
  *   the same literal) with no instruction block is NOT caught by the text net — the
@@ -66,10 +83,18 @@
  * - Only function declarations are enumerated (the shape of every prompt builder in
  *   this repo); only the src/ tree is walked.
  * - The assembled-total arithmetic is per SITE and lives in the consuming test: the census
- *   measures literals, it cannot see which literals concatenate into one sent string or how
- *   large a hole's value can get. The test's verdict table is therefore hand-written (audited
- *   against the builder's source), and its UNCHECKED entries are the sites where that audit
- *   found no static bound.
+ *   measures literals, fields and holes, but it cannot see which literal pieces concatenate into
+ *   one sent string, and no measurement of the code can say how large a value may get — a
+ *   speaker label's length, a maxTurns digit count and the instruction allowance are app config
+ *   and product policy, so they are DECLARED in the test with a reason, never derived here. Its
+ *   UNCHECKED entries are the sites where that audit found no static bound at all.
+ * - fencedPublisherFields() reads call sites with plain module-level string constants (or inline
+ *   string literals) as fence tags. A tag built by concatenation or a template hole does not
+ *   resolve, and the measurement says so (null) rather than counting zero characters — the
+ *   consuming row reds on it, which is the loud direction.
+ * - literalHoles() matches ${...} with no nested braces, the shape every prompt hole in this
+ *   repo has. A hole containing braces of its own is not reported, so a NEW one would be missed
+ *   by the named-hole check in the consuming row — stated here rather than left to be found.
  * - Regex literals are not masked (maskNonCode's own limit), so a regex containing a
  *   backtick could confuse literal pairing. None in this repo does.
  * - THE MARKERS ARE TRUSTED, NOT VERIFIED: a site that copies a census marker onto a
@@ -331,6 +356,153 @@ export function promptCensusSource(
     });
   }
   return sites;
+}
+
+/**
+ * One publisher-controlled FIELD a prompt builder fences: the tag pair it writes and the value
+ * it writes between them, both read from the builder's own call sites (audio-feed-ye2uj).
+ */
+export interface FencedPublisherField {
+  /** The open-tag argument as written, e.g. ARTICLE_TITLE_FENCE_OPEN. */
+  openArg: string;
+  /** The open tag itself, resolved to its characters: null when it is not a plain string constant. */
+  openTag: string | null;
+  closeArg: string;
+  closeTag: string | null;
+  /** The value expression as written, e.g. "capped(article.title)". */
+  value: string;
+  /** True when the value is wrapped in capped(...) — the only shape the field cap bounds. */
+  capped: boolean;
+}
+
+/** A module-level `const NAME = "literal";` binding, name to characters. */
+function moduleStringConstants(source: string): Map<string, string> {
+  const masked = maskNonCode(source);
+  const constants = new Map<string, string>();
+  const re = /(?:^|[^\w$.])(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(masked)) !== null) {
+    // The declaration is FOUND in the masked projection, where a comment or a string cannot
+    // declare anything; the value is READ from the raw source at the same offset, because the
+    // masker blanks literal interiors by design.
+    let k = re.lastIndex;
+    if (source[k] !== '"') continue;
+    k++;
+    let value = "";
+    while (k < source.length && source[k] !== '"') {
+      if (source[k] === "\\") {
+        value += source[k + 1] ?? "";
+        k += 2;
+        continue;
+      }
+      value += source[k];
+      k++;
+    }
+    constants.set(match[1]!, value);
+    re.lastIndex = k;
+  }
+  return constants;
+}
+
+/** An argument expression resolved to its characters, when it is an identifier or a literal. */
+function resolveTag(
+  rawArgument: string,
+  constants: Map<string, string>,
+): string | null {
+  const argument = rawArgument.trim();
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(argument)) return constants.get(argument) ?? null;
+  if (/^"(?:[^"\\]|\\.)*"$/.test(argument)) return argument.slice(1, -1);
+  return null;
+}
+
+/** The top-level arguments of the call whose `(` is at `openParen`, as written. */
+function callArguments(
+  raw: string,
+  masked: string,
+  openParen: number,
+  closeParen: number,
+): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let start = openParen + 1;
+  for (let i = openParen + 1; i < closeParen; i++) {
+    // Brackets are counted on the MASKED text, where commas and brackets inside a string
+    // literal are gone, and the arguments are READ from the raw text at the same offsets.
+    const c = masked[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) {
+      args.push(raw.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const tail = raw.slice(start, closeParen).trim();
+  if (tail !== "" || args.length > 0) args.push(tail);
+  return args;
+}
+
+/**
+ * Every publisher-controlled field a site FENCES, measured from the site's own body: one entry
+ * per fencedRegion() call site, in source order.
+ *
+ * This is the replacement for a hand-maintained field count (audio-feed-ye2uj). The overhead
+ * table used to say "the four capped publisher fields"; a fifth field added through the same
+ * fencedRegion(... + capped(...)) path left that number alone, so the assembled-prompt ceiling
+ * could not notice it. Read from the body, the count and the fence-tag characters move with the
+ * code — and a field the census cannot resolve (a tag built at runtime) is REPORTED as such
+ * rather than counted as zero, so the consuming row can red loudly instead of under-counting.
+ */
+export function fencedPublisherFields(source: string, site: PromptSite): FencedPublisherField[] {
+  const masked = maskNonCode(source);
+  const span = functionSpans(masked).find((candidate) => candidate.name === site.name);
+  if (span === undefined) {
+    throw new Error(
+      `fencedPublisherFields: no function declaration named ${site.name} in ${site.file}`,
+    );
+  }
+  const constants = moduleStringConstants(source);
+  const fields: FencedPublisherField[] = [];
+  const re = /\bfencedRegion\s*\(/g;
+  re.lastIndex = span.bodyStart;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(masked)) !== null && match.index < span.bodyEnd) {
+    const openParen = match.index + match[0].length - 1;
+    let depth = 1;
+    let closeParen = openParen + 1;
+    while (closeParen < span.bodyEnd && depth > 0) {
+      const c = masked[closeParen];
+      if (c === "(") depth++;
+      else if (c === ")") depth--;
+      closeParen++;
+    }
+    const args = callArguments(source, masked, openParen, closeParen - 1);
+    const [openArg = "", closeArg = "", value = ""] = args;
+    fields.push({
+      openArg,
+      openTag: resolveTag(openArg, constants),
+      closeArg,
+      closeTag: resolveTag(closeArg, constants),
+      value,
+      capped: /^capped\s*\(/.test(value),
+    });
+    re.lastIndex = closeParen;
+  }
+  return fields;
+}
+
+/**
+ * Every ${...} hole in the site's literal population, as the expression written inside it, in
+ * source order (audio-feed-ye2uj). The labels a builder interpolates are a fact about the code,
+ * so the arithmetic counts them instead of trusting a constant beside it.
+ */
+export function literalHoles(site: PromptSite): string[] {
+  const holes: string[] = [];
+  for (const literal of site.literals) {
+    const re = /\$\{([^{}]*)\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(literal)) !== null) holes.push(match[1]!.trim());
+  }
+  return holes;
 }
 
 /** Walk the src/ tree of a repository root and census every .ts file in it. */

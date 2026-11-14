@@ -20,7 +20,10 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   APP_VALUES_ONLY_MARKER,
+  FencedPublisherField,
+  fencedPublisherFields,
   functionSpans,
+  literalHoles,
   promptCensus,
   promptCensusSource,
   PromptSite,
@@ -601,27 +604,51 @@ Deno.test("REAL TREE: every discovered prompt is at or under the length cap (pro
  * and send ~60,000 characters (audio-feed-fmlyl). Every site is therefore in exactly ONE of
  * the two states below, and neither state is allowed to read as if the cap covered it:
  *
- * - BOUNDED BY CONSTRUCTION. `ASSEMBLED_PROMPT_BOUNDS` names every character the site adds
- *   outside its literals — capped publisher fields, fence tags, join separators, app-configured
- *   labels — and the ceiling the assembled total must stay at or under. The row sums the
- *   MEASURED literal text plus those declared maxima and reds naming the site, the total and
- *   the ceiling, so a literal that grows past the site's headroom is a red, not a green.
+ * - BOUNDED BY CONSTRUCTION. `ASSEMBLED_PROMPT_BOUNDS` states the ceiling the assembled total
+ *   must stay at or under, and the overhead inside that total is MEASURED from the builder's own
+ *   source where structure can answer it — the fenced publisher fields and the speaker labels
+ *   (audio-feed-ye2uj) — with the terms code cannot answer declared as named assumptions right
+ *   beside them. The row sums the measured literal text plus those maxima and reds naming the
+ *   site, the total and the ceiling, so a literal that grows past the site's headroom is a red,
+ *   not a green.
  * - NOT CHECKABLE STATICALLY. `UNCHECKED_ASSEMBLED_PROMPTS` says so, per site, with the reason
  *   — and where the real bound lives at runtime it names that guard too. These sites are NOT
  *   passing rows: nothing here asserts their assembled length, and the reason is what a reader
  *   gets instead of a green tick.
+ *
+ * WHY THE OVERHEAD IS DERIVED AND NOT TABULATED (audio-feed-ye2uj). The literal population of
+ * this arithmetic was always measured; the overhead beside it was hand-maintained — "four
+ * publisher fields, 128 fence-tag characters, five speaker labels, two maxTurns digits" — so a
+ * FIFTH publisher field added through the same fenced-and-capped path added no census-visible
+ * literal and no counted overhead, and the row stayed green until somebody remembered the table.
+ * `measurePromptHoles` now calls `fencedPublisherFields()` (how many fields the builder fences,
+ * which tags each writes, whether each is capped) and `literalHoles()` (which labels the builder
+ * actually interpolates), so the counts follow the code. A fifth field therefore reds
+ * naming the field and the new total — and the mutant row at the bottom of this section proves
+ * it, rather than asserting it in prose.
  */
 
 /**
- * HEADROOM FOR A HOLE WHOSE VALUE THIS REPO DOES NOT CAP: dialogue speaker labels.
+ * DECLARED ASSUMPTION — HOW LONG AN APP-CONFIGURED SPEAKER LABEL MAY BE: 64 characters.
  *
  * `buildScriptPrompt` interpolates `expert.name` and `foil.name`, which come from the episode's
  * dialogue config, never from the publisher — this repo's presets are "Alex" and "Sam", and the
  * longest label any caller passes is app-configured. 64 characters is an ASSUMPTION about app
  * config, stated here rather than buried in the arithmetic; it is not an enforced cap, which is
- * why the ceiling below keeps headroom beyond it.
+ * why the ceiling below keeps headroom beyond it. HOW MANY labels there are is not assumed: the
+ * ${x.name} holes are counted out of the builder's own literals (audio-feed-ye2uj).
  */
 const SPEAKER_LABEL_MAX_CHARS = 64;
+
+/**
+ * DECLARED ASSUMPTION — HOW MANY DIGITS THE `maxTurns` HOLE MAY TAKE: 2.
+ *
+ * `createGroundedScriptGenerator` rejects a maxTurns that is not an integer from 2 to 32, so the
+ * number that can land in the prompt is at most two digits. The bound is enforced by that
+ * validation in src/worker/script.ts; the digit count is what this table has to declare, and the
+ * hole itself must be named in DECLARED_LITERAL_HOLES so an unnamed hole cannot slip past.
+ */
+const MAX_TURNS_DIGITS = 2;
 
 /**
  * THE INSTRUCTION-TEXT ALLOWANCE: how many characters of prompt literal text a bounded site may
@@ -630,6 +657,43 @@ const SPEAKER_LABEL_MAX_CHARS = 64;
  * allowance in this table rather than by shipping a prompt nobody measured.
  */
 const INSTRUCTION_TEXT_ALLOWANCE = 4_000;
+
+/**
+ * DECLARED ASSUMPTION — HOW MANY PUBLISHER FIELDS THE CEILING IS WILLING TO PAY FOR: 4.
+ *
+ * This one CANNOT be derived, and that is the point of deriving the others. The arithmetic below
+ * measures how many fields the builder really fences, so a fifth field makes the total exceed
+ * this budget's ceiling and the row reds naming the field, the new total and this number. What no
+ * measurement of the code can answer is whether the product should spend another
+ * DEFAULT_MAX_BODY_CHARS of paid request on a longer prompt: structure says what the prompt does
+ * today, not what it is allowed to cost. So it is declared here, and a fifth field is a reviewed
+ * decision made by editing this number — never arithmetic that silently grows under a green row.
+ */
+const PUBLISHER_FIELD_BUDGET = 4;
+
+/**
+ * THE APP-COMPUTED VALUES THE BUILDER MAY INTERPOLATE INTO A PROMPT LITERAL, by hole expression,
+ * each with the reason the arithmetic can live with it (audio-feed-ye2uj).
+ *
+ * A hole is either a speaker label (`${x.name}`, counted as a label) or a value somebody named
+ * here. An UNNAMED hole reds: it is a value the ceiling has no term for, and the same escape a
+ * fifth fenced field used to have — the difference is that a literal hole carrying publisher
+ * data would be an unfenced injection, which is why the fix is "name it or fence it", not "add
+ * a bigger allowance".
+ */
+const DECLARED_LITERAL_HOLES: Record<string, string> = {
+  maxTurns:
+    "app-set, bounded to an integer from 2 to 32 by createGroundedScriptGenerator and counted as the maxTurns digit term below",
+};
+
+/**
+ * A SPEAKER-LABEL hole: a template hole that reads a `.name` off a speaker object, the shape
+ * `buildScriptPrompt` writes for `expert.name` and `foil.name`. It is a shape rather than a list
+ * of the two variable names on purpose — a builder that renames its speakers, or asks a third
+ * speaker for a line, must still be counted (audio-feed-ye2uj: the count used to be the literal
+ * number 5 in the overhead table).
+ */
+const LABEL_HOLE_RE = /^[A-Za-z_$][A-Za-z0-9_$]*\s*\.\s*name$/;
 
 interface AssembledOverhead {
   /** What the characters are, in the words a reader auditing the arithmetic needs. */
@@ -642,8 +706,6 @@ interface AssembledOverhead {
 interface AssembledPromptBound {
   /** "file :: name", matching the census key. */
   where: string;
-  /** Every character the site adds OUTSIDE its template literals (holes and syntax included). */
-  overhead: AssembledOverhead[];
   /** The assembled total must stay at or under this, with the reason for the number. */
   ceiling: number;
   ceilingReason: string;
@@ -652,35 +714,13 @@ interface AssembledPromptBound {
 const ASSEMBLED_PROMPT_BOUNDS: AssembledPromptBound[] = [
   {
     where: "src/worker/script.ts :: buildScriptPrompt",
-    overhead: [
-      {
-        what: "the four capped publisher fields (title, author, summary, body)",
-        maxChars: 4 * DEFAULT_MAX_BODY_CHARS,
-        reason:
-          "every field goes through fencedRegion(...) with capped(field), and capped slices to bodyChars (DEFAULT_MAX_BODY_CHARS by default), so four fields cannot exceed four caps",
-      },
-      {
-        what: "fence tag pairs around those four fields",
-        maxChars: 128,
-        reason:
-          "the eight fixed tags (<article_title>…</article_body>) total 128 characters; they are plain string literals, so the census's template-literal population does not see them",
-      },
-      {
-        what: "dialogue speaker labels",
-        maxChars: 5 * SPEAKER_LABEL_MAX_CHARS,
-        reason:
-          "expert.name appears twice and foil.name three times; the labels are app-configured and never publisher-supplied (see SPEAKER_LABEL_MAX_CHARS)",
-      },
-      {
-        what: "the maxTurns digit",
-        maxChars: 2,
-        reason:
-          "createGroundedScriptGenerator rejects a maxTurns that is not an integer from 2 to 32, so the interpolated number is at most two digits",
-      },
-    ],
-    ceiling: 4 * DEFAULT_MAX_BODY_CHARS + INSTRUCTION_TEXT_ALLOWANCE,
-    ceilingReason:
-      "four capped publisher fields plus the instruction-text allowance; the field caps are the repo's existing injection bound and the allowance is the deliberate room for prompt wording",
+    ceiling: PUBLISHER_FIELD_BUDGET * DEFAULT_MAX_BODY_CHARS + INSTRUCTION_TEXT_ALLOWANCE,
+    ceilingReason: `DECLARED ASSUMPTION: ${PUBLISHER_FIELD_BUDGET} capped publisher fields plus ` +
+      `${INSTRUCTION_TEXT_ALLOWANCE} characters of instruction text — the field caps are the ` +
+      `repo's existing injection bound and the allowance is the deliberate room for prompt ` +
+      `wording. The field count is POLICY, not structure (see PUBLISHER_FIELD_BUDGET): the ` +
+      `arithmetic below measures how many fields the builder really fences, so a fifth field ` +
+      `reds naming the field and the new total instead of widening this ceiling in silence.`,
   },
 ];
 
@@ -699,12 +739,88 @@ const UNCHECKED_ASSEMBLED_PROMPTS: Record<string, string> = {
     "turns come from input.turns or input.script (generated model output) or from the article (title and summary uncapped; only body slices 0-400 and 400-1600 are bounded), so the assembled turn text is unbounded here; synthesizeDialogue applies the same runtime segmenter bound as narration.",
 };
 
-function assembledPromptChars(site: PromptSite, bound: AssembledPromptBound): {
+/**
+ * THE ASSEMBLED-TOTAL ARITHMETIC, with every structural term MEASURED from the builder's source
+ * (audio-feed-ye2uj): `fields` from fencedPublisherFields(), the labels and holes from
+ * literalHoles(). Three of the four overhead terms used to be a hand-maintained count beside a
+ * derived literal population, so a fifth fenced-and-capped field changed neither the literal
+ * population nor the overhead and the ceiling row stayed green. What is still declared is what
+ * the code cannot answer: a label's length, maxTurns' digit count, and the ceiling itself.
+ */
+interface MeasuredPromptHoles {
+  fields: FencedPublisherField[];
+  labelHoles: string[];
+}
+
+function measurePromptHoles(site: PromptSite, source: string): MeasuredPromptHoles {
+  const fields = fencedPublisherFields(source, site);
+
+  // A tag the census cannot resolve is not zero characters, it is unknown ones: counting it as
+  // zero is exactly how a fifth field would slip through with no counted fence overhead.
+  const unresolved = fields.filter((field) => field.openTag === null || field.closeTag === null);
+  if (unresolved.length > 0) {
+    throw new Error(
+      `UNCOUNTABLE FENCE TAG: ${siteKey(site)} fences ${
+        unresolved.map((field) => field.value).join(", ")
+      } with a tag argument that is not a plain string constant (${
+        unresolved.map((field) => `${field.openArg}, ${field.closeArg}`).join("; ")
+      }), so its characters cannot be counted. Keep fence tags module-level string constants (or ` +
+        `inline string literals) — an unresolvable tag is a bound nobody can verify.`,
+    );
+  }
+
+  // The field term is `fields × cap`, so every field must really be capped. A fenced-but-whole
+  // field would make the multiplication fiction.
+  const uncapped = fields.filter((field) => !field.capped);
+  if (uncapped.length > 0) {
+    throw new Error(
+      `UNCAPPED PUBLISHER FIELD: ${siteKey(site)} fences ${
+        uncapped.map((field) => field.value).join(", ")
+      } without capped(), so the field cap does not bound its weight and this arithmetic would ` +
+        `be fiction. Route it through capped() like the other fields.`,
+    );
+  }
+
+  const holes = literalHoles(site);
+  // The declaration must not outlive its fact, or it becomes one more hand-maintained table that
+  // says a name the builder no longer interpolates.
+  const stale = Object.keys(DECLARED_LITERAL_HOLES).filter((name) => !holes.includes(name));
+  if (stale.length > 0) {
+    throw new Error(
+      `STALE DECLARED HOLE(S): ${stale.join(", ")} no longer reach any prompt literal of ${
+        siteKey(site)
+      }, so each declaration above names a value the builder does not interpolate. Remove it.`,
+    );
+  }
+  const labelHoles = holes.filter((hole) => LABEL_HOLE_RE.test(hole));
+  const unnamed = holes.filter((hole) =>
+    !LABEL_HOLE_RE.test(hole) && !(hole in DECLARED_LITERAL_HOLES)
+  );
+  if (unnamed.length > 0) {
+    throw new Error(
+      `UNNAMED PROMPT HOLE: ${siteKey(site)} interpolates ${
+        [...new Set(unnamed)].join(", ")
+      } into its prompt literals, and the assembled-prompt arithmetic has no term for it. A ` +
+        `\${x.name} hole is counted as a speaker label; any other value must be named in ` +
+        `DECLARED_LITERAL_HOLES with the bound that makes it countable — or, if it is publisher ` +
+        `data, fenced through fencedRegion and capped() instead.`,
+    );
+  }
+
+  return { fields, labelHoles };
+}
+
+function assembledPromptChars(
+  site: PromptSite,
+  source: string,
+): {
   literalChars: number;
   separatorChars: number;
+  overhead: AssembledOverhead[];
   overheadChars: number;
   total: number;
 } {
+  const { fields, labelHoles } = measurePromptHoles(site, source);
   // The backticks are syntax, not prompt text; the interior is what the model or TTS engine
   // receives. Holes still count their SOURCE characters here, which over-states the sent text
   // (an interpolated value can be shorter than its expression) — the arithmetic must not
@@ -714,29 +830,70 @@ function assembledPromptChars(site: PromptSite, bound: AssembledPromptBound): {
     0,
   );
   // The pieces are joined with "\n". Empty literals are filtered out before the join, and each
-  // fence pair contributes its tags as separate pieces, so one newline per literal plus twelve
-  // for the fence gaps is an upper bound for this builder shape.
-  const separatorChars = site.literals.length + 12;
-  const overheadChars = bound.overhead.reduce((sum, part) => sum + part.maxChars, 0);
+  // MEASURED fence pair contributes its three pieces (open tag, value, close tag) as separate
+  // pieces, so one separator per literal plus three per field is an upper bound for this shape.
+  const separatorChars = site.literals.length + fields.length * 3;
+  const tagChars = fields.reduce(
+    (sum, field) => sum + (field.openTag?.length ?? 0) + (field.closeTag?.length ?? 0),
+    0,
+  );
+  const overhead: AssembledOverhead[] = [
+    {
+      what: `the ${fields.length} capped publisher fields (${
+        fields.map((field) => field.value).join(", ")
+      })`,
+      maxChars: fields.length * DEFAULT_MAX_BODY_CHARS,
+      reason:
+        "MEASURED: every fencedRegion(...) call site in the builder is counted, and each one wraps its value in capped(field), which slices to bodyChars (DEFAULT_MAX_BODY_CHARS by default), so the fields cannot exceed one cap each",
+    },
+    {
+      what: `fence tag pairs around those ${fields.length} fields`,
+      maxChars: tagChars,
+      reason:
+        "MEASURED: the open and close tag characters the builder writes, read from its fence-tag constants — plain string literals, so the census's template-literal population does not see them",
+    },
+    {
+      what: `the ${labelHoles.length} dialogue speaker labels (${labelHoles.join(", ")})`,
+      maxChars: labelHoles.length * SPEAKER_LABEL_MAX_CHARS,
+      reason:
+        "MEASURED hole count x DECLARED label length: these are the ${x.name} holes the builder actually interpolates, and labels are app-configured, never publisher-supplied (see SPEAKER_LABEL_MAX_CHARS)",
+    },
+    {
+      what: "the maxTurns digit",
+      maxChars: MAX_TURNS_DIGITS,
+      reason:
+        "DECLARED: createGroundedScriptGenerator rejects a maxTurns that is not an integer from 2 to 32, so the interpolated number is at most two digits (see MAX_TURNS_DIGITS)",
+    },
+  ];
+  const overheadChars = overhead.reduce((sum, part) => sum + part.maxChars, 0);
   return {
     literalChars,
     separatorChars,
+    overhead,
     overheadChars,
     total: literalChars + separatorChars + overheadChars,
   };
 }
 
-function assertAssembledPromptUnderCeiling(site: PromptSite, bound: AssembledPromptBound): void {
-  const chars = assembledPromptChars(site, bound);
+function assertAssembledPromptUnderCeiling(
+  site: PromptSite,
+  bound: AssembledPromptBound,
+  source: string,
+): void {
+  const chars = assembledPromptChars(site, source);
   if (chars.total > bound.ceiling) {
     throw new Error(
       `ASSEMBLED PROMPT EXCEEDS ITS CEILING: ${
         siteKey(site)
       } assembles ${chars.total} characters ` +
         `(${chars.literalChars} of template-literal text + ${chars.separatorChars} of join separators + ` +
-        `${chars.overheadChars} of ${bound.overhead.map((part) => part.what).join(", ")}), ` +
+        `${chars.overheadChars} of ${chars.overhead.map((part) => part.what).join(", ")}), ` +
         `over its ceiling of ${bound.ceiling}. The per-literal cap of ${DEFAULT_MAX_BODY_CHARS} ` +
-        `does not bound this total — that is why this row exists.`,
+        `does not bound this total — that is why this row exists. The ceiling is ` +
+        `PUBLISHER_FIELD_BUDGET (${PUBLISHER_FIELD_BUDGET}) x DEFAULT_MAX_BODY_CHARS + ` +
+        `INSTRUCTION_TEXT_ALLOWANCE (${INSTRUCTION_TEXT_ALLOWANCE}), so a builder that fences ` +
+        `more fields than the budget is a DECISION to make deliberately, not a number to raise ` +
+        `until the row goes quiet.`,
     );
   }
 }
@@ -791,7 +948,10 @@ Deno.test("REAL TREE: the bounded site's assembled prompt fits its ceiling (prom
   for (const bound of ASSEMBLED_PROMPT_BOUNDS) {
     const site = census.sites.find((candidate) => siteKey(candidate) === bound.where);
     assert(site !== undefined, `${bound.where} vanished from the census`);
-    assertAssembledPromptUnderCeiling(site, bound);
+    // The arithmetic MEASURES the builder's structure, so it must be handed the source the site
+    // was censused from — the same tree, not a copy that could drift from it.
+    const source = await readRealSource(bound.where.split(" :: ")[0]!);
+    assertAssembledPromptUnderCeiling(site, bound, source);
   }
 });
 
@@ -833,7 +993,7 @@ Deno.test("MUTANT: growing a literal past the assembled ceiling reds naming site
   // The realistic shape of the bug: one more instruction literal, not a long one — five of
   // these at 11,900 characters each is how audio-feed-fmlyl's ~60,000-character prompt passes
   // every per-literal row.
-  assertAssembledPromptUnderCeiling(before, bound);
+  assertAssembledPromptUnderCeiling(before, bound, source);
 
   const grown = "`" + "x".repeat(5_000) + " RESEARCH REQUIREMENTS:`";
   const mutant = applyMutant(source, anchor, grown);
@@ -843,7 +1003,7 @@ Deno.test("MUTANT: growing a literal past the assembled ceiling reds naming site
 
   let threw = false;
   try {
-    assertAssembledPromptUnderCeiling(site, bound);
+    assertAssembledPromptUnderCeiling(site, bound, mutant);
   } catch (err) {
     threw = true;
     assertStringIncludes(
@@ -866,6 +1026,81 @@ Deno.test("MUTANT: growing a literal past the assembled ceiling reds naming site
     threw,
     "adding 5,000 characters of prompt text must red the assembled-total row — the per-literal cap still passes it, which is the whole point",
   );
+});
+
+Deno.test("MUTANT: a fifth fenced publisher field reds naming the field and the new total (promptcensus)", async () => {
+  // audio-feed-ye2uj. The escape this row exists for is NOT a longer literal (the row above) but
+  // a fifth publisher field added through the same fenced-and-capped path: it adds no
+  // census-visible template literal and no new instruction text, so under a hand-maintained
+  // overhead table ("the four capped publisher fields, 128 fence-tag characters, five speaker
+  // labels") the total did not move and the row stayed green. With the overhead MEASURED from the
+  // builder's own fencedRegion() call sites, the fifth field moves it and the row names it.
+  const source = await readRealSource("src/worker/script.ts");
+  const bound = ASSEMBLED_PROMPT_BOUNDS.find((candidate) =>
+    candidate.where === "src/worker/script.ts :: buildScriptPrompt"
+  );
+  assert(bound !== undefined, "buildScriptPrompt must have a declared assembled bound");
+
+  const withTags = applyMutant(
+    source,
+    `const ARTICLE_BODY_FENCE_CLOSE = "</article_body>";`,
+    `const ARTICLE_BODY_FENCE_CLOSE = "</article_body>";\n` +
+      `const ARTICLE_SUBTITLE_FENCE_OPEN = "<article_subtitle>";\n` +
+      `const ARTICLE_SUBTITLE_FENCE_CLOSE = "</article_subtitle>";`,
+  );
+  const mutant = applyMutant(
+    withTags,
+    `    ...fencedRegion(ARTICLE_BODY_FENCE_OPEN, ARTICLE_BODY_FENCE_CLOSE, capped(article.body)),`,
+    `    ...(article.subtitle\n` +
+      `      ? fencedRegion(ARTICLE_SUBTITLE_FENCE_OPEN, ARTICLE_SUBTITLE_FENCE_CLOSE, capped(article.subtitle))\n` +
+      `      : []),\n` +
+      `    ...fencedRegion(ARTICLE_BODY_FENCE_OPEN, ARTICLE_BODY_FENCE_CLOSE, capped(article.body)),`,
+  );
+
+  const before = promptCensusSource(source, "src/worker/script.ts")
+    .find((site) => site.name === "buildScriptPrompt");
+  const after = promptCensusSource(mutant, "src/worker/script.ts")
+    .find((site) => site.name === "buildScriptPrompt");
+  assert(before !== undefined && after !== undefined, "the builder must be found both ways");
+
+  // The measurement is what moved: one more fenced field, at the same cap.
+  assertEquals(fencedPublisherFields(source, before).length, PUBLISHER_FIELD_BUDGET);
+  assertEquals(
+    fencedPublisherFields(mutant, after).length,
+    PUBLISHER_FIELD_BUDGET + 1,
+    "the fifth fenced field must be MEASURED, not assumed away",
+  );
+  // And the literal population does not see it: the per-literal row still passes the mutant, so
+  // the assembled-total row is the only one that can notice. That is the hole, stated.
+  assertSitePromptsUnderCap(after, DEFAULT_MAX_BODY_CHARS);
+  assertEquals(after.literals.length, before.literals.length);
+
+  let message = "";
+  try {
+    assertAssembledPromptUnderCeiling(after, bound, mutant);
+  } catch (err) {
+    message = (err as Error).message;
+  }
+  assert(
+    message !== "",
+    "a fifth fenced publisher field must red the assembled-total row — nothing else in the census sees it",
+  );
+  const total = assembledPromptChars(after, mutant).total;
+  assertStringIncludes(message, "capped(article.subtitle)", "the failure must name the new field");
+  assertStringIncludes(
+    message,
+    `assembles ${total} characters`,
+    "the failure must state the new total",
+  );
+  assertStringIncludes(
+    message,
+    `over its ceiling of ${bound.ceiling}`,
+    "the failure must cite the ceiling",
+  );
+  // The instruction, not just the number: the fix is a deliberate decision, not a bigger ceiling.
+  assertStringIncludes(message, `PUBLISHER_FIELD_BUDGET (${PUBLISHER_FIELD_BUDGET})`);
+  // Evidence for the gate log, in the repo's usual one-line form.
+  console.log(`fifth-field mutant verdict: ${message}`);
 });
 
 /**
