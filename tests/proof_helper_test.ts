@@ -24,6 +24,7 @@ import {
   ChromeHandle,
   createChecker,
   createTempChromeProfile,
+  discoverChromeBinary,
   type ElementMeasurement,
   formatEvidenceReadme,
   getActiveProof,
@@ -31,14 +32,12 @@ import {
   isVisible,
   killChromeAndWait,
   launchChrome,
-  newestChrome,
   originalCopyFile,
   originalCopyFileSync,
   originalOpen,
   originalWriteFile,
   proofPathLocks,
   removeDirWhenQuiet,
-  resolveChromeBinary,
   resolveStartupWindow,
   runProof,
   setOriginalCopyFileForTesting,
@@ -74,55 +73,146 @@ function pidStillRuns(pid: number): boolean {
   }
 }
 
-Deno.test("proof-helper: newestChrome resolves Chrome binary path or throws descriptive error", () => {
+/**
+ * audio-feed-rc0g8: on 2026-11-14 the puppeteer cache on this VM was emptied while `/usr/bin/google-chrome`
+ * kept working, and 19 gate rows failed "No Chrome binaries found under ..." - a lane-wide false red with NO
+ * product row failing. These rows pin the property that removes it: the resolver enumerates candidates, so a
+ * missing cache is not the end of the search.
+ */
+Deno.test("proof-helper: discovery resolves a real Chrome binary through one of its candidates", () => {
+  // The positive direction, on whatever this VM actually has: the resolver returns a path that exists. It
+  // must not be pinned to the cache - the whole defect was assuming the cache is the only place to look.
+  const chrome = discoverChromeBinary();
+  assert(chrome.length > 0, "discovery returns a binary path");
+  assert(
+    Deno.statSync(chrome).isFile,
+    `discovery returned '${chrome}', which is not a file - a path that cannot spawn is worse than an error`,
+  );
+});
+
+Deno.test("proof-helper: discovery falls through an empty cache to the system browser", () => {
+  const tempDir = Deno.makeTempDirSync({ prefix: "audiofeed-rc0g8-empty-cache-" });
   try {
-    const chrome = newestChrome();
-    assertStringIncludes(chrome, "chrome-linux64/chrome");
-  } catch (err) {
-    assertStringIncludes((err as Error).message, "No Chrome binaries found under");
+    // THE INCIDENT, reproduced: the cache directory is present and EMPTY and `AUDIOFEED_CHROME_BIN` is
+    // unset. The search must continue to the system candidates - a missing cache is an absent CANDIDATE, not
+    // an absent browser.
+    const emptyCache = `${tempDir}/empty-puppeteer-chrome`;
+    Deno.mkdirSync(emptyCache);
+    const systemBinary = `${tempDir}/system-google-chrome`;
+    Deno.writeTextFileSync(systemBinary, "");
+    assertEquals(
+      discoverChromeBinary({
+        chromeCacheRoot: emptyCache,
+        env: { get: (key: string) => key === "PATH" ? "" : undefined },
+        systemBinaries: [`${tempDir}/absent-google-chrome`, systemBinary],
+      }),
+      systemBinary,
+      "an empty cache must fall through to the first system candidate that exists, not fail the row",
+    );
+  } finally {
+    Deno.removeSync(tempDir, { recursive: true });
   }
 });
 
-Deno.test("proof-helper: newestChrome throws descriptive error for absent cache directory", () => {
-  const absentDir = "/nonexistent-audiofeed-puppeteer-chrome";
-  assertThrows(
-    () => newestChrome(absentDir),
+Deno.test("proof-helper: discovery names every path it tried when nothing is found", () => {
+  const absentCache = `/nonexistent/audiofeed-absent-puppeteer-chrome-${Deno.pid}`;
+  const err = assertThrows(
+    () =>
+      discoverChromeBinary({
+        chromeCacheRoot: absentCache,
+        env: { get: () => undefined },
+        systemBinaries: ["/nonexistent/google-chrome", "/nonexistent/chromium"],
+      }),
     Error,
-    `No Chrome binaries found under ${absentDir}`,
+  );
+  const message = err.message;
+  // The message that replaced the bare "No Chrome binaries found under <root>": the cache root is named
+  // together with every candidate that was tried after it.
+  assertStringIncludes(message, "No Chrome binary was found");
+  assertStringIncludes(message, `no <version>/chrome-linux64/chrome under ${absentCache}`);
+  assertStringIncludes(message, "/nonexistent/google-chrome");
+  assertStringIncludes(message, "/nonexistent/chromium");
+  assertStringIncludes(message, "AUDIOFEED_CHROME_BIN=/path/to/chrome");
+  // and the bare form the old helper threw is GONE, because a message that stops at one directory is what
+  // made a missing cache read as a product failure.
+  assert(
+    !message.includes("No Chrome binaries found under"),
+    `the one-path message must not survive: ${message}`,
+  );
+});
+
+Deno.test("proof-helper: the default candidate list names the system paths and the PATH probe", () => {
+  // The default list, through the message a machine with no browser produces. The env reader supplies the
+  // PATH, so the sweep's output is asserted without depending on what this VM has installed.
+  const err = assertThrows(
+    () =>
+      discoverChromeBinary({
+        chromeCacheRoot: `/nonexistent/audiofeed-absent-puppeteer-chrome-${Deno.pid}`,
+        env: { get: (key: string) => key === "PATH" ? "/opt/bin:/usr/local/bin" : undefined },
+        fileExists: () => false,
+      }),
+    Error,
+  );
+  for (const path of ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"]) {
+    assertStringIncludes(err.message, path);
+  }
+  for (
+    const path of [
+      "/opt/bin/google-chrome",
+      "/opt/bin/google-chrome-stable",
+      "/usr/local/bin/chromium",
+      "/usr/local/bin/chromium-browser",
+      "/usr/local/bin/chrome",
+    ]
+  ) {
+    assertStringIncludes(err.message, path);
+  }
+  // De-duplication is by path, and order is the resolution order: the absolute defaults come first.
+  assert(
+    err.message.indexOf("/usr/bin/google-chrome") < err.message.indexOf("/opt/bin/google-chrome"),
+    `the absolute defaults are tried before the PATH sweep: ${err.message}`,
   );
 });
 
 Deno.test({
   name:
-    "proof-helper: newestChrome handles controlled absent/empty cache fixtures and resolves newest version",
+    "proof-helper: discovery resolves the newest cache version and prefers it over the system browser",
   ignore: (await Deno.permissions.query({ name: "write" })).state !== "granted",
   async fn() {
     const tempDir = await Deno.makeTempDir({ prefix: "audiofeed-chrome-test-" });
     try {
-      const absentDir = `${tempDir}/absent-puppeteer-chrome`;
-      const emptyDir = `${tempDir}/empty-puppeteer-chrome`;
-      await Deno.mkdir(emptyDir);
-
-      assertThrows(
-        () => newestChrome(absentDir),
-        Error,
-        `No Chrome binaries found under ${absentDir}`,
-      );
-
-      assertThrows(
-        () => newestChrome(emptyDir),
-        Error,
-        `No Chrome binaries found under ${emptyDir}`,
-      );
-
-      const v1 = `${tempDir}/mock-cache/120.0.0`;
-      const v2 = `${tempDir}/mock-cache/121.0.0`;
+      const v1 = `${tempDir}/mock-cache/120.0.0/chrome-linux64`;
+      const v2 = `${tempDir}/mock-cache/121.0.0/chrome-linux64`;
       await Deno.mkdir(v1, { recursive: true });
       await Deno.mkdir(v2, { recursive: true });
+      // The binaries are real files: discovery probes them, because a version directory alone is what the
+      // emptied cache still had. Version 121 is NEWER than 120 and must win.
+      await Deno.writeTextFile(`${v1}/chrome`, "");
+      await Deno.writeTextFile(`${v2}/chrome`, "");
       assertEquals(
-        newestChrome(`${tempDir}/mock-cache`),
+        discoverChromeBinary({
+          chromeCacheRoot: `${tempDir}/mock-cache`,
+          env: { get: () => undefined },
+          systemBinaries: [],
+        }),
         `${tempDir}/mock-cache/121.0.0/chrome-linux64/chrome`,
       );
+
+      // A version directory whose binary is missing is NOT a browser: the cache half-removed is exactly the
+      // shape that produced the false red, so it falls through rather than handing back a path that cannot
+      // spawn.
+      await Deno.remove(`${tempDir}/mock-cache/121.0.0`, { recursive: true });
+      await Deno.remove(`${v1}/chrome`);
+      const err = assertThrows(
+        () =>
+          discoverChromeBinary({
+            chromeCacheRoot: `${tempDir}/mock-cache`,
+            env: { get: () => undefined },
+            systemBinaries: [],
+          }),
+        Error,
+      );
+      assertStringIncludes(err.message, `${tempDir}/mock-cache`);
     } finally {
       await Deno.remove(tempDir, { recursive: true }).catch(() => {});
     }
@@ -1394,23 +1484,29 @@ Deno.test("proof-helper: launchChrome with stub exiting immediately rejects and 
   });
 });
 
-Deno.test("proof-helper: resolveChromeBinary supports explicit override and env var", () => {
+Deno.test("proof-helper: discovery precedence is option, env var, cache, system browser", () => {
   // The env is INJECTED rather than set process-globally (audio-feed-w5i0m): under
   // `deno test --parallel` a Deno.env.set here is visible to every concurrently running module for the
-  // whole set/restore window. The assertion is unchanged - override beats the env var, the env var
-  // beats discovery - and the default reader (`Deno.env`) is exercised by every launching test below.
-  assertEquals(resolveChromeBinary("/custom/chrome"), "/custom/chrome");
+  // whole set/restore window. Precedence is what is asserted - the explicit option beats the env var, and
+  // the env var beats every discovered candidate - and the default reader (`Deno.env`) is exercised by every
+  // launching test below.
   const env = {
     get: (key: string) => key === "AUDIOFEED_CHROME_BIN" ? "/env/chrome" : undefined,
   };
-  assertEquals(resolveChromeBinary(undefined, env), "/env/chrome");
-  assertEquals(resolveChromeBinary("/override/chrome", env), "/override/chrome");
-  // An empty reader does not silently fall back to the process env: it reaches discovery, which fails on an
-  // empty cache root rather than returning something plausible.
+  assertEquals(discoverChromeBinary({ binary: "/custom/chrome" }), "/custom/chrome");
+  assertEquals(discoverChromeBinary({ env }), "/env/chrome");
+  assertEquals(discoverChromeBinary({ binary: "/override/chrome", env }), "/override/chrome");
+  // An empty reader does not silently fall back to the process env: with no candidate anywhere it reaches the
+  // not-found error rather than returning something plausible.
   assertThrows(
     () =>
-      resolveChromeBinary(undefined, { get: () => undefined }, "/tmp/absent-audiofeed-chrome-root"),
+      discoverChromeBinary({
+        env: { get: () => undefined },
+        chromeCacheRoot: "/tmp/absent-audiofeed-chrome-root",
+        systemBinaries: [],
+      }),
     Error,
+    "No Chrome binary was found",
   );
 });
 
@@ -1598,21 +1694,29 @@ Deno.test("proof-helper: launchChrome rejects without creating profile when Chro
   const testPrefix = `audiofeed-disc-fail-inproc-${Deno.pid}-`;
   const fakeHome = `/tmp/nonexistent-audiofeed-inproc-home-${Deno.pid}`;
   try {
-    // The cache root and the env are PASSED, not mutated (audio-feed-w5i0m): a global HOME change redirects
-    // path resolution for anything spawning a child in a concurrently running module, and a global
-    // AUDIOFEED_CHROME_BIN delete makes another module's launch fail for reasons it cannot see.
+    // The cache root, the env and the system candidates are PASSED, not mutated (audio-feed-w5i0m): a global
+    // HOME change redirects path resolution for anything spawning a child in a concurrently running module, a
+    // global AUDIOFEED_CHROME_BIN delete makes another module's launch fail for reasons it cannot see, and
+    // `systemBinaries: []` is how a row proves "no browser anywhere" while /usr/bin/google-chrome stays put
+    // for the browser suites running beside it (audio-feed-rc0g8).
     const err = await assertRejects(
       async () => {
         await launchChrome({
           prefix: testPrefix,
           chromeCacheRoot: `${fakeHome}/.cache/puppeteer/chrome`,
           env: { get: () => undefined },
+          systemBinaries: [],
         });
       },
       Error,
-      `No Chrome binaries found under ${fakeHome}/.cache/puppeteer/chrome`,
+      "No Chrome binary was found",
     );
-    assertStringIncludes(err.message, "No Chrome binaries found under");
+    assertStringIncludes(err.message, `${fakeHome}/.cache/puppeteer/chrome`);
+    // A discovery failure is not a launch failure: it must not claim a browser was found.
+    assert(
+      !err.message.includes("but would not start"),
+      `a missing browser must not read as a failed launch: ${err.message}`,
+    );
 
     const leftovers = [...Deno.readDirSync("/tmp")]
       .filter((e) => e.name.startsWith(testPrefix));
@@ -1632,13 +1736,41 @@ Deno.test("proof-helper: launchChrome rejects without creating profile when Chro
   }
 });
 
+Deno.test("proof-helper: launchChrome separates a browser that was found but would not start from a missing one", async () => {
+  // The other half of audio-feed-rc0g8's requirement: a discovered binary that the OS refuses to start is a
+  // DIFFERENT fault from "no browser is installed", and the two must not read alike. The path is passed as
+  // `binary:`, so discovery trusted it and the failure is the launch's.
+  const unstartable = `/nonexistent/audiofeed-stub-chrome-${Deno.pid}`;
+  const err = await assertRejects(
+    async () => {
+      await launchChrome({ binary: unstartable, prefix: "audiofeed-stub-unstartable-" });
+    },
+    Error,
+  );
+  assertStringIncludes(err.message, `Chrome binary '${unstartable}' was found`);
+  assertStringIncludes(err.message, "the `binary` option");
+  assertStringIncludes(err.message, "but would not start");
+  assertStringIncludes(err.message, "This is a launch failure, not a discovery failure");
+  assert(
+    !err.message.includes("No Chrome binary was found"),
+    `a found-but-unstartable binary must not be reported as missing: ${err.message}`,
+  );
+});
+
 Deno.test("proof-helper: subprocess: binary discovery failure exits non-zero and leaves no profile", async () => {
   const fixture = new URL("./fixtures/chrome_discovery_failure_child.ts", import.meta.url).pathname;
   const testPrefix = `audiofeed-disc-fail-subp-${Deno.pid}-`;
   const fakeHome = `/tmp/nonexistent-audiofeed-subp-home-${Deno.pid}`;
   try {
     const cmd = new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", "--unstable-kv", fixture, testPrefix],
+      args: [
+        "run",
+        "-A",
+        "--unstable-kv",
+        fixture,
+        testPrefix,
+        `${fakeHome}/.cache/puppeteer/chrome`,
+      ],
       env: {
         HOME: fakeHome,
         AUDIOFEED_CHROME_BIN: "",
@@ -1650,10 +1782,11 @@ Deno.test("proof-helper: subprocess: binary discovery failure exits non-zero and
     assertEquals(output.success, false);
     assertEquals(output.code !== 0, true);
     const stderrText = new TextDecoder().decode(output.stderr);
-    assertStringIncludes(
-      stderrText,
-      `No Chrome binaries found under ${fakeHome}/.cache/puppeteer/chrome`,
-    );
+    // The child searches the cache root it was handed and NO system candidate, so the message it prints is
+    // the no-browser message - naming that root and the env var - in a real process with a real exit code.
+    assertStringIncludes(stderrText, "No Chrome binary was found");
+    assertStringIncludes(stderrText, `${fakeHome}/.cache/puppeteer/chrome`);
+    assertStringIncludes(stderrText, "AUDIOFEED_CHROME_BIN=/path/to/chrome");
 
     const leftovers = [...Deno.readDirSync("/tmp")]
       .filter((e) => e.name.startsWith(testPrefix));

@@ -17,8 +17,8 @@
 
 import {
   createTempChromeProfile,
+  discoverChromeBinary,
   killChromeAndWait,
-  newestChrome,
   removeDirWhenQuiet,
   runProof,
   spawnHarness,
@@ -45,7 +45,7 @@ await runProof("spend-visibility-browser-proof", async (checker) => {
   // -- launch chrome ------------------------------------------------------------
   await Deno.mkdir(OUT, { recursive: true });
 
-  const chrome = new Deno.Command(newestChrome(), {
+  const chrome = new Deno.Command(discoverChromeBinary(), {
     args: [
       "--headless=new",
       "--no-sandbox",

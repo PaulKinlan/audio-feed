@@ -19,7 +19,7 @@ import { assetUrl, handleAsset } from "../src/routes/assets.ts";
 import { DESIGN_TOKENS } from "../src/routes/tokens.ts";
 import type { RouteContext } from "../src/router.ts";
 import { shippedCss } from "./admin_css.ts";
-import { withChrome } from "../scripts/proof-helper.ts";
+import { discoverChromeBinary, withChrome } from "../scripts/proof-helper.ts";
 import { connectCdp } from "../scripts/proof-cdp.ts";
 
 /**
@@ -422,7 +422,7 @@ Deno.test({
     await Deno.writeTextFile(tempHtmlFile, testHtml);
 
     try {
-      const command = new Deno.Command("google-chrome-stable", {
+      const command = new Deno.Command(discoverChromeBinary(), {
         args: [
           "--headless=new",
           "--disable-gpu",
@@ -583,7 +583,7 @@ Deno.test({
     await Deno.writeTextFile(tempHtmlFile, testHtml);
 
     try {
-      const command = new Deno.Command("google-chrome-stable", {
+      const command = new Deno.Command(discoverChromeBinary(), {
         args: [
           "--headless=new",
           "--disable-gpu",
@@ -743,7 +743,7 @@ Deno.test({
     await Deno.writeTextFile(tempHtmlFile, testHtml);
 
     try {
-      const command = new Deno.Command("google-chrome-stable", {
+      const command = new Deno.Command(discoverChromeBinary(), {
         args: [
           "--headless=new",
           "--disable-gpu",
@@ -988,7 +988,7 @@ Deno.test({
     await Deno.writeTextFile(tempHtmlFile, testHtml);
 
     try {
-      const command = new Deno.Command("google-chrome-stable", {
+      const command = new Deno.Command(discoverChromeBinary(), {
         args: [
           "--headless=new",
           "--disable-gpu",
@@ -1110,7 +1110,7 @@ Deno.test({
       await Deno.writeTextFile(tempHtmlFile, makeTestHtml(forceFallback));
 
       try {
-        const command = new Deno.Command("google-chrome-stable", {
+        const command = new Deno.Command(discoverChromeBinary(), {
           args: [
             "--headless=new",
             "--disable-gpu",
@@ -1243,7 +1243,7 @@ async function resultsOf<T>(html: string, windowSize = "1000,900"): Promise<T> {
   const profileDir = await Deno.makeTempDir({ prefix: "anchor-positioning-chrome-" });
   await Deno.writeTextFile(file, html);
   try {
-    const output = await new Deno.Command("google-chrome-stable", {
+    const output = await new Deno.Command(discoverChromeBinary(), {
       args: [
         "--headless=new",
         "--disable-gpu",

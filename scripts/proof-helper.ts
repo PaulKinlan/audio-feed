@@ -7,7 +7,8 @@
  * 3. Harness visibility: captures and retains harness stdout & stderr.
  * 4. Premature exit detection: monitors harness process status during health check loop
  *    and fails fast if the child process dies or /health never answers.
- * 5. Chrome discovery: single canonical `newestChrome()` resolver across all proofs.
+ * 5. Chrome discovery: single canonical `discoverChromeBinary()` resolver across all proofs, suites and
+ *    scripts (option, `AUDIOFEED_CHROME_BIN`, puppeteer cache, installed system browser).
  *
  * Note on `scripts/*-browser-proof.ts`:
  * Browser-proof scripts are manual-only, on-demand verification harnesses designed
@@ -585,21 +586,99 @@ export interface EnvReader {
   get(key: string): string | undefined;
 }
 
-export function newestChrome(chromeCacheRoot?: string, env: EnvReader = Deno.env): string {
-  if (!chromeCacheRoot) {
-    const envBin = env.get("AUDIOFEED_CHROME_BIN");
-    if (envBin && envBin.trim().length > 0) {
-      return envBin.trim();
-    }
+/**
+ * Installed system browsers, tried after the cache (audio-feed-rc0g8).
+ *
+ * WHY THIS LIST EXISTS: the resolver used to enumerate ONE location, `$HOME/.cache/puppeteer/chrome`. On
+ * 2026-11-14 that directory was emptied on this VM while `/usr/bin/google-chrome` kept working, and the
+ * full gate reported 19 failed rows with "No Chrome binaries found under ..." - a whole-lane red in which
+ * ZERO product rows had failed. One hardcoded path turned a missing cache into a false product failure, and
+ * the workaround was a human remembering `AUDIOFEED_CHROME_BIN=/usr/bin/google-chrome`. Discovery is what
+ * removes the memory requirement.
+ *
+ * VERSION ASSUMPTION, stated because it cannot be cheaply proven: discovery proves the path resolves to a
+ * file, NOT that the file is Chromium-family or new enough for what the gate asserts (container scroll-state
+ * needs Chromium 133+; the suites also assert anchor positioning, customizable `select`, and dialog
+ * `closedBy`). An old or non-Chromium binary fails on the behavioural assert that names its feature, and says
+ * so through `launchChrome`'s "found but would not start" path - never as a second "no browser installed"
+ * red. Spawning `--version` on every resolution would cost a process per call to answer a question the
+ * launching suite answers more precisely.
+ */
+const SYSTEM_CHROME_PATHS = [
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+] as const;
+
+/** Binary names a `which`-style probe looks for on `PATH`, after the absolute paths above. */
+const SYSTEM_CHROME_PATH_NAMES = [
+  "google-chrome",
+  "google-chrome-stable",
+  "chromium",
+  "chromium-browser",
+  "chrome",
+] as const;
+
+type ChromeBinarySource = "option" | "env" | "puppeteer-cache" | "system";
+
+interface ResolvedChromeBinary {
+  binary: string;
+  source: ChromeBinarySource;
+  /** The rule that produced the binary, phrased for an error message. */
+  origin: string;
+}
+
+/**
+ * The one place a Chrome binary is resolved (audio-feed-rc0g8): explicit option, then `AUDIOFEED_CHROME_BIN`,
+ * then the puppeteer cache, then an installed system browser.
+ */
+export interface ChromeDiscoveryOptions {
+  /** An explicit binary - `launchChrome`'s `binary:` option. Beats every other rule. */
+  binary?: string;
+  /** Injected env reader (audio-feed-w5i0m). Defaults to `Deno.env`. */
+  env?: EnvReader;
+  /** The puppeteer cache root to search. Defaults to `$HOME/.cache/puppeteer/chrome`. */
+  chromeCacheRoot?: string;
+  /**
+   * System candidates to try instead of the default list. A test passes `[]` to prove what a machine with NO
+   * browser produces, without moving `/usr/bin/google-chrome` out from under every other lane on the VM.
+   */
+  systemBinaries?: readonly string[];
+  /** Existence probe. Defaults to a real `Deno.statSync`. */
+  fileExists?: (path: string) => boolean;
+}
+
+function defaultFileExists(path: string): boolean {
+  try {
+    return Deno.statSync(path).isFile;
+  } catch {
+    return false;
   }
-  // HOME stays a LITERAL `Deno.env.get("HOME")` on purpose. The fast gate's read-relation scanner classifies an
-  // out-of-repo base by that exact expression (`isOutOfRepoRhs` in scripts/test-selection.ts); routing it
-  // through the injected reader instead made `${home}/.cache/puppeteer/chrome` read as an unresolved IN-REPO
-  // hint, which disabled the gate's inert class and answered 500 server_misconfigured-shaped noise on three
-  // gate suites (audio-feed-w5i0m). A caller that needs a different root passes `chromeCacheRoot`, which is
-  // this module's existing seam and the one the discovery test uses.
+}
+
+/**
+ * The puppeteer cache root. `HOME` stays a LITERAL `Deno.env.get("HOME")` on purpose. The fast gate's
+ * read-relation scanner classifies an out-of-repo base by that exact expression (`isOutOfRepoRhs` in
+ * scripts/test-selection.ts); routing it through the injected reader instead made
+ * `${home}/.cache/puppeteer/chrome` read as an unresolved IN-REPO hint, which disabled the gate's inert class
+ * and answered 500 server_misconfigured-shaped noise on three gate suites (audio-feed-w5i0m). A caller that
+ * needs a different root passes `chromeCacheRoot`, which is this module's seam and the one the discovery rows
+ * use.
+ */
+function puppeteerCacheRoot(): string {
   const home = Deno.env.get("HOME") ?? "";
-  const root = chromeCacheRoot ?? `${home}/.cache/puppeteer/chrome`;
+  return `${home}/.cache/puppeteer/chrome`;
+}
+
+/**
+ * The newest version directory's binary, or null. A version directory is puppeteer's own evidence that it
+ * installed a browser, but the binary under it is probed too: an emptied or half-removed cache (exactly the
+ * 2026-11-14 shape) must fall through to the system browser rather than hand back a path that cannot spawn.
+ */
+function cachedChromeBinary(
+  root: string,
+  fileExists: (path: string) => boolean,
+): string | null {
   let dirs: string[] = [];
   try {
     dirs = [...Deno.readDirSync(root)]
@@ -609,25 +688,84 @@ export function newestChrome(chromeCacheRoot?: string, env: EnvReader = Deno.env
   } catch {
     dirs = [];
   }
-  if (dirs.length === 0) {
-    throw new Error(`No Chrome binaries found under ${root}`);
-  }
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
+  const newest = dirs.at(-1);
+  if (!newest) return null;
+  const binary = `${root}/${newest}/chrome-linux64/chrome`;
+  return fileExists(binary) ? binary : null;
 }
 
-export function resolveChromeBinary(
-  override?: string,
-  env: EnvReader = Deno.env,
-  chromeCacheRoot?: string,
+/** Absolute system paths first, then a `which`-style sweep of `PATH`, de-duplicated in that order. */
+function systemChromeBinaries(env: EnvReader): string[] {
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  const push = (path: string) => {
+    if (!seen.has(path)) {
+      seen.add(path);
+      candidates.push(path);
+    }
+  };
+  for (const path of SYSTEM_CHROME_PATHS) push(path);
+  for (const dir of (env.get("PATH") ?? "").split(":")) {
+    if (!dir) continue;
+    for (const name of SYSTEM_CHROME_PATH_NAMES) push(`${dir}/${name}`);
+  }
+  return candidates;
+}
+
+function chromeNotFoundMessage(
+  cacheRoot: string,
+  systemBinaries: readonly string[],
 ): string {
-  if (override && override.trim().length > 0) {
-    return override.trim();
+  const tried = [
+    "the `binary` option or AUDIOFEED_CHROME_BIN (neither set)",
+    `the puppeteer cache (no <version>/chrome-linux64/chrome under ${cacheRoot})`,
+    ...systemBinaries.map((path) => `the system browser ${path}`),
+  ];
+  return `No Chrome binary was found. Tried, in order: ${tried.join("; ")}. ` +
+    `Set AUDIOFEED_CHROME_BIN=/path/to/chrome to name one explicitly.`;
+}
+
+function describeChromeOrigin(resolved: ResolvedChromeBinary): string {
+  return resolved.source === "system" ? `the system browser ${resolved.binary}` : resolved.origin;
+}
+
+function resolveChrome(opts: ChromeDiscoveryOptions = {}): ResolvedChromeBinary {
+  const env = opts.env ?? Deno.env;
+
+  const explicit = opts.binary?.trim();
+  if (explicit) return { binary: explicit, source: "option", origin: "the `binary` option" };
+
+  const envBin = env.get("AUDIOFEED_CHROME_BIN")?.trim();
+  if (envBin) return { binary: envBin, source: "env", origin: "AUDIOFEED_CHROME_BIN" };
+
+  const fileExists = opts.fileExists ?? defaultFileExists;
+  const cacheRoot = opts.chromeCacheRoot ?? puppeteerCacheRoot();
+  const cached = cachedChromeBinary(cacheRoot, fileExists);
+  if (cached) {
+    return {
+      binary: cached,
+      source: "puppeteer-cache",
+      origin: `the puppeteer cache (${cacheRoot})`,
+    };
   }
-  const envBin = env.get("AUDIOFEED_CHROME_BIN");
-  if (envBin && envBin.trim().length > 0) {
-    return envBin.trim();
+
+  const systemBinaries = opts.systemBinaries ?? systemChromeBinaries(env);
+  for (const candidate of systemBinaries) {
+    if (fileExists(candidate)) {
+      return { binary: candidate, source: "system", origin: `the system browser ${candidate}` };
+    }
   }
-  return newestChrome(chromeCacheRoot, env);
+
+  throw new Error(chromeNotFoundMessage(cacheRoot, systemBinaries));
+}
+
+/**
+ * The single Chrome resolver: explicit option, `AUDIOFEED_CHROME_BIN`, puppeteer cache, installed system
+ * browser. Everything that launches a browser - `launchChrome`, the browser proofs, and the browser suites -
+ * goes through here, so a missing cache can never be a product red again (audio-feed-rc0g8).
+ */
+export function discoverChromeBinary(opts: ChromeDiscoveryOptions = {}): string {
+  return resolveChrome(opts).binary;
 }
 
 export interface ChromeLaunchOptions {
@@ -650,10 +788,15 @@ export interface ChromeLaunchOptions {
   env?: EnvReader;
   /**
    * The Chrome cache root to discover under (audio-feed-w5i0m). Passed rather than mutating `HOME`, so a
-   * test can assert "no Chrome binaries found under <root>" without redirecting path resolution for every
-   * concurrently running module.
+   * test can assert what a machine with no browser installed produces without redirecting path resolution for
+   * every concurrently running module.
    */
   chromeCacheRoot?: string;
+  /**
+   * System candidates to try instead of the installed-browser list (audio-feed-rc0g8). A test passes `[]` to
+   * reach the not-found path without moving `/usr/bin/google-chrome` out from under every other lane.
+   */
+  systemBinaries?: readonly string[];
 }
 
 export interface ChromeHandle {
@@ -666,7 +809,8 @@ export interface ChromeHandle {
 export async function launchChrome(
   opts: ChromeLaunchOptions = {},
 ): Promise<ChromeHandle> {
-  const binary = resolveChromeBinary(opts.binary, opts.env, opts.chromeCacheRoot);
+  const resolved = resolveChrome(opts);
+  const binary = resolved.binary;
   const prefix = opts.prefix ?? "audiofeed-chrome-";
 
   let profile: { profileDir: string; cleanup: () => Promise<void> } | null = null;
@@ -718,7 +862,23 @@ export async function launchChrome(
       stdout: "null",
       stderr: "null",
     });
-    process = cmd.spawn();
+    try {
+      process = cmd.spawn();
+    } catch (err) {
+      // A binary discovery FOUND but the OS would not start it is a different fault from "no browser is
+      // installed", and it must not read like one (audio-feed-rc0g8): the first is an environment or
+      // permission problem with a browser that is present, the second is the discovery list above. Naming the
+      // origin is what tells the two apart at the point of failure.
+      throw new Error(
+        `Chrome binary '${binary}' was found (${
+          describeChromeOrigin(resolved)
+        }) but would not start: ${
+          err instanceof Error ? err.message : String(err)
+        }. This is a launch failure, not a discovery failure - the browser exists, so either it is not a ` +
+          `Chromium build this gate can drive, or it cannot run here.`,
+        { cause: err },
+      );
+    }
 
     let exited = false;
     let exitCode: number | null = null;
@@ -752,7 +912,9 @@ export async function launchChrome(
           break;
         }
         throw new Error(
-          `Chrome process '${binary}' exited prematurely with code ${
+          `Chrome process '${binary}' (${
+            describeChromeOrigin(resolved)
+          }) exited prematurely with code ${
             exitCode ?? -1
           } before writing DevToolsActivePort in '${profileDir}'`,
         );
@@ -770,7 +932,8 @@ export async function launchChrome(
 
     if (!port) {
       throw new Error(
-        `Timed out after ${portTimeoutMs}ms waiting for DevToolsActivePort in '${profileDir}'`,
+        `Timed out after ${portTimeoutMs}ms waiting for DevToolsActivePort in '${profileDir}' from Chrome ` +
+          `binary '${binary}' (${describeChromeOrigin(resolved)})`,
       );
     }
 

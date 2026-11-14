@@ -16,6 +16,7 @@ import { openStores } from "../src/config.ts";
 import { bootstrap } from "../src/server.ts";
 import {
   createTempChromeProfile,
+  discoverChromeBinary,
   removeDirWhenQuiet,
   waitForChromeProfileUnused,
 } from "./proof-helper.ts";
@@ -47,7 +48,7 @@ let socket: WebSocket | undefined;
 try {
   console.log(`[s3uk] Server started at ${pageUrl}`);
 
-  chrome = new Deno.Command("google-chrome", {
+  chrome = new Deno.Command(discoverChromeBinary(), {
     args: [
       "--headless=new",
       "--remote-debugging-port=0",

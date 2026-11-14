@@ -487,12 +487,18 @@ Deno.test("audio-feed-i9ao: the eleven mis-parses stay corrected, so no known hi
   // path-shaped, which is audio-feed-snww's subject (a hint dropped in silence). It cannot BLOCK - a hint with
   // no slash and no extension is neither markdown nor a directory prefix (`couldHideInertRead` is false for it)
   // - so the invariant this test exists for still holds, and the assertion below states it directly.
+  // audio-feed-rc0g8 moved where the puppeteer cache is SPELLED: `.cache/puppeteer/chrome`,
+  // `absent-puppeteer-chrome` and `empty-puppeteer-chrome` used to reach a READ call because
+  // `newestChrome()` held `const root = ... ?? `${home}/.cache/puppeteer/chrome`` in the same scope as its
+  // `Deno.readDirSync(root)`. Chrome resolution now lives in `discoverChromeBinary`, whose filesystem access
+  // is a directory listing and a stat - and the rows that exercise it hand over temp paths, which are
+  // reported (below) rather than dropped. Those three hints are therefore no longer DERIVED from this tree at
+  // all, which is why they are gone from this list instead of reclassified: a hint no read call can reach
+  // cannot come back as an unresolved path. The invariant they were listed for - nothing unresolved - is
+  // asserted directly below.
   const known = [
-    ".cache/puppeteer/chrome",
-    "absent-puppeteer-chrome",
-    "empty-puppeteer-chrome",
-    "mock-cache/120.0.0",
-    "mock-cache/121.0.0",
+    "mock-cache/120.0.0/chrome-linux64",
+    "mock-cache/121.0.0/chrome-linux64",
     "bd",
     "digest.md",
     "state.json",
