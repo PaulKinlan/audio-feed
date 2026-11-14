@@ -20,7 +20,13 @@ import { GEMINI_TTS_VOICES, VOICE_PROFILES } from "../tts/gemini.ts";
 import { INBOX_SOURCE_ID, isClaimExpired } from "../types.ts";
 import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
-import { CONFIRM_DIALOG_CLIENT, PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
+import {
+  CONFIRM_DIALOG_CLIENT,
+  PASSKEY_CLIENT,
+  renderShell,
+  SAME_ORIGIN_PATH_CLIENT,
+  viewerOf,
+} from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 import { blobStoreDirectUrlOrigin } from "../storage/mod.ts";
 import { countOutdatedEpisodes } from "../compose.ts";
@@ -470,6 +476,7 @@ ${sendSection}
   const CREDENTIAL_IDS = ${jsonForScript(d.credentials.map((c) => c.id))};
   const DISPLAY = ${jsonForScript({ name: user.email, displayName: user.displayName })};
   const PREFILL = ${jsonForScript(d.prefill ?? null)};
+${SAME_ORIGIN_PATH_CLIENT}
 ${PASSKEY_CLIENT}
 ${CONFIRM_DIALOG_CLIENT}
   const $ = (id) => document.getElementById(id);
@@ -540,7 +547,7 @@ ${CONFIRM_DIALOG_CLIENT}
   }
 
   async function send(method, path, body) {
-    const res = await fetch(path, {
+    const res = await fetch(assertSameOriginPath(path), {
       method,
       headers: body ? { "content-type": "application/json" } : {},
       body: body ? JSON.stringify(body) : undefined,

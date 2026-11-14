@@ -852,7 +852,7 @@ export const RECALL_EXCLUSIONS: Record<string, string> = {
   "scripts/source-mask.ts":
     "shared utility imported by the mapped suites tests/source_mask_test.ts and tests/fast_check_test.ts and by the census/sweep suites below, which only read generated masks and are deliberately left unmapped; secondary: tests/chrome_profile_sweep_sites_test.ts, tests/evidence_census_test.ts, tests/prompt_census_test.ts",
   "scripts/test-selection.ts":
-    "test selection core module mapped through its primary suites tests/source_scanner_test.ts and tests/evidence_census_test.ts; the specialised relation/scanner suites below import it to exercise one scanner each and are deliberately left unmapped; secondary: tests/bare_name_relation_test.ts, tests/dynamic_regexp_population_test.ts, tests/evidence_run_test.ts, tests/fast_gate_subset_test.ts, tests/read_relation_hints_test.ts, tests/spawn_relation_test.ts, tests/strip_comments_unterminated_test.ts, tests/verify_script_ledger_test.ts",
+    "test selection core module mapped through its primary suites tests/source_scanner_test.ts and tests/evidence_census_test.ts; the specialised relation/scanner suites below import it to exercise one scanner each and are deliberately left unmapped; secondary: tests/bare_name_relation_test.ts, tests/dynamic_regexp_population_test.ts, tests/evidence_run_test.ts, tests/fast_gate_subset_test.ts, tests/read_relation_hints_test.ts, tests/same_origin_path_test.ts, tests/spawn_relation_test.ts, tests/strip_comments_unterminated_test.ts, tests/verify_script_ledger_test.ts",
 };
 
 /**

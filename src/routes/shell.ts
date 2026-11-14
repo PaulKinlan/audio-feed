@@ -21,6 +21,10 @@ import { DESIGN_TOKENS } from "./tokens.ts";
 // out of admin.js by audio-feed-3xq part 4c); the same `with { type: "text" }` idiom
 // src/routes/assets.ts uses to serve it.
 import confirmSharedSource from "../assets/confirm-shared.js" with { type: "text" };
+// The other client helper with a single source (audio-feed-fg18i): the guard every path-forwarding
+// wrapper runs its caller's path through. src/routes/assets.ts composes these same bytes in front
+// of src/assets/admin.js for the console module; the classic-script pages get them inline below.
+import sameOriginPathSource from "../assets/same-origin-path.js" with { type: "text" };
 import cwvStatsSource from "../assets/cwv-stats.js" with { type: "text" };
 import cwvClientSource from "../assets/cwv.js" with { type: "text" };
 import tooltipClientSource from "../assets/tooltip-client.js" with { type: "text" };
@@ -599,6 +603,53 @@ function escapeRegExp(text: string): string {
 
 export const CONFIRM_DIALOG_CLIENT = confirmClientFromSource(confirmSharedSource);
 
+const SAME_ORIGIN_PATH_BEGIN = "// #same-origin-path-begin";
+const SAME_ORIGIN_PATH_END = "// #same-origin-path-end";
+
+/**
+ * The marked region of src/assets/same-origin-path.js: the guard, without the file's own prose.
+ *
+ * The prose is left out because it spells out attack shapes (`//evil.example/x` and friends): a
+ * classic-script page carrying that string in a comment reddens the open-redirect rows that assert
+ * no attacker-shaped host reaches rendered HTML (tests/account_pages_test.ts).
+ *
+ * Whole-LINE marker matches only, and found by splitting on newlines rather than by a regular
+ * expression: the comment above names both markers, and prose must not satisfy the search. A plain
+ * line compare is also why this adds no dynamic RegExp site to THREAT_MODEL.md register row 10.
+ */
+export function sameOriginPathClientFromSource(source: string): string {
+  const lines = source.split("\n");
+  const begin = lines.indexOf(SAME_ORIGIN_PATH_BEGIN);
+  const end = lines.indexOf(SAME_ORIGIN_PATH_END);
+  if (begin < 0 || end < 0 || end < begin) {
+    throw new Error(
+      `src/assets/same-origin-path.js must bracket the guard with whole lines ` +
+        `${SAME_ORIGIN_PATH_BEGIN} and ${SAME_ORIGIN_PATH_END} (audio-feed-fg18i single source)`,
+    );
+  }
+  const region = lines.slice(begin + 1, end).join("\n").replace(/^\n+/, "").replace(/\n+$/, "");
+  if (!region.includes("function assertSameOriginPath(")) {
+    throw new Error(
+      "the marked same-origin-path region no longer contains assertSameOriginPath",
+    );
+  }
+  // The region ships inside a classic <script> on the login and account pages: module syntax there
+  // is a page-killing SyntaxError, so this guards the embed contract, not style.
+  if (/(^|\n)\s*(import|export)\b/.test(region)) {
+    throw new Error("the marked same-origin-path region must not use import/export");
+  }
+  return region;
+}
+
+/**
+ * The same-origin path guard, for the classic-script pages (audio-feed-fg18i).
+ *
+ * `post()` below takes a caller-supplied path, and so does `send()` in src/routes/account.ts: both
+ * run it through `assertSameOriginPath()` from this snippet, which src/routes/assets.ts composes
+ * (in full) in front of the console module for `api()`.
+ */
+export const SAME_ORIGIN_PATH_CLIENT = sameOriginPathClientFromSource(sameOriginPathSource);
+
 /**
  * Accessible Tooltip Container HTML (audio-feed-pzwe).
  * WCAG 2.1 1.4.13:
@@ -848,7 +899,7 @@ export const PASSKEY_CLIENT = `
     };
   }
   async function post(path, body) {
-    const res = await fetch(path, {
+    const res = await fetch(assertSameOriginPath(path), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body || {}),

@@ -98,10 +98,13 @@ Deno.test("confirm client has ONE source: confirm-shared.js, composed into admin
   // src/assets/admin.js (assets.ts), and the classic-script pages (account) EMBED the file's
   // marked region sliced at import time (shell.ts CONFIRM_DIALOG_CLIENT). This test pins both
   // derivations: exactly one marker pair in the shared file and in the composed admin bytes, the
-  // composition is exactly shared + "\n" + console file, the slice equals the shell export byte
-  // for byte, the on-disk console file no longer carries any copy or marker, and the console
+  // composition is exactly guard + shared + "\n" + console file, the slice equals the shell export
+  // byte for byte, the on-disk console file no longer carries any copy or marker, and the console
   // binds to the composed-provided client through globalThis. What CAN still break is the
   // slicing or the composition order — and that fails here instead of at deploy.
+  // audio-feed-fg18i: the same-origin path guard is composed in FRONT of both, so this test owns
+  // the whole served-module contract rather than only its confirm half.
+  const guardFile = Deno.readTextFileSync("src/assets/same-origin-path.js");
   const sharedFile = Deno.readTextFileSync("src/assets/confirm-shared.js");
   const consoleFile = Deno.readTextFileSync("src/assets/admin.js");
   const source = assetBody("admin.js") ?? "";
@@ -132,8 +135,9 @@ Deno.test("confirm client has ONE source: confirm-shared.js, composed into admin
   );
   assertEquals(
     source,
-    `${sharedFile}\n${consoleFile}`,
-    "served admin.js must be exactly confirm-shared.js + console file (composition contract)",
+    `${guardFile}\n${sharedFile}\n${consoleFile}`,
+    "served admin.js must be exactly the path guard + confirm-shared.js + console file " +
+      "(composition contract, audio-feed-fg18i)",
   );
   assertStringIncludes(
     consoleFile,
