@@ -15,7 +15,14 @@ import {
   openD1Stores,
 } from "./config.ts";
 import { listDueFeedSources, pollFeedSource, runFeedPollBatch } from "./ingest/feed.ts";
+import {
+  emailIngestAddress,
+  ingestEmailMessage,
+  MAX_EMAIL_BYTES,
+  parseEmailRecipient,
+} from "./ingest/email.ts";
 import { createHandlers } from "./compose.ts";
+import { screenErrorForLogging } from "./observability/error_screen.ts";
 import { recordRun } from "./stats.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "./worker/synthesis.ts";
 import {
@@ -29,7 +36,16 @@ import type { D1DatabaseLike } from "./storage/d1/types.ts";
 import type { R2BucketLike } from "./storage/r2.ts";
 import type { EnvReader } from "./tts/gemini.ts";
 
-export { EpisodeSynthesisWorkflow };
+export { emailIngestAddress, EpisodeSynthesisWorkflow };
+
+export interface ForwardableEmailMessageLike {
+  readonly from: string;
+  readonly to: string;
+  readonly headers: Headers;
+  readonly raw: ReadableStream<Uint8Array>;
+  readonly rawSize: number;
+  setReject(reason: string): void;
+}
 
 export interface FeedPollQueueMessage {
   userId: string;
@@ -387,6 +403,57 @@ export default {
         console.error("[audio-feed] queue feed poll failed:", err);
         msg.retry();
       }
+    }
+  },
+
+  async email(
+    message: ForwardableEmailMessageLike,
+    env: WorkerEnv,
+    _execCtx: ExecutionContext,
+  ): Promise<void> {
+    // Enforce the 2 MiB size cap and recipient syntax BEFORE reading `message.raw` or querying D1.
+    if (typeof message.rawSize === "number" && message.rawSize > MAX_EMAIL_BYTES) {
+      message.setReject("Message exceeds the 2 MiB size limit.");
+      return;
+    }
+    if (!parseEmailRecipient(message.to)) {
+      message.setReject("Invalid recipient address.");
+      return;
+    }
+
+    const ctx = buildAppContext(env);
+    try {
+      const result = await ingestEmailMessage(ctx, {
+        to: message.to,
+        from: message.from,
+        raw: message.raw,
+        rawSize: message.rawSize,
+        headers: message.headers,
+      });
+
+      if (!result.ok) {
+        if (result.reject) {
+          message.setReject(result.reason);
+        }
+        console.warn(`[audio-feed] email ingest rejected (${result.code})`);
+        return;
+      }
+
+      if (result.deduplicated) {
+        console.log(
+          `[audio-feed] email ingest deduplicated for user ${result.userId} (article ${result.articleId})`,
+        );
+      } else {
+        console.log(
+          `[audio-feed] email ingest queued episode ${result.episodeId} for user ${result.userId} (mode=${result.mode})`,
+        );
+      }
+    } catch (err) {
+      // Transient/internal error: do NOT call setReject (avoid permanent SMTP bounce) and
+      // never log raw recipient addresses, headers, or feed tokens.
+      const screened = screenErrorForLogging(err);
+      console.error(`[audio-feed] email ingest error: ${screened.message}`);
+      throw err;
     }
   },
 };
