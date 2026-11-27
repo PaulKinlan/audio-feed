@@ -4,19 +4,19 @@ import { resolve } from "node:path";
 export default defineConfig({
   resolve: {
     alias: [
-      { find: /^jsr:@std\/assert(@.*)?$/, replacement: resolve(__dirname, "tests/compat/assert.ts") },
-      { find: "@std/assert", replacement: resolve(__dirname, "tests/compat/assert.ts") },
-      { find: /^jsr:@std\/path(@.*)?$/, replacement: resolve(__dirname, "tests/compat/path.ts") },
-      { find: "@std/path", replacement: resolve(__dirname, "tests/compat/path.ts") },
-      { find: /^jsr:@std\/testing\/time(@.*)?$/, replacement: resolve(__dirname, "tests/compat/time.ts") },
-      { find: "@std/testing/time", replacement: resolve(__dirname, "tests/compat/time.ts") },
+      { find: /^jsr:@std\/assert(@.*)?$/, replacement: resolve(import.meta.dirname, "tests/compat/assert.ts") },
+      { find: "@std/assert", replacement: resolve(import.meta.dirname, "tests/compat/assert.ts") },
+      { find: /^jsr:@std\/path(@.*)?$/, replacement: resolve(import.meta.dirname, "tests/compat/path.ts") },
+      { find: "@std/path", replacement: resolve(import.meta.dirname, "tests/compat/path.ts") },
+      { find: /^jsr:@std\/testing\/time(@.*)?$/, replacement: resolve(import.meta.dirname, "tests/compat/time.ts") },
+      { find: "@std/testing/time", replacement: resolve(import.meta.dirname, "tests/compat/time.ts") },
       { find: /^npm:linkedom(@.*)?$/, replacement: "linkedom" },
       { find: /^npm:ipaddr\.js(@.*)?$/, replacement: "ipaddr.js" },
       { find: /^npm:@mozilla\/readability(@.*)?$/, replacement: "@mozilla/readability" },
       { find: /^npm:aws4fetch(@.*)?$/, replacement: "aws4fetch" },
       { find: /^npm:@simplewebauthn\/server(@.*)?$/, replacement: "@simplewebauthn/server" },
-      { find: "cloudflare:workers", replacement: resolve(__dirname, "tests/compat/cloudflare-workers.ts") },
-      { find: "cloudflare:workflows", replacement: resolve(__dirname, "tests/compat/cloudflare-workers.ts") },
+      { find: "cloudflare:workers", replacement: resolve(import.meta.dirname, "tests/compat/cloudflare-workers.ts") },
+      { find: "cloudflare:workflows", replacement: resolve(import.meta.dirname, "tests/compat/cloudflare-workers.ts") },
     ],
   },
   test: {
