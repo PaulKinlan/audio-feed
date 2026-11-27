@@ -5,10 +5,13 @@
  * checkpointed Cloudflare Workflow steps:
  *   1. authorize-and-load (with `step.sleepUntil(nextUtcMidnight)` on daily budget exhaustion)
  *   2. prepare-plan (persists deepdive scriptTurns or computes deterministic narration segments)
- *   3. tts-segment-i (per-segment durable step with exponential backoff; skips finalized segments;
- *      persists each WAV segment to R2 + D1 immediately and returns only ~200B metadata)
- *   4. assemble-wav (streaming R2 Multipart Upload at ~16 MB constant RAM)
- *   5. finalize (atomic D1 ready commit + billing + R2 segment blob sweep + notification)
+ *   3. tts-segment-i (per-segment durable steps executed in bounded parallel batches of 3 with
+ *      exponential backoff; point-lookup reservation skips finalized segments; persists each WAV
+ *      segment to R2 + D1 immediately and returns only ~200B metadata)
+ *   4. assemble-audio + ensure-artwork (concurrent: streaming normalized/padded 64 kbps mono MP3
+ *      encoding into R2 Multipart Upload at bounded RAM, alongside best-effort cover art)
+ *   5. finalize (atomic D1 ready commit as `audio/mpeg` + padding-aligned chapters + billing +
+ *      R2 segment blob sweep + notification)
  */
 
 import { WorkflowEntrypoint } from "cloudflare:workers";
@@ -18,11 +21,16 @@ import { loadConfig, openD1Stores } from "../config.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { MAX_ARTICLE_CONTENT_CHARS } from "../ingest/url.ts";
 import {
-  assembleWavToBlobStore,
-  computeStreamingWavRevisionHash,
   inspectStoredWavSegment,
   type StoredWavSegment,
 } from "../storage/wav_assembly.ts";
+import {
+  assembleMp3ToBlobStore,
+  computeAssembledMp3DurationSeconds,
+  computeStreamingMp3RevisionHash,
+  DEFAULT_SEGMENT_GAP_MS,
+  segmentGapDurationSeconds,
+} from "../storage/mp3_assembly.ts";
 import type { D1DatabaseLike } from "../storage/d1/types.ts";
 import type { R2BucketLike } from "../storage/r2.ts";
 import type { BlobStore, MetadataStore } from "../storage/mod.ts";
@@ -144,6 +152,10 @@ type SegmentPlanItem =
   };
 
 export const WORKFLOW_CLAIM_LEASE_MS = 30 * 60 * 1000;
+/** Bounded parallel batch size for durable `tts-segment-i` steps. */
+export const TTS_SEGMENT_BATCH_CONCURRENCY = 3;
+/** Bounded optimistic-lock retry attempts when parallel sibling steps bump episode row version in D1. */
+const SEGMENT_CAS_RETRY_ATTEMPTS = 4;
 
 /** Compute the next UTC midnight (00:00:00.000Z strictly after `nowMs`). */
 export function nextUtcMidnight(nowMs = Date.now()): Date {
@@ -608,70 +620,114 @@ export async function runEpisodeSynthesisWorkflow(
       },
     );
 
-    // Stage 3: Synthesize each segment in its own durable step (zero PCM retained in memory!).
-    const storedSegments: StoredWavSegment[] = [];
-    for (let i = 0; i < plan.length; i++) {
-      const item = plan[i]!;
-      const segMeta = await step.do<StoredWavSegment>(
+    // Stage 3: Synthesize segments in bounded parallel batches of 3 (each segment keeps its
+    // own durable step, retry policy, and deterministic order; zero PCM retained in memory!).
+    const reserveSegmentWithCasRetry = async (
+      textHash: string,
+      item: SegmentPlanItem,
+    ): Promise<"reserved" | "finalized" | "no-claim"> => {
+      for (let attempt = 1; attempt <= SEGMENT_CAS_RETRY_ATTEMPTS; attempt++) {
+        const nowMs = now();
+        const nowIso = new Date(nowMs).toISOString();
+        const outcome = await metadata.reserveSynthesisSegment(
+          userId,
+          episodeId,
+          {
+            textHash,
+            text: item.textKey,
+            promptVersion: PROMPT_VERSION,
+            voice: item.voice,
+            audioKey: "",
+            byteLength: 0,
+            owner,
+            claimAt: nowIso,
+            createdAt: nowIso,
+            finalized: false,
+          },
+          nowMs,
+          WORKFLOW_CLAIM_LEASE_MS,
+        );
+        if (outcome !== "no-claim") return outcome;
+        const current = await metadata.getEpisode(userId, episodeId);
+        if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+          return "no-claim";
+        }
+        if (attempt < SEGMENT_CAS_RETRY_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 10 * attempt));
+        }
+      }
+      return "no-claim";
+    };
+
+    const finalizeSegmentWithCasRetry = async (
+      slot: { textHash: string; promptVersion: string; voice: string },
+      audio: { audioKey: string; byteLength: number },
+    ): Promise<boolean> => {
+      for (let attempt = 1; attempt <= SEGMENT_CAS_RETRY_ATTEMPTS; attempt++) {
+        const ok = await metadata.finalizeSynthesisSegment(
+          userId,
+          episodeId,
+          slot,
+          audio,
+          owner,
+          now(),
+          WORKFLOW_CLAIM_LEASE_MS,
+        );
+        if (ok) return true;
+        const current = await metadata.getEpisode(userId, episodeId);
+        if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+          return false;
+        }
+        if (attempt < SEGMENT_CAS_RETRY_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 10 * attempt));
+        }
+      }
+      return false;
+    };
+
+    const runSegmentStep = (
+      i: number,
+      item: SegmentPlanItem,
+      phaseLabel?: string,
+    ): Promise<StoredWavSegment> =>
+      step.do<StoredWavSegment>(
         `tts-segment-${i}`,
         {
           retries: { limit: 5, delay: "10 seconds", backoff: "exponential" },
           timeout: "3 minutes",
         },
         async () => {
-          const nowMs = now();
-          await metadata.touchEpisodeClaim(userId, episodeId, owner, {
-            phase: `synthesizing_segment_${i + 1}_of_${plan.length}`,
-            now: new Date(nowMs).toISOString(),
-          });
-
-          const textHash = segmentTextHash(item.textKey);
-          const existing = (await metadata.listSynthesisSegments(userId, episodeId)).find((r) =>
-            r.textHash === textHash &&
-            r.finalized &&
-            r.promptVersion === PROMPT_VERSION &&
-            r.voice === item.voice &&
-            r.text === item.textKey
-          );
-          if (existing) {
-            const inspected = await inspectStoredWavSegment(
-              blobs,
-              existing.audioKey,
-              existing.byteLength,
-            );
-            if (inspected) return inspected;
+          if (phaseLabel) {
+            await metadata.touchEpisodeClaim(userId, episodeId, owner, {
+              phase: phaseLabel,
+              now: new Date(now()).toISOString(),
+            }).catch(() => false);
           }
 
-          const reserveOutcome = await metadata.reserveSynthesisSegment(
-            userId,
-            episodeId,
-            {
-              textHash,
-              text: item.textKey,
-              promptVersion: PROMPT_VERSION,
-              voice: item.voice,
-              audioKey: "",
-              byteLength: 0,
-              owner,
-              claimAt: new Date(nowMs).toISOString(),
-              createdAt: new Date(nowMs).toISOString(),
-              finalized: false,
-            },
-            nowMs,
-            WORKFLOW_CLAIM_LEASE_MS,
-          );
+          const textHash = segmentTextHash(item.textKey);
+
+          // Point-lookup reservation first: avoids O(N) full listSynthesisSegments scans on
+          // fresh episodes while still returning "finalized" immediately on resumed segments.
+          const reserveOutcome = await reserveSegmentWithCasRetry(textHash, item);
           if (reserveOutcome === "finalized") {
-            const raced = (await metadata.listSynthesisSegments(userId, episodeId)).find((r) =>
-              r.textHash === textHash &&
-              r.finalized &&
-              r.promptVersion === PROMPT_VERSION &&
-              r.voice === item.voice &&
-              r.text === item.textKey
+            const finalizedRecord = (await metadata.listSynthesisSegments(userId, episodeId)).find(
+              (r) =>
+                r.textHash === textHash &&
+                r.finalized &&
+                r.promptVersion === PROMPT_VERSION &&
+                r.voice === item.voice &&
+                r.text === item.textKey,
             );
-            if (raced) {
-              const inspected = await inspectStoredWavSegment(blobs, raced.audioKey, raced.byteLength);
+            if (finalizedRecord) {
+              const inspected = await inspectStoredWavSegment(
+                blobs,
+                finalizedRecord.audioKey,
+                finalizedRecord.byteLength,
+              );
               if (inspected) return inspected;
             }
+          } else if (reserveOutcome === "no-claim") {
+            throw new NonRetryableError("Episode claim no longer held by workflow");
           }
 
           let decoded: DecodedAudioResult;
@@ -691,14 +747,9 @@ export async function runEpisodeSynthesisWorkflow(
           const putInfo = await blobs.put(segKey, wav, { contentType: "audio/wav" });
           const byteLength = putInfo.size ?? wav.byteLength;
 
-          await metadata.finalizeSynthesisSegment(
-            userId,
-            episodeId,
+          await finalizeSegmentWithCasRetry(
             { textHash, promptVersion: PROMPT_VERSION, voice: item.voice },
             { audioKey: segKey, byteLength },
-            owner,
-            now(),
-            WORKFLOW_CLAIM_LEASE_MS,
           );
 
           return {
@@ -713,80 +764,148 @@ export async function runEpisodeSynthesisWorkflow(
           };
         },
       );
-      storedSegments.push(segMeta);
+
+    const storedSegments: StoredWavSegment[] = [];
+    for (let batchStart = 0; batchStart < plan.length; batchStart += TTS_SEGMENT_BATCH_CONCURRENCY) {
+      const batchEnd = Math.min(batchStart + TTS_SEGMENT_BATCH_CONCURRENCY, plan.length);
+      const batchIndices: number[] = [];
+      const seenSlotKeys = new Set<string>();
+      let hasDuplicateSlotInBatch = false;
+
+      for (let i = batchStart; i < batchEnd; i++) {
+        batchIndices.push(i);
+        const item = plan[i]!;
+        const slotKey = `${segmentTextHash(item.textKey)}\u0000${item.voice}`;
+        if (seenSlotKeys.has(slotKey)) hasDuplicateSlotInBatch = true;
+        seenSlotKeys.add(slotKey);
+      }
+
+      const batchPhase = batchIndices.length > 1
+        ? `synthesizing_segments_${batchStart + 1}_to_${batchEnd}_of_${plan.length}`
+        : `synthesizing_segment_${batchStart + 1}_of_${plan.length}`;
+
+      if (hasDuplicateSlotInBatch || batchIndices.length === 1) {
+        for (const i of batchIndices) {
+          const segMeta = await runSegmentStep(
+            i,
+            plan[i]!,
+            i === batchStart ? batchPhase : undefined,
+          );
+          storedSegments.push(segMeta);
+        }
+      } else {
+        // Wait for all in-flight batch steps to settle before rethrowing any failure so
+        // sibling segments that already paid for Gemini TTS finish persisting to R2 + D1.
+        const settled = await Promise.allSettled(
+          batchIndices.map((i) =>
+            runSegmentStep(i, plan[i]!, i === batchStart ? batchPhase : undefined)
+          ),
+        );
+        let firstError: unknown;
+        let hasError = false;
+        for (const outcome of settled) {
+          if (outcome.status === "rejected" && !hasError) {
+            firstError = outcome.reason;
+            hasError = true;
+          }
+        }
+        if (hasError) {
+          throw firstError;
+        }
+        for (const outcome of settled) {
+          if (outcome.status === "fulfilled") {
+            storedSegments.push(outcome.value);
+          }
+        }
+      }
     }
 
-    // Stage 4: Stream-assemble final WAV via R2 Multipart Upload (~16 MB constant RAM).
-    const assembled = await step.do<{
-      audioKey: string;
-      byteLength: number;
-      durationSeconds: number;
-    }>(
-      "assemble-wav",
-      {
-        retries: { limit: 3, delay: "10 seconds", backoff: "exponential" },
-        timeout: "3 minutes",
-      },
-      async () => {
-        const ep = (await metadata.getEpisode(userId, episodeId)) ?? claimedEpisode!;
-        const totalWavBytes = 44 + storedSegments.reduce((sum, s) => sum + s.pcmByteLength, 0);
-        await metadata.touchEpisodeClaim(userId, episodeId, owner, {
-          phase: "uploading_audio",
-          bytesAttempted: totalWavBytes,
-          now: new Date(now()).toISOString(),
-        });
+    // Stage 4: Concurrently stream-encode final MP3 (loudness-normalized + gap-padded,
+    // 64 kbps mono @ 24 kHz) and acquire best-effort cover artwork.
+    const [assembleOutcome, artworkOutcome] = await Promise.allSettled([
+      step.do<{
+        audioKey: string;
+        byteLength: number;
+        durationSeconds: number;
+      }>(
+        "assemble-audio",
+        {
+          retries: { limit: 3, delay: "10 seconds", backoff: "exponential" },
+          timeout: "5 minutes",
+        },
+        async () => {
+          const ep = (await metadata.getEpisode(userId, episodeId)) ?? claimedEpisode!;
+          const totalPcmBytes = storedSegments.reduce((sum, s) => sum + s.pcmByteLength, 0);
+          const estimatedMp3Bytes = Math.ceil(totalPcmBytes / 6);
+          await metadata.touchEpisodeClaim(userId, episodeId, owner, {
+            phase: "uploading_audio",
+            bytesAttempted: estimatedMp3Bytes,
+            now: new Date(now()).toISOString(),
+          });
 
-        const revisionHash = await computeStreamingWavRevisionHash(storedSegments, ep.audioKey);
-        const destinationKey = audioBlobKey(ep, "wav", `sha256-${revisionHash}`);
+          const revisionHash = await computeStreamingMp3RevisionHash(storedSegments, ep.audioKey);
+          const destinationKey = audioBlobKey(ep, "mp3", `sha256-${revisionHash}`);
 
-        const existing = await blobs.head(destinationKey);
-        if (existing && existing.size === totalWavBytes) {
-          const totalDuration = storedSegments.reduce((sum, s) => sum + s.durationSeconds, 0);
+          const existing = await blobs.head(destinationKey);
+          if (existing && existing.size > 0) {
+            return {
+              audioKey: destinationKey,
+              byteLength: existing.size,
+              durationSeconds: computeAssembledMp3DurationSeconds(storedSegments),
+            };
+          }
+
+          const result = await assembleMp3ToBlobStore({
+            blobs,
+            destinationKey,
+            segments: storedSegments,
+          });
           return {
             audioKey: destinationKey,
-            byteLength: existing.size,
-            durationSeconds: totalDuration,
+            byteLength: result.byteLength,
+            durationSeconds: result.durationSeconds,
           };
-        }
+        },
+      ),
+      step.do<string | null>(
+        "ensure-artwork",
+        {
+          retries: { limit: 1, delay: "5 seconds" },
+          timeout: "45 seconds",
+        },
+        async () => {
+          const ep = (await metadata.getEpisode(userId, episodeId)) ?? claimedEpisode!;
+          const [article, source] = await Promise.all([
+            metadata.getArticle(userId, ep.articleId),
+            metadata.getSource(userId, ep.sourceId),
+          ]);
+          const key = await ensureEpisodeArtwork({
+            blobs,
+            episode: ep,
+            article,
+            source,
+            geminiApiKey: config.geminiApiKey,
+            geminiBaseUrl: reader.get("GEMINI_API_BASE_URL"),
+            allowGeminiImageGen: !deps.ttsClient && Boolean(config.geminiApiKey),
+          });
+          return key ?? null;
+        },
+      ),
+    ]);
 
-        const result = await assembleWavToBlobStore({
-          blobs,
-          destinationKey,
-          segments: storedSegments,
-        });
-        return {
-          audioKey: destinationKey,
-          byteLength: result.byteLength,
-          durationSeconds: result.durationSeconds,
-        };
-      },
-    );
-
-    // Stage 4b: Best-effort episode cover artwork (scraped og:image -> Gemini art -> studio PNG).
-    const artworkKey = await step.do<string | null>(
-      "ensure-artwork",
-      {
-        retries: { limit: 1, delay: "5 seconds" },
-        timeout: "45 seconds",
-      },
-      async () => {
-        const ep = (await metadata.getEpisode(userId, episodeId)) ?? claimedEpisode!;
-        const [article, source] = await Promise.all([
-          metadata.getArticle(userId, ep.articleId),
-          metadata.getSource(userId, ep.sourceId),
-        ]);
-        const key = await ensureEpisodeArtwork({
-          blobs,
-          episode: ep,
-          article,
-          source,
-          geminiApiKey: config.geminiApiKey,
-          geminiBaseUrl: reader.get("GEMINI_API_BASE_URL"),
-          allowGeminiImageGen: !deps.ttsClient && Boolean(config.geminiApiKey),
-        });
-        return key ?? null;
-      },
-    );
+    if (assembleOutcome.status === "rejected") {
+      throw assembleOutcome.reason;
+    }
+    const assembled = assembleOutcome.value;
+    let artworkKey: string | null = null;
+    if (artworkOutcome.status === "fulfilled") {
+      artworkKey = artworkOutcome.value;
+    } else {
+      console.warn(
+        `[audio-feed] workflow ensure-artwork failed for ${episodeId} (non-fatal):`,
+        artworkOutcome.reason,
+      );
+    }
 
     // Stage 5: Finalize episode (`ready`), atomic billing, and sweep segment blobs.
     return await step.do("finalize", {
@@ -797,10 +916,13 @@ export async function runEpisodeSynthesisWorkflow(
       const nowMs = now();
       const nowIso = new Date(nowMs).toISOString();
 
+      const sampleRate = storedSegments[0]?.sampleRate || 24_000;
+      const gapSeconds = segmentGapDurationSeconds(sampleRate, DEFAULT_SEGMENT_GAP_MS);
       const chapters = buildChaptersFromSegments(
         storedSegments.map((seg, idx) => ({
           heading: plan[idx]?.heading,
-          durationSeconds: seg.durationSeconds,
+          durationSeconds: seg.durationSeconds +
+            (idx < storedSegments.length - 1 ? gapSeconds : 0),
         })),
         { mode: ep.mode },
       );
@@ -816,7 +938,7 @@ export async function runEpisodeSynthesisWorkflow(
           status: "ready",
           audioKey: assembled.audioKey,
           byteLength: assembled.byteLength,
-          contentType: "audio/wav",
+          contentType: "audio/mpeg",
           durationSeconds: assembled.durationSeconds,
           readyAt: previousKey && ep.readyAt ? ep.readyAt : nowIso,
           promptVersion: PROMPT_VERSION,
