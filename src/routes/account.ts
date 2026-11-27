@@ -18,8 +18,14 @@ import { base64url, sessionUser } from "../auth/sessions.ts";
 import { relyingParty } from "../auth/passkeys.ts";
 import { GEMINI_TTS_VOICES, VOICE_PROFILES } from "../tts/gemini.ts";
 import { isOutdated } from "../tts/prompt_version.ts";
-import { INBOX_SOURCE_ID, isClaimExpired } from "../types.ts";
-import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
+import {
+  DEFAULT_CODE_HANDLING,
+  INBOX_SOURCE_ID,
+  isClaimExpired,
+  PLAYBACK_MAX_RATE,
+  PLAYBACK_MIN_RATE,
+} from "../types.ts";
+import type { AudioMode, Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
 import {
   CONFIRM_DIALOG_CLIENT,
@@ -136,7 +142,24 @@ const CSS = `
   .upload-drop-zone.dragover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
   .drop-prompt { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--text-muted); }
   .rows[hidden], .empty[hidden] { display: none; }
-  .rows > li > .source-feeds { grid-column: 1 / -1; }
+  .rows > li > .source-feeds, .rows > li > .source-prefs { grid-column: 1 / -1; }
+  .source-prefs { margin-block-start: 0.45rem; }
+  .source-prefs > summary { cursor: pointer; font-size: 0.84rem; color: var(--text-2); font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+  .source-prefs-meta { font-weight: 500; font-size: 0.78rem; color: var(--muted); }
+  .source-prefs-meta[data-customized="true"] { color: var(--accent); }
+  .source-prefs-form { margin-block-start: 0.65rem; padding: 0.85rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); display: grid; gap: 0.75rem; }
+  .source-prefs-grid { display: grid; gap: 0.65rem; }
+  @media (min-width: 38rem) { .source-prefs-grid { grid-template-columns: 1fr 1fr; } }
+  details.source-prefs::details-content { interpolate-size: allow-keywords; overflow: clip; contain: layout; }
+  details.source-prefs:not([open])::details-content { block-size: 0; }
+  @media (prefers-reduced-motion: no-preference) {
+    details.source-prefs::details-content {
+      transition: block-size 0.22s ease, content-visibility 0.22s ease, display 0.22s ease;
+      transition-behavior: allow-discrete;
+    }
+  }
+  .email-ingest-box { margin-block-start: 1.25rem; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+  .email-ingest-box h3 { margin-block-start: 0; }
   .opml-box { margin-block-start: 1.25rem; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
   .opml-box-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; margin-block-end: 0.35rem; }
   .opml-box-head h3 { margin: 0; font-size: 0.98rem; }
@@ -168,6 +191,67 @@ function when(iso: string | undefined): string {
   return iso.slice(0, 10);
 }
 
+const SOURCE_PLAYBACK_RATE_PRESETS = [0.8, 1, 1.2, 1.4, 1.5, 1.75, 2] as const;
+
+function emailHostOf(baseUrl: string): string {
+  try {
+    const host = new URL(baseUrl).hostname;
+    if (host) return host;
+  } catch {
+    // fallback below
+  }
+  return "audiofeed.app";
+}
+
+function effectiveSourceVoice(source: Source): string {
+  if (
+    typeof source.voice === "string" &&
+    (GEMINI_TTS_VOICES as readonly string[]).includes(source.voice)
+  ) {
+    return source.voice;
+  }
+  if (
+    typeof source.voices?.direct === "string" &&
+    (GEMINI_TTS_VOICES as readonly string[]).includes(source.voices.direct)
+  ) {
+    return source.voices.direct;
+  }
+  return "";
+}
+
+function sourceModeSelectValue(modes: AudioMode[]): string {
+  const hasDirect = modes.includes("direct");
+  const hasDeepdive = modes.includes("deepdive");
+  if (hasDirect && hasDeepdive) {
+    return modes[0] === "deepdive" ? "deepdive,direct" : "direct,deepdive";
+  }
+  return modes[0] === "deepdive" ? "deepdive" : "direct";
+}
+
+function sourcePrefsSummary(source: Source): { text: string; customized: boolean } {
+  const parts: string[] = [];
+  const voice = effectiveSourceVoice(source);
+  if (voice) parts.push(voice);
+  if (
+    typeof source.playbackRate === "number" &&
+    Number.isFinite(source.playbackRate) &&
+    source.playbackRate >= PLAYBACK_MIN_RATE &&
+    source.playbackRate <= PLAYBACK_MAX_RATE
+  ) {
+    parts.push(`${Math.round(source.playbackRate * 100) / 100}×`);
+  }
+  if (source.modes[0] === "deepdive") {
+    parts.push("Deep dive");
+  }
+  if (source.codeHandling === "explain") {
+    parts.push("Explain code");
+  }
+  if (parts.length === 0) {
+    return { text: "Account defaults", customized: false };
+  }
+  return { text: parts.join(" · "), customized: true };
+}
+
 function copyRow(value: string, label: string): string {
   return `<div class="copy"><code>${
     esc(value)
@@ -179,9 +263,10 @@ function copyRow(value: string, label: string): string {
 export function renderAccountPage(d: AccountPageData): string {
   const { user, baseUrl } = d;
   const feedBase = `${baseUrl}/feed/${user.feedToken}`;
+  const emailIngestAddress = `save+${user.feedToken}@${emailHostOf(baseUrl)}`;
   const approved = user.status === "approved";
 
-  const sourceItems = d.sources.map((s) => {
+  const sourceItems = d.sources.map((s, idx) => {
     const paths = s.modes.map((mode) =>
       copyRow(
         `${feedBase}/${s.id}/${mode}.xml`,
@@ -193,11 +278,76 @@ export function renderAccountPage(d: AccountPageData): string {
       : `<button class="btn danger small" type="button" data-remove-source="${
         esc(s.id)
       }" data-title="${esc(s.title)}" data-tooltip="Remove ${esc(s.title)}">Remove</button>`;
-    return `<li><div class="row-head"><span class="row-title">${esc(s.title)}</span>${remove}</div>
+    const currentVoice = effectiveSourceVoice(s);
+    const currentRate = typeof s.playbackRate === "number" &&
+        Number.isFinite(s.playbackRate) &&
+        s.playbackRate >= PLAYBACK_MIN_RATE &&
+        s.playbackRate <= PLAYBACK_MAX_RATE
+      ? Math.round(s.playbackRate * 100) / 100
+      : null;
+    const currentModeVal = sourceModeSelectValue(s.modes);
+    const currentCodeHandling = s.codeHandling === "explain" ? "explain" : DEFAULT_CODE_HANDLING;
+    const summary = sourcePrefsSummary(s);
+    const voiceOptions = [
+      `<option value=""${currentVoice === "" ? " selected" : ""}>Default</option>`,
+      ...GEMINI_TTS_VOICES.map((v) =>
+        `<option value="${v}"${currentVoice === v ? " selected" : ""}>${v} — ${
+          esc(VOICE_PROFILES[v].style)
+        }</option>`
+      ),
+    ].join("");
+    const rateValues: number[] = [...SOURCE_PLAYBACK_RATE_PRESETS];
+    if (currentRate !== null && !rateValues.includes(currentRate)) {
+      rateValues.push(currentRate);
+      rateValues.sort((a, b) => a - b);
+    }
+    const rateOptions = [
+      `<option value=""${currentRate === null ? " selected" : ""}>Default</option>`,
+      ...rateValues.map((r) =>
+        `<option value="${r}"${currentRate === r ? " selected" : ""}>${r}x</option>`
+      ),
+    ].join("");
+    return `<li data-source-id="${esc(s.id)}" data-source-title="${esc(s.title)}"><div class="row-head"><span class="row-title">${esc(s.title)}</span>${remove}</div>
       <div class="meta">${s.feedUrl ? esc(s.feedUrl) : "Articles you send"} · last polled ${
       when(s.lastPolledAt)
     }</div>
-      <details class="source-feeds"><summary>Feed URLs (${s.modes.length})</summary><div class="feed-paths">${paths}</div></details></li>`;
+      <details class="source-feeds"><summary>Feed URLs (${s.modes.length})</summary><div class="feed-paths">${paths}</div></details>
+      <details class="source-prefs"><summary>Feed defaults <span class="source-prefs-meta" data-customized="${
+      summary.customized ? "true" : "false"
+    }">${esc(summary.text)}</span></summary>
+        <form class="source-prefs-form" data-source-prefs="${esc(s.id)}">
+          <div class="source-prefs-grid">
+            <div class="field">
+              <label for="src-voice-${idx}">Voice</label>
+              <select id="src-voice-${idx}" name="voice">${voiceOptions}</select>
+            </div>
+            <div class="field">
+              <label for="src-rate-${idx}">Default playback speed</label>
+              <select id="src-rate-${idx}" name="playbackRate">${rateOptions}</select>
+            </div>
+            <div class="field">
+              <label for="src-mode-${idx}">Default mode</label>
+              <select id="src-mode-${idx}" name="mode">
+                <option value="direct"${currentModeVal === "direct" ? " selected" : ""}>Read aloud</option>
+                <option value="deepdive"${currentModeVal === "deepdive" ? " selected" : ""}>Deep dive (two voices)</option>
+                <option value="direct,deepdive"${currentModeVal === "direct,deepdive" ? " selected" : ""}>Both (Read aloud default)</option>
+                <option value="deepdive,direct"${currentModeVal === "deepdive,direct" ? " selected" : ""}>Both (Deep dive default)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="src-code-${idx}">Code handling</label>
+              <select id="src-code-${idx}" name="codeHandling">
+                <option value="skip"${currentCodeHandling === "skip" ? " selected" : ""}>Skip code blocks</option>
+                <option value="explain"${currentCodeHandling === "explain" ? " selected" : ""}>Explain code blocks</option>
+              </select>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn small" type="submit">Save defaults</button>
+            <span class="row-feedback source-prefs-feedback" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+      </details></li>`;
   }).join("");
 
   const episodeSources = [...new Set(d.episodes.map((e) => e.sourceTitle ?? e.sourceId))]
@@ -394,6 +544,15 @@ ${
         </fieldset>
         <p class="feedback" id="uploadFeedback" role="status" aria-live="polite"></p>
       </form>
+    </div>
+    <div class="email-ingest-box" id="emailIngestBox">
+      <h3 class="legend u-legend" id="email-ingest-h">Email-to-Podcast forwarding</h3>
+      <p class="sub">Forward newsletters or articles to your private address to narrate them into your feed. Treat it like a password — anyone with it can add to your feed.</p>
+      <div class="field">
+        <span class="legend">Private forwarding address</span>
+        ${copyRow(emailIngestAddress, "email-to-podcast forwarding address")}
+        <span class="hint">Tip: add <code>+deepdive</code> before <code>@</code> for a two-voice deep dive.</span>
+      </div>
     </div>
     <div class="bookmarklet-box">
       <div class="u-flex-between-wrap">
@@ -652,6 +811,10 @@ ${
   const DISPLAY = ${jsonForScript({ name: user.email, displayName: user.displayName })};
   const FEED_BASE = ${jsonForScript(feedBase)};
   const PREFILL = ${jsonForScript(d.prefill ?? null)};
+  const VOICE_CATALOG = ${
+    jsonForScript(GEMINI_TTS_VOICES.map((v) => ({ name: v, style: VOICE_PROFILES[v].style })))
+  };
+  const RATE_PRESETS = ${jsonForScript([...SOURCE_PLAYBACK_RATE_PRESETS])};
 ${SAME_ORIGIN_PATH_CLIENT}
 ${PASSKEY_CLIENT}
 ${CONFIRM_DIALOG_CLIENT}
@@ -741,18 +904,21 @@ ${CONFIRM_DIALOG_CLIENT}
     }).catch(() => {});
   }
 
+  const copyTimers = new WeakMap();
   document.addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
     const button = target.closest("[data-copy]");
     if (!(button instanceof HTMLButtonElement)) return;
+    const prev = copyTimers.get(button);
+    if (prev) clearTimeout(prev);
     try {
       await navigator.clipboard.writeText(button.dataset.copy || "");
       button.textContent = "Copied";
     } catch {
       button.textContent = "Select and copy";
     }
-    setTimeout(() => { button.textContent = "Copy"; }, 1800);
+    copyTimers.set(button, setTimeout(() => { button.textContent = "Copy"; }, 1800));
   });
 
   // -- voice audition (audio-feed-msw) ---------------------------------------
@@ -959,8 +1125,59 @@ ${CONFIRM_DIALOG_CLIENT}
     return wrap;
   }
 
+  let dynamicSourceIndex = 0;
+
+  function formatSourcePrefsSummary(prefs) {
+    const parts = [];
+    if (prefs.voice) parts.push(prefs.voice);
+    if (typeof prefs.playbackRate === "number" && Number.isFinite(prefs.playbackRate)) {
+      parts.push((Math.round(prefs.playbackRate * 100) / 100) + "×");
+    }
+    if (Array.isArray(prefs.modes) && prefs.modes[0] === "deepdive") {
+      parts.push("Deep dive");
+    }
+    if (prefs.codeHandling === "explain") {
+      parts.push("Explain code");
+    }
+    return parts.length > 0
+      ? { text: parts.join(" · "), customized: true }
+      : { text: "Account defaults", customized: false };
+  }
+
+  function modeSelectValueFor(modes) {
+    const hasDirect = modes.includes("direct");
+    const hasDeepdive = modes.includes("deepdive");
+    if (hasDirect && hasDeepdive) {
+      return modes[0] === "deepdive" ? "deepdive,direct" : "direct,deepdive";
+    }
+    return modes[0] === "deepdive" ? "deepdive" : "direct";
+  }
+
+  function createSelectField(id, labelText, name, options, selectedValue) {
+    const field = document.createElement("div");
+    field.className = "field";
+    const label = document.createElement("label");
+    label.setAttribute("for", id);
+    label.textContent = labelText;
+    const select = document.createElement("select");
+    select.id = id;
+    select.name = name;
+    for (const item of options) {
+      const opt = document.createElement("option");
+      opt.value = item.value;
+      opt.textContent = item.label;
+      if (item.value === selectedValue) opt.selected = true;
+      select.appendChild(opt);
+    }
+    field.appendChild(label);
+    field.appendChild(select);
+    return field;
+  }
+
   function createSourceListItem(source) {
     const li = document.createElement("li");
+    li.dataset.sourceId = source.id;
+    li.dataset.sourceTitle = source.title || source.feedUrl || source.id;
     const head = document.createElement("div");
     head.className = "row-head";
     const titleSpan = document.createElement("span");
@@ -1000,6 +1217,85 @@ ${CONFIRM_DIALOG_CLIENT}
     }
     details.appendChild(paths);
     li.appendChild(details);
+
+    const suffix = "dyn-" + String(++dynamicSourceIndex);
+    const prefsDetails = document.createElement("details");
+    prefsDetails.className = "source-prefs";
+    const prefsSummary = document.createElement("summary");
+    prefsSummary.appendChild(document.createTextNode("Feed defaults "));
+    const prefsMeta = document.createElement("span");
+    prefsMeta.className = "source-prefs-meta";
+    const summaryInfo = formatSourcePrefsSummary({
+      voice: source.voice || null,
+      playbackRate: typeof source.playbackRate === "number" ? source.playbackRate : null,
+      modes,
+      codeHandling: source.codeHandling || "skip",
+    });
+    prefsMeta.dataset.customized = summaryInfo.customized ? "true" : "false";
+    prefsMeta.textContent = summaryInfo.text;
+    prefsSummary.appendChild(prefsMeta);
+    prefsDetails.appendChild(prefsSummary);
+
+    const form = document.createElement("form");
+    form.className = "source-prefs-form";
+    form.dataset.sourcePrefs = source.id;
+    const grid = document.createElement("div");
+    grid.className = "source-prefs-grid";
+    const voiceOpts = [{ value: "", label: "Default" }].concat(
+      VOICE_CATALOG.map((v) => ({ value: v.name, label: v.name + " — " + v.style })),
+    );
+    const rateOpts = [{ value: "", label: "Default" }].concat(
+      RATE_PRESETS.map((r) => ({ value: String(r), label: r + "x" })),
+    );
+    const modeOpts = [
+      { value: "direct", label: "Read aloud" },
+      { value: "deepdive", label: "Deep dive (two voices)" },
+      { value: "direct,deepdive", label: "Both (Read aloud default)" },
+      { value: "deepdive,direct", label: "Both (Deep dive default)" },
+    ];
+    const codeOpts = [
+      { value: "skip", label: "Skip code blocks" },
+      { value: "explain", label: "Explain code blocks" },
+    ];
+    grid.appendChild(createSelectField("src-voice-" + suffix, "Voice", "voice", voiceOpts, source.voice || ""));
+    grid.appendChild(
+      createSelectField(
+        "src-rate-" + suffix,
+        "Default playback speed",
+        "playbackRate",
+        rateOpts,
+        typeof source.playbackRate === "number" ? String(source.playbackRate) : "",
+      ),
+    );
+    grid.appendChild(
+      createSelectField("src-mode-" + suffix, "Default mode", "mode", modeOpts, modeSelectValueFor(modes)),
+    );
+    grid.appendChild(
+      createSelectField(
+        "src-code-" + suffix,
+        "Code handling",
+        "codeHandling",
+        codeOpts,
+        source.codeHandling === "explain" ? "explain" : "skip",
+      ),
+    );
+    form.appendChild(grid);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "btn small";
+    saveBtn.type = "submit";
+    saveBtn.textContent = "Save defaults";
+    const fb = document.createElement("span");
+    fb.className = "row-feedback source-prefs-feedback";
+    fb.setAttribute("role", "status");
+    fb.setAttribute("aria-live", "polite");
+    actions.appendChild(saveBtn);
+    actions.appendChild(fb);
+    form.appendChild(actions);
+    prefsDetails.appendChild(form);
+    li.appendChild(prefsDetails);
     return li;
   }
 
@@ -1024,6 +1320,71 @@ ${CONFIRM_DIALOG_CLIENT}
       } catch (error) {
         say($("sourcesFeedback"), "error", String(error.message || error));
         button.disabled = false;
+      }
+    });
+
+    sourcesList.addEventListener("submit", async (event) => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement) || !form.dataset.sourcePrefs) return;
+      event.preventDefault();
+      const sourceId = form.dataset.sourcePrefs;
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const feedback = form.querySelector(".source-prefs-feedback");
+      const voiceEl = form.elements.namedItem("voice");
+      const rateEl = form.elements.namedItem("playbackRate");
+      const modeEl = form.elements.namedItem("mode");
+      const codeEl = form.elements.namedItem("codeHandling");
+
+      const voiceVal = voiceEl instanceof HTMLSelectElement ? voiceEl.value : "";
+      const rateVal = rateEl instanceof HTMLSelectElement ? rateEl.value : "";
+      const modeVal = modeEl instanceof HTMLSelectElement ? modeEl.value : "direct";
+      const codeVal = codeEl instanceof HTMLSelectElement ? codeEl.value : "skip";
+
+      const payload = {
+        voice: voiceVal || null,
+        playbackRate: rateVal ? Number(rateVal) : null,
+        modes: modeVal.split(",").filter(Boolean),
+        codeHandling: codeVal,
+      };
+
+      if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = true;
+      if (feedback instanceof HTMLElement) say(feedback, "ok", "Saving…");
+      try {
+        const res = await send(
+          "POST",
+          "/api/account/sources/" + encodeURIComponent(sourceId) + "/preferences",
+          payload,
+        );
+        const saved = (res && res.source) || payload;
+        const li = form.closest("li");
+        if (li) {
+          const metaEl = li.querySelector(".source-prefs-meta");
+          if (metaEl instanceof HTMLElement) {
+            const info = formatSourcePrefsSummary(saved);
+            metaEl.dataset.customized = info.customized ? "true" : "false";
+            metaEl.textContent = info.text;
+          }
+          const feedsDetails = li.querySelector("details.source-feeds");
+          if (feedsDetails && Array.isArray(saved.modes) && saved.modes.length > 0) {
+            const feedSummary = feedsDetails.querySelector(":scope > summary");
+            if (feedSummary) feedSummary.textContent = "Feed URLs (" + saved.modes.length + ")";
+            const feedPaths = feedsDetails.querySelector(".feed-paths");
+            if (feedPaths) {
+              const title = li.dataset.sourceTitle || sourceId;
+              const rows = saved.modes.map((mode) => {
+                const url = FEED_BASE + "/" + encodeURIComponent(sourceId) + "/" + encodeURIComponent(mode) + ".xml";
+                const label = title + " " + (mode === "direct" ? "read aloud" : "deep dive") + " feed";
+                return createCopyRow(url, label);
+              });
+              feedPaths.replaceChildren(...rows);
+            }
+          }
+        }
+        if (feedback instanceof HTMLElement) say(feedback, "ok", "Saved.");
+      } catch (error) {
+        if (feedback instanceof HTMLElement) say(feedback, "error", String(error.message || error));
+      } finally {
+        if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = false;
       }
     });
   }

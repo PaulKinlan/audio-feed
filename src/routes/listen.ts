@@ -129,6 +129,8 @@ import {
   type EpisodeChapter,
   isPublishable,
   isSynthesisAuthorized,
+  PLAYBACK_MAX_RATE,
+  PLAYBACK_MIN_RATE,
   type Source,
 } from "../types.ts";
 
@@ -168,6 +170,8 @@ export interface ListenEpisode {
   /** Publish date: the audio's own timestamp (readyAt ?? createdAt). */
   date?: string;
   source?: string;
+  /** Source id for per-show playback defaults (Issue #53). */
+  sourceId?: string;
   mode?: AudioMode;
   durationSeconds?: number;
   byteLength?: number;
@@ -191,6 +195,8 @@ export interface ListenPageOptions {
   subscriber: string;
   feedUrl: string;
   episodes: ListenEpisode[];
+  /** Per-source default playback speeds keyed by `source.id` (Issue #53). */
+  sourcePlaybackRates?: Record<string, number>;
   offlineEnabled: boolean;
   /**
    * Whether `<audio>` loads same-origin bytes without cross-origin redirects,
@@ -241,6 +247,7 @@ export function renderListenPage(
     subscriber,
     feedUrl,
     episodes,
+    sourcePlaybackRates = {},
     offlineEnabled,
     audioProcessingAvailable = false,
     activity,
@@ -261,6 +268,7 @@ export function renderListenPage(
     maxOfflineBytes: MAX_OFFLINE_BYTES,
     maxOfflineEpisodes: MAX_OFFLINE_EPISODES,
     episodes,
+    sourcePlaybackRates,
     activity: activity ?? { inProgress: [], failed: [], playable: episodes.length },
     offlineEnabled,
     audioProcessingAvailable: Boolean(audioProcessingAvailable),
@@ -439,16 +447,22 @@ ${ICON_SPRITE}
       <button type="button" class="t-btn" id="fwd" aria-label="Skip forward 30 seconds" data-tooltip="Skip forward 30s">
         <svg class="icon" aria-hidden="true"><use href="#i-fwd"/></svg>
       </button>
-      <select class="rate" id="rate" aria-label="Playback speed">
-        <option value="0.75">0.75&times;</option>
-        <option value="1" selected>1&times;</option>
-        <option value="1.1">1.1&times;</option>
-        <option value="1.25">1.25&times;</option>
-        <option value="1.5">1.5&times;</option>
-        <option value="1.75">1.75&times;</option>
-        <option value="2">2&times;</option>
-        <option value="2.5">2.5&times;</option>
-      </select>
+      <div class="rate-wrap">
+        <select class="rate" id="rate" aria-label="Playback speed">
+          <option value="0.75">0.75&times;</option>
+          <option value="0.8">0.8&times;</option>
+          <option value="1" selected>1&times;</option>
+          <option value="1.1">1.1&times;</option>
+          <option value="1.2">1.2&times;</option>
+          <option value="1.25">1.25&times;</option>
+          <option value="1.4">1.4&times;</option>
+          <option value="1.5">1.5&times;</option>
+          <option value="1.75">1.75&times;</option>
+          <option value="2">2&times;</option>
+          <option value="2.5">2.5&times;</option>
+        </select>
+        <span class="rate-show-badge hidden" id="rateShowBadge"></span>
+      </div>
     </div>
 
     <p class="notice" id="playerNotice" role="status" aria-live="polite"></p>
@@ -938,6 +952,17 @@ export async function handleListen(
     ctx.stores.metadata.listEpisodes({ userId: user.id, status: "failed", limit: 20 }),
   ]);
   const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
+  const sourcePlaybackRates: Record<string, number> = {};
+  for (const source of sources) {
+    if (
+      typeof source.playbackRate === "number" &&
+      Number.isFinite(source.playbackRate) &&
+      source.playbackRate >= PLAYBACK_MIN_RATE &&
+      source.playbackRate <= PLAYBACK_MAX_RATE
+    ) {
+      sourcePlaybackRates[source.id] = Math.round(source.playbackRate * 100) / 100;
+    }
+  }
 
   // The author lives on the article, not the episode. These lookups are BATCHED (one `getMany`
   // per chunk, audio-feed-3jb): a per-row await here was another serial remote read per row.
@@ -972,6 +997,7 @@ export async function handleListen(
       author: article?.author,
       date: episode.readyAt ?? episode.createdAt,
       source: sourceTitles.get(episode.sourceId),
+      sourceId: episode.sourceId,
       mode: episode.mode,
       durationSeconds: episode.durationSeconds,
       byteLength: episode.byteLength,
@@ -999,6 +1025,7 @@ export async function handleListen(
     subscriber: user.displayName || user.email,
     feedUrl: `${origin.baseUrl}/feed/${encodeURIComponent(token)}/master.xml`,
     episodes: rows,
+    sourcePlaybackRates,
     activity,
     // Offline storage needs Cache Storage; without it the page still plays online.
     offlineEnabled: true,

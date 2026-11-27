@@ -66,7 +66,18 @@ import {
   IngestError,
 } from "../ingest/url.ts";
 import { GEMINI_TTS_VOICES } from "../tts/gemini.ts";
-import { type AudioMode, isAudioMode, isSynthesisAuthorized, type User } from "../types.ts";
+import {
+  type AudioMode,
+  CODE_HANDLINGS,
+  type CodeHandling,
+  DEFAULT_CODE_HANDLING,
+  isAudioMode,
+  isSynthesisAuthorized,
+  PLAYBACK_MAX_RATE,
+  PLAYBACK_MIN_RATE,
+  type Source,
+  type User,
+} from "../types.ts";
 
 export interface AccountHandlers {
   loginOptions: Handler<AppContext>;
@@ -78,6 +89,7 @@ export interface AccountHandlers {
   profile: Handler<AppContext>;
   rotateToken: Handler<AppContext>;
   addSource: Handler<AppContext>;
+  updateSourcePreferences: Handler<AppContext>;
   exportOpml: Handler<AppContext>;
   importOpml: Handler<AppContext>;
   discoverFeed: Handler<AppContext>;
@@ -515,6 +527,101 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         );
         return reply({ error: "Could not subscribe to that feed." }, 502);
       }
+    },
+
+    updateSourcePreferences: async ({ req, params }) => {
+      const user = await signedIn(ctx, req);
+      if (user instanceof Response) return user;
+      const rawSourceId = (params.sourceId ?? "").trim();
+      if (!rawSourceId) return reply({ error: "Unknown source." }, 404);
+      let existing = await store.getSource(user.id, rawSourceId);
+      if (!existing && rawSourceId.includes("%")) {
+        try {
+          const decoded = decodeURIComponent(rawSourceId);
+          if (decoded !== rawSourceId) {
+            existing = await store.getSource(user.id, decoded);
+          }
+        } catch {
+          // Malformed percent-encoding: fall through to 404.
+        }
+      }
+      if (!existing || existing.userId !== user.id) {
+        return reply({ error: "Unknown source." }, 404);
+      }
+
+      const input = await body(req);
+      const updated: Source = {
+        ...existing,
+        voices: { ...(existing.voices ?? {}) },
+      };
+
+      if (input.voice !== undefined) {
+        if (input.voice === null || input.voice === "") {
+          delete updated.voice;
+          delete updated.voices.direct;
+        } else if (
+          typeof input.voice === "string" &&
+          (GEMINI_TTS_VOICES as readonly string[]).includes(input.voice)
+        ) {
+          updated.voice = input.voice;
+          updated.voices.direct = input.voice;
+        } else {
+          return reply({ error: "Unknown voice." }, 400);
+        }
+      }
+
+      if (input.playbackRate !== undefined) {
+        if (input.playbackRate === null) {
+          delete updated.playbackRate;
+        } else if (
+          typeof input.playbackRate === "number" &&
+          Number.isFinite(input.playbackRate) &&
+          input.playbackRate >= PLAYBACK_MIN_RATE &&
+          input.playbackRate <= PLAYBACK_MAX_RATE
+        ) {
+          updated.playbackRate = Math.round(input.playbackRate * 100) / 100;
+        } else {
+          return reply({ error: "Playback speed must be between 0.5x and 3.0x." }, 400);
+        }
+      }
+
+      if (input.modes !== undefined) {
+        if (
+          !Array.isArray(input.modes) ||
+          input.modes.length === 0 ||
+          !input.modes.every((m) => isAudioMode(m))
+        ) {
+          return reply({ error: "Choose direct, deepdive, or both." }, 400);
+        }
+        const deduped: AudioMode[] = [];
+        for (const mode of input.modes) {
+          if (!deduped.includes(mode)) deduped.push(mode);
+        }
+        updated.modes = deduped;
+      }
+
+      if (input.codeHandling !== undefined) {
+        if (
+          typeof input.codeHandling !== "string" ||
+          !(CODE_HANDLINGS as readonly string[]).includes(input.codeHandling)
+        ) {
+          return reply({ error: 'Code handling must be "skip" or "explain".' }, 400);
+        }
+        updated.codeHandling = input.codeHandling as CodeHandling;
+      }
+
+      await store.putSource(updated);
+      return reply({
+        ok: true,
+        source: {
+          id: updated.id,
+          title: updated.title,
+          voice: updated.voice ?? null,
+          playbackRate: updated.playbackRate ?? null,
+          modes: updated.modes,
+          codeHandling: updated.codeHandling ?? DEFAULT_CODE_HANDLING,
+        },
+      });
     },
 
     exportOpml: async ({ req }) => {
