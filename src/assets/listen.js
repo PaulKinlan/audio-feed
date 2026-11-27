@@ -73,6 +73,7 @@
  * @property {PlayerEpisode[]} [episodes]
  * @property {PlayerActivity} [activity]
  * @property {boolean} [offlineEnabled]
+ * @property {boolean} [audioProcessingAvailable]
  */
 
 /**
@@ -123,6 +124,7 @@ const MAX_OFFLINE_EPISODES = DATA.maxOfflineEpisodes ?? 20;
 const EPISODES = DATA.episodes ?? [];
 const ACTIVITY = DATA.activity ?? { inProgress: [], failed: [], playable: EPISODES.length };
 const OFFLINE_ENABLED = DATA.offlineEnabled ?? true;
+const AUDIO_PROCESSING_AVAILABLE = DATA.audioProcessingAvailable === true;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /**
@@ -173,6 +175,44 @@ try {
 const POSITIONS_KEY = scopedKey("positions");
 const RATE_KEY = scopedKey("rate");
 const QUEUE_KEY = scopedKey("queue");
+const VOICE_BOOST_KEY = scopedKey("voice-boost");
+const TRIM_SILENCE_KEY = scopedKey("trim-silence");
+const PREFS_UPDATED_KEY = scopedKey("prefs-updated");
+const QUEUE_UPDATED_KEY = scopedKey("queue-updated");
+
+/** @param {string} key @returns {boolean} */
+function loadBoolPref(key) {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** @param {string} key @param {boolean} value */
+function saveBoolPref(key, value) {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch { /* private mode */ }
+}
+
+/** @param {string} key @returns {number} */
+function loadNumberPref(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    const n = raw ? Number(raw) : 0;
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** @param {string} key @param {number} value */
+function saveNumberPref(key, value) {
+  try {
+    localStorage.setItem(key, String(Math.trunc(value)));
+  } catch { /* private mode */ }
+}
 
 /** @returns {number} */
 function loadSavedRate() {
@@ -208,12 +248,20 @@ function loadQueue() {
 function saveQueue(ids) {
   try {
     if (ids.length === 0) localStorage.removeItem(QUEUE_KEY);
-    else localStorage.setItem(QUEUE_KEY, JSON.stringify(ids));
+    else localStorage.setItem(QUEUE_KEY, JSON.stringify(ids.slice(0, 200)));
   } catch { /* private mode */ }
 }
 
 /** @type {string[]} */
 let upNextIds = loadQueue().filter((id) => EPISODES.some((e) => e.id === id));
+/** @type {number} */
+let basePlaybackRate = loadSavedRate();
+/** @type {boolean} */
+let voiceBoostEnabled = loadBoolPref(VOICE_BOOST_KEY);
+/** @type {boolean} */
+let trimSilenceEnabled = loadBoolPref(TRIM_SILENCE_KEY);
+/** @type {Record<string, number>} */
+const clearedPositions = {};
 /** @type {"all"|"unplayed"|"inprogress"|"downloaded"} */
 let listenFilterState = "all";
 /** @type {number | "episode" | null} */
@@ -222,6 +270,25 @@ let sleepTimerTarget = null;
 let sleepInterval = null;
 /** @type {Map<string, { title?: string; author?: string; source?: string; url?: string; mode?: string; paragraphs?: string[] }>} */
 const articleCache = new Map();
+/**
+ * @typedef {object} TranscriptCue
+ * @property {number} start
+ * @property {number} end
+ * @property {string} text
+ * @property {string} [speaker]
+ */
+/** @type {Map<string, TranscriptCue[] | null>} */
+const transcriptCache = new Map();
+/** @type {TranscriptCue[]} */
+let activeCues = [];
+/** @type {number} */
+let activeCueIndex = -1;
+/** @type {boolean} */
+let readAlongAutoFollow = true;
+/** @type {boolean} */
+let readAlongProgrammaticScroll = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let readAlongScrollGuardTimer = null;
 /** @type {string} */
 let activeNpTab = "chapters";
 
@@ -249,7 +316,7 @@ function loadPlayed() {
 /** @param {Set<string>} playedSet */
 function savePlayed(playedSet) {
   try {
-    localStorage.setItem(PLAYED_KEY, JSON.stringify([...playedSet].slice(-200)));
+    localStorage.setItem(PLAYED_KEY, JSON.stringify([...playedSet].slice(-500)));
   } catch {
     // Private mode / storage quota exception handled safely.
   }
@@ -302,19 +369,22 @@ function loadPositions() {
  */
 function savePosition(episodeId, seconds) {
   if (!episodeId) return;
+  const now = Date.now();
   try {
     const positions = loadPositions();
     // Seeking to near-zero clears the resume position so it doesn't haunt the item.
     if (seconds <= 2) {
       delete positions[episodeId];
+      clearedPositions[episodeId] = now;
     } else {
-      positions[episodeId] = { position: Math.round(seconds), updatedAt: Date.now() };
-      // Bounded storage: keep newest 50 positions per token.
+      positions[episodeId] = { position: Math.round(seconds), updatedAt: now };
+      delete clearedPositions[episodeId];
+      // Bounded storage: keep newest 200 positions per subscriber.
       const keys = Object.keys(positions);
-      if (keys.length > 50) {
+      if (keys.length > 200) {
         keys
           .sort((a, b) => (positions[a]?.updatedAt ?? 0) - (positions[b]?.updatedAt ?? 0))
-          .slice(0, keys.length - 50)
+          .slice(0, keys.length - 200)
           .forEach((k) => delete positions[k]);
       }
     }
@@ -327,6 +397,7 @@ function savePosition(episodeId, seconds) {
 /** @param {string} episodeId */
 function clearPosition(episodeId) {
   if (!episodeId) return;
+  clearedPositions[episodeId] = Date.now();
   try {
     const positions = loadPositions();
     if (positions[episodeId]) {
@@ -1165,6 +1236,7 @@ function updateRowResumeUI(li, episode) {
         savePosition(episode.id, 0);
         clearPosition(episode.id);
         updateRowResumeUI(li, episode);
+        scheduleStateSync(true);
         void select(episode, true, 0);
       });
       const downloadBtn = actions.querySelector(".ep-download");
@@ -1672,9 +1744,606 @@ const npQueueEmpty = document.getElementById("npQueueEmpty");
 const npQueueCount = document.getElementById("npQueueCount");
 const npClearQueueBtn = document.getElementById("npClearQueueBtn");
 const npReadBody = document.getElementById("npReadBody");
+const npFollowBtn = /** @type {HTMLButtonElement | null} */ (
+  document.getElementById("npFollowBtn")
+);
 const npExternalLink = /** @type {HTMLAnchorElement | null} */ (
   document.getElementById("npExternalLink")
 );
+const voiceBoostBtn = /** @type {HTMLButtonElement | null} */ (
+  document.getElementById("voiceBoostBtn")
+);
+const trimSilenceBtn = /** @type {HTMLButtonElement | null} */ (
+  document.getElementById("trimSilenceBtn")
+);
+const npAudioFxNote = document.getElementById("npAudioFxNote");
+
+// ---- Cross-device playback state sync (D1) ------------------------------
+
+const SYNC_DEBOUNCE_MS = 10_000;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let syncTimer = null;
+let syncDirty = false;
+let syncInFlight = false;
+let lastSyncSentAt = 0;
+
+/**
+ * Build a compact, bounded playback state snapshot for `POST /listen/:token/state`.
+ */
+function buildPlaybackStatePayload() {
+  const localPositions = loadPositions();
+  const durById = new Map(EPISODES.map((e) => [e.id, e.durationSeconds]));
+  /** @type {Record<string, { time: number; duration?: number; updatedAt: number }>} */
+  const positions = {};
+  for (const [epId, entry] of Object.entries(localPositions)) {
+    if (!entry || typeof entry.position !== "number") continue;
+    const dur = durById.get(epId);
+    positions[epId] = typeof dur === "number" && dur > 0
+      ? { time: entry.position, duration: dur, updatedAt: entry.updatedAt || Date.now() }
+      : { time: entry.position, updatedAt: entry.updatedAt || Date.now() };
+  }
+  for (const [epId, resetTs] of Object.entries(clearedPositions)) {
+    if (!positions[epId] && typeof resetTs === "number" && resetTs > 0) {
+      positions[epId] = { time: 0, updatedAt: resetTs };
+    }
+  }
+  const prefsTs = loadNumberPref(PREFS_UPDATED_KEY);
+  const queueTs = loadNumberPref(QUEUE_UPDATED_KEY);
+  let maxTs = Math.max(prefsTs, queueTs);
+  for (const entry of Object.values(positions)) {
+    if (entry.updatedAt > maxTs) maxTs = entry.updatedAt;
+  }
+  return {
+    positions,
+    played: [...loadPlayed()].slice(-500),
+    queue: upNextIds.slice(0, 200),
+    ...(queueTs > 0 ? { queueUpdatedAt: queueTs } : {}),
+    playbackRate: basePlaybackRate,
+    voiceBoost: voiceBoostEnabled,
+    trimSilence: trimSilenceEnabled,
+    updatedAt: maxTs || Date.now(),
+  };
+}
+
+/**
+ * Merge remote server playback state into local storage without discarding newer local updates.
+ * @param {unknown} remoteRaw
+ * @returns {{ changed: boolean; localHasNewer: boolean }}
+ */
+function applyRemotePlaybackState(remoteRaw) {
+  if (!remoteRaw || typeof remoteRaw !== "object") {
+    return { changed: false, localHasNewer: false };
+  }
+  const remote = /** @type {{
+    positions?: Record<string, { time?: number; duration?: number; updatedAt?: number }>;
+    played?: string[];
+    queue?: string[];
+    queueUpdatedAt?: number;
+    playbackRate?: number;
+    voiceBoost?: boolean;
+    trimSilence?: boolean;
+    updatedAt?: number;
+  }} */ (remoteRaw);
+
+  let changed = false;
+  let localHasNewer = false;
+
+  // 1. Positions: newest updatedAt wins per episode.
+  const localPositions = loadPositions();
+  const remotePositions = remote.positions && typeof remote.positions === "object"
+    ? remote.positions
+    : {};
+  let positionsChanged = false;
+  for (const [epId, rPos] of Object.entries(remotePositions)) {
+    if (!rPos || typeof rPos.time !== "number" || typeof rPos.updatedAt !== "number") continue;
+    const localTs = Math.max(localPositions[epId]?.updatedAt ?? 0, clearedPositions[epId] ?? 0);
+    if (rPos.updatedAt > localTs) {
+      if (rPos.time <= 2) {
+        if (localPositions[epId]) {
+          delete localPositions[epId];
+          positionsChanged = true;
+        }
+        clearedPositions[epId] = rPos.updatedAt;
+      } else {
+        localPositions[epId] = {
+          position: Math.round(rPos.time),
+          updatedAt: rPos.updatedAt,
+        };
+        delete clearedPositions[epId];
+        positionsChanged = true;
+      }
+    } else if (localTs > rPos.updatedAt) {
+      localHasNewer = true;
+    }
+  }
+  for (const epId of Object.keys(localPositions)) {
+    if (!Object.prototype.hasOwnProperty.call(remotePositions, epId)) {
+      localHasNewer = true;
+    }
+  }
+  if (positionsChanged) {
+    const keys = Object.keys(localPositions);
+    if (keys.length > 200) {
+      keys
+        .sort((a, b) => (localPositions[a]?.updatedAt ?? 0) - (localPositions[b]?.updatedAt ?? 0))
+        .slice(0, keys.length - 200)
+        .forEach((k) => delete localPositions[k]);
+    }
+    try {
+      localStorage.setItem(POSITIONS_KEY, JSON.stringify(localPositions));
+    } catch { /* private mode */ }
+    changed = true;
+  }
+
+  // 2. Played: set union.
+  const localPlayed = loadPlayed();
+  const remotePlayed = Array.isArray(remote.played) ? remote.played : [];
+  let playedChanged = false;
+  for (const id of remotePlayed) {
+    if (typeof id === "string" && !localPlayed.has(id)) {
+      localPlayed.add(id);
+      playedChanged = true;
+    }
+  }
+  if (playedChanged) {
+    savePlayed(localPlayed);
+    changed = true;
+  }
+  const remotePlayedSet = new Set(remotePlayed);
+  for (const id of localPlayed) {
+    if (!remotePlayedSet.has(id)) {
+      localHasNewer = true;
+      break;
+    }
+  }
+
+  // 3. Queue: LWW by queueUpdatedAt (fallback to updatedAt).
+  const localQueueTs = loadNumberPref(QUEUE_UPDATED_KEY);
+  const remoteQueueTs = typeof remote.queueUpdatedAt === "number"
+    ? remote.queueUpdatedAt
+    : (typeof remote.updatedAt === "number" ? remote.updatedAt : 0);
+  if (Array.isArray(remote.queue) && remoteQueueTs > localQueueTs) {
+    upNextIds = remote.queue.filter(
+      (id) => typeof id === "string" && EPISODES.some((e) => e.id === id),
+    );
+    saveQueue(upNextIds);
+    saveNumberPref(QUEUE_UPDATED_KEY, remoteQueueTs);
+    changed = true;
+  } else if (localQueueTs > remoteQueueTs) {
+    localHasNewer = true;
+  }
+
+  // 4. Scalar preferences: LWW by updatedAt.
+  const localPrefsTs = loadNumberPref(PREFS_UPDATED_KEY);
+  const remoteUpdatedAt = typeof remote.updatedAt === "number" ? remote.updatedAt : 0;
+  if (remoteUpdatedAt > localPrefsTs) {
+    if (
+      typeof remote.playbackRate === "number" &&
+      Number.isFinite(remote.playbackRate) &&
+      remote.playbackRate >= 0.5 &&
+      remote.playbackRate <= 3
+    ) {
+      basePlaybackRate = remote.playbackRate;
+      saveRate(basePlaybackRate);
+      if ([...rate.options].some((o) => Number(o.value) === basePlaybackRate)) {
+        rate.value = String(basePlaybackRate);
+      }
+      if (!trimSilenceBoosting) audio.playbackRate = basePlaybackRate;
+      changed = true;
+    }
+    if (typeof remote.voiceBoost === "boolean") {
+      voiceBoostEnabled = remote.voiceBoost;
+      saveBoolPref(VOICE_BOOST_KEY, voiceBoostEnabled);
+      changed = true;
+    }
+    if (typeof remote.trimSilence === "boolean") {
+      trimSilenceEnabled = remote.trimSilence;
+      saveBoolPref(TRIM_SILENCE_KEY, trimSilenceEnabled);
+      changed = true;
+    }
+    saveNumberPref(PREFS_UPDATED_KEY, remoteUpdatedAt);
+  } else if (localPrefsTs > remoteUpdatedAt) {
+    localHasNewer = true;
+  }
+
+  if (changed) {
+    updateAudioFxUI();
+    if (webAudioAttached) applyAudioFxSettings();
+    renderQueueUI();
+    render();
+    void updateAppBadge();
+    if (current && audio.paused) {
+      const syncedPos = getPosition(current.id);
+      const dur = current.durationSeconds || 0;
+      const isResume = syncedPos > 5 && (dur === 0 || syncedPos < dur - 5);
+      if (isResume && Math.abs((audio.currentTime || 0) - syncedPos) > 3) {
+        if (audio.readyState >= 1) {
+          audio.currentTime = syncedPos;
+          setProgress();
+          updateActiveChapter(syncedPos);
+          updateActiveCue(syncedPos);
+        }
+      }
+    }
+  }
+
+  return { changed, localHasNewer };
+}
+
+async function hydratePlaybackState() {
+  if (!TOKEN) return;
+  try {
+    const res = await fetch(
+      ORIGIN + "/listen/" + encodeURIComponent(TOKEN) + "/state",
+      { headers: { accept: "application/json" } },
+    );
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && data.state) {
+      const { localHasNewer } = applyRemotePlaybackState(data.state);
+      if (localHasNewer) scheduleStateSync(false);
+    }
+  } catch { /* offline: local storage remains authoritative until online */ }
+}
+
+async function pushPlaybackState() {
+  if (!TOKEN || syncInFlight) return;
+  syncInFlight = true;
+  syncDirty = false;
+  lastSyncSentAt = Date.now();
+  const payload = JSON.stringify(buildPlaybackStatePayload());
+  try {
+    const res = await fetch(
+      ORIGIN + "/listen/" + encodeURIComponent(TOKEN) + "/state",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: payload,
+      },
+    );
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data && data.state) applyRemotePlaybackState(data.state);
+    } else if (res.status >= 500 || res.status === 429) {
+      syncDirty = true;
+    }
+  } catch {
+    syncDirty = true;
+  } finally {
+    syncInFlight = false;
+    if (syncDirty && syncTimer === null) {
+      scheduleStateSync(false);
+    }
+  }
+}
+
+/** @param {boolean} [immediate=false] */
+function scheduleStateSync(immediate = false) {
+  syncDirty = true;
+  if (!TOKEN) return;
+  if (immediate) {
+    if (syncTimer !== null) {
+      clearTimeout(syncTimer);
+      syncTimer = null;
+    }
+    void pushPlaybackState();
+    return;
+  }
+  if (syncTimer !== null) return;
+  const elapsed = Date.now() - lastSyncSentAt;
+  const delay = Math.max(1000, SYNC_DEBOUNCE_MS - elapsed);
+  syncTimer = setTimeout(() => {
+    syncTimer = null;
+    if (syncDirty) void pushPlaybackState();
+  }, delay);
+}
+
+/** Flush latest playback state on pagehide / visibilitychange hidden via sendBeacon. */
+function flushStateBeacon() {
+  saveCurrentPlaybackPosition();
+  if (!TOKEN) return;
+  if (!syncDirty && (!current || audio.paused)) return;
+  if (syncTimer !== null) {
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+  const payload = JSON.stringify(buildPlaybackStatePayload());
+  let queued = false;
+  if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+    try {
+      // Plain string sends text/plain;charset=UTF-8 — avoids CORS preflight on pagehide.
+      queued = navigator.sendBeacon(
+        ORIGIN + "/listen/" + encodeURIComponent(TOKEN) + "/state",
+        payload,
+      );
+    } catch {
+      queued = false;
+    }
+  }
+  if (!queued) {
+    void fetch(
+      ORIGIN + "/listen/" + encodeURIComponent(TOKEN) + "/state",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: payload,
+        keepalive: true,
+      },
+    ).catch(() => {});
+  }
+  syncDirty = false;
+  lastSyncSentAt = Date.now();
+}
+
+// ---- Web Audio Voice Boost + Trim Silence (CORS-safe, lazy) -------------
+
+const SILENCE_RMS_THRESHOLD = 0.015;
+const SILENCE_MIN_GAP_MS = 250;
+const SILENCE_SPEED_BOOST = 0.35;
+
+/** @type {AudioContext | null} */
+let audioCtx = null;
+/** @type {MediaElementAudioSourceNode | null} */
+let mediaSourceNode = null;
+/** @type {BiquadFilterNode | null} */
+let highpassNode = null;
+/** @type {BiquadFilterNode | null} */
+let presenceNode = null;
+/** @type {DynamicsCompressorNode | null} */
+let compressorNode = null;
+/** @type {GainNode | null} */
+let makeupGainNode = null;
+/** @type {AnalyserNode | null} */
+let analyserNode = null;
+/** @type {Float32Array<ArrayBuffer> | null} */
+let analyserFloatBuf = null;
+/** @type {Uint8Array<ArrayBuffer> | null} */
+let analyserByteBuf = null;
+let webAudioAttached = false;
+let webAudioFailed = false;
+let trimSilenceBoosting = false;
+/** @type {number | null} */
+let silenceStartedAt = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let trimSilenceInterval = null;
+
+/** @param {string | undefined} url */
+function isSameOriginAudioUrl(url) {
+  if (!url) return false;
+  if (url.startsWith("blob:")) return true;
+  try {
+    return new URL(url, window.location.href).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+/** @returns {boolean} */
+function supportsWebAudioApi() {
+  if (typeof window === "undefined") return false;
+  const win = /** @type {{ AudioContext?: unknown; webkitAudioContext?: unknown }} */ (
+    /** @type {unknown} */ (window)
+  );
+  return typeof win.AudioContext === "function" || typeof win.webkitAudioContext === "function";
+}
+
+/**
+ * Web Audio MUST ONLY attach when audio is guaranteed same-origin / CORS-safe:
+ * attaching `createMediaElementSource` to a cross-origin `<audio>` without CORS
+ * headers silences output per the Web Audio specification.
+ * @param {PlayerEpisode | null} [ep]
+ */
+function canAttachWebAudio(ep = current) {
+  if (!AUDIO_PROCESSING_AVAILABLE) return false;
+  if (!supportsWebAudioApi()) return false;
+  if (webAudioFailed) return false;
+  if (ep && !isSameOriginAudioUrl(ep.audioUrl)) return false;
+  return true;
+}
+
+/** @param {string} [overrideNote] */
+function updateAudioFxUI(overrideNote) {
+  const available = canAttachWebAudio(current);
+  if (voiceBoostBtn) {
+    voiceBoostBtn.disabled = !available;
+    voiceBoostBtn.setAttribute("aria-pressed", available && voiceBoostEnabled ? "true" : "false");
+  }
+  if (trimSilenceBtn) {
+    trimSilenceBtn.disabled = !available;
+    trimSilenceBtn.setAttribute("aria-pressed", available && trimSilenceEnabled ? "true" : "false");
+  }
+  if (npAudioFxNote) {
+    let note = overrideNote || "";
+    if (!note && !available) {
+      note = !AUDIO_PROCESSING_AVAILABLE
+        ? "Audio enhancements require same-origin audio streaming."
+        : !supportsWebAudioApi()
+        ? "Audio enhancements are not supported in this browser."
+        : "Audio enhancements are unavailable for this stream.";
+    }
+    npAudioFxNote.textContent = note;
+    npAudioFxNote.classList.toggle("hidden", !note);
+  }
+}
+
+function restoreBasePlaybackRate() {
+  silenceStartedAt = null;
+  if (trimSilenceBoosting) {
+    trimSilenceBoosting = false;
+  }
+  if (Math.abs(audio.playbackRate - basePlaybackRate) > 0.001) {
+    audio.playbackRate = basePlaybackRate;
+  }
+}
+
+function stopTrimSilenceLoop() {
+  if (trimSilenceInterval !== null) {
+    clearInterval(trimSilenceInterval);
+    trimSilenceInterval = null;
+  }
+  restoreBasePlaybackRate();
+}
+
+function measureAudioRms() {
+  if (!analyserNode) return 1;
+  if (typeof analyserNode.getFloatTimeDomainData === "function" && analyserFloatBuf) {
+    analyserNode.getFloatTimeDomainData(analyserFloatBuf);
+    let sum = 0;
+    for (let i = 0; i < analyserFloatBuf.length; i++) {
+      const s = analyserFloatBuf[i] ?? 0;
+      sum += s * s;
+    }
+    return Math.sqrt(sum / analyserFloatBuf.length);
+  }
+  if (typeof analyserNode.getByteTimeDomainData === "function" && analyserByteBuf) {
+    analyserNode.getByteTimeDomainData(analyserByteBuf);
+    let sum = 0;
+    for (let i = 0; i < analyserByteBuf.length; i++) {
+      const s = ((analyserByteBuf[i] ?? 128) - 128) / 128;
+      sum += s * s;
+    }
+    return Math.sqrt(sum / analyserByteBuf.length);
+  }
+  return 1;
+}
+
+function startTrimSilenceLoop() {
+  if (!trimSilenceEnabled || !analyserNode || audio.paused || audio.ended) {
+    stopTrimSilenceLoop();
+    return;
+  }
+  if (trimSilenceInterval !== null) return;
+  trimSilenceInterval = setInterval(() => {
+    if (!trimSilenceEnabled || !analyserNode || audio.paused || audio.ended) {
+      stopTrimSilenceLoop();
+      return;
+    }
+    const rms = measureAudioRms();
+    const now = performance.now();
+    if (rms < SILENCE_RMS_THRESHOLD) {
+      if (silenceStartedAt === null) {
+        silenceStartedAt = now;
+      } else if (now - silenceStartedAt >= SILENCE_MIN_GAP_MS) {
+        const target = Math.min(3.0, Math.round((basePlaybackRate + SILENCE_SPEED_BOOST) * 100) / 100);
+        const stepped = Math.min(target, Math.round((audio.playbackRate + 0.12) * 100) / 100);
+        if (stepped > audio.playbackRate) {
+          audio.playbackRate = stepped;
+          trimSilenceBoosting = true;
+        }
+      }
+    } else {
+      restoreBasePlaybackRate();
+    }
+  }, 50);
+}
+
+function applyAudioFxSettings() {
+  if (!webAudioAttached || !audioCtx || !highpassNode || !presenceNode || !compressorNode || !makeupGainNode) {
+    if (!trimSilenceEnabled) stopTrimSilenceLoop();
+    return;
+  }
+  const t = audioCtx.currentTime;
+  const tau = 0.025;
+  if (voiceBoostEnabled) {
+    highpassNode.frequency.setTargetAtTime(85, t, tau);
+    presenceNode.gain.setTargetAtTime(4.5, t, tau);
+    compressorNode.threshold.setTargetAtTime(-24, t, tau);
+    compressorNode.knee.setTargetAtTime(18, t, tau);
+    compressorNode.ratio.setTargetAtTime(4, t, tau);
+    makeupGainNode.gain.setTargetAtTime(1.35, t, tau);
+  } else {
+    highpassNode.frequency.setTargetAtTime(10, t, tau);
+    presenceNode.gain.setTargetAtTime(0, t, tau);
+    compressorNode.threshold.setTargetAtTime(0, t, tau);
+    compressorNode.knee.setTargetAtTime(0, t, tau);
+    compressorNode.ratio.setTargetAtTime(1, t, tau);
+    makeupGainNode.gain.setTargetAtTime(1.0, t, tau);
+  }
+  if (trimSilenceEnabled && !audio.paused && !audio.ended) {
+    startTrimSilenceLoop();
+  } else {
+    stopTrimSilenceLoop();
+  }
+}
+
+function ensureWebAudioGraph() {
+  if (webAudioAttached) return true;
+  if (!canAttachWebAudio(current)) return false;
+  try {
+    const win = /** @type {{ AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }} */ (
+      /** @type {unknown} */ (window)
+    );
+    const AudioCtx = win.AudioContext || win.webkitAudioContext;
+    if (!AudioCtx) return false;
+    audioCtx = new AudioCtx();
+    mediaSourceNode = audioCtx.createMediaElementSource(audio);
+
+    highpassNode = audioCtx.createBiquadFilter();
+    highpassNode.type = "highpass";
+    highpassNode.frequency.value = 10;
+
+    presenceNode = audioCtx.createBiquadFilter();
+    presenceNode.type = "peaking";
+    presenceNode.frequency.value = 2800;
+    presenceNode.Q.value = 1.0;
+    presenceNode.gain.value = 0;
+
+    compressorNode = audioCtx.createDynamicsCompressor();
+    compressorNode.threshold.value = 0;
+    compressorNode.knee.value = 0;
+    compressorNode.ratio.value = 1;
+    compressorNode.attack.value = 0.005;
+    compressorNode.release.value = 0.15;
+
+    makeupGainNode = audioCtx.createGain();
+    makeupGainNode.gain.value = 1.0;
+
+    analyserNode = audioCtx.createAnalyser();
+    analyserNode.fftSize = 1024;
+    analyserFloatBuf = new Float32Array(analyserNode.fftSize);
+    analyserByteBuf = new Uint8Array(analyserNode.fftSize);
+
+    mediaSourceNode.connect(highpassNode);
+    highpassNode.connect(presenceNode);
+    presenceNode.connect(compressorNode);
+    compressorNode.connect(makeupGainNode);
+    makeupGainNode.connect(audioCtx.destination);
+    mediaSourceNode.connect(analyserNode);
+
+    webAudioAttached = true;
+    applyAudioFxSettings();
+    return true;
+  } catch {
+    webAudioFailed = true;
+    voiceBoostEnabled = false;
+    trimSilenceEnabled = false;
+    updateAudioFxUI("Audio enhancements could not be initialized in this browser.");
+    return false;
+  }
+}
+
+function syncWebAudioForPlayback() {
+  if (!voiceBoostEnabled && !trimSilenceEnabled) {
+    if (webAudioAttached && audioCtx && audioCtx.state === "suspended") {
+      void audioCtx.resume().catch(() => {});
+    }
+    stopTrimSilenceLoop();
+    return;
+  }
+  if (!canAttachWebAudio(current)) {
+    updateAudioFxUI();
+    return;
+  }
+  if (ensureWebAudioGraph() && audioCtx) {
+    if (audioCtx.state === "suspended") {
+      void audioCtx.resume().catch(() => {});
+    }
+    applyAudioFxSettings();
+  }
+}
 
 /** @param {string} id */
 function toggleQueueEpisode(id) {
@@ -1682,7 +2351,9 @@ function toggleQueueEpisode(id) {
   if (idx >= 0) upNextIds.splice(idx, 1);
   else upNextIds.push(id);
   saveQueue(upNextIds);
+  saveNumberPref(QUEUE_UPDATED_KEY, Date.now());
   renderQueueUI();
+  scheduleStateSync(true);
 }
 
 function renderQueueUI() {
@@ -1736,7 +2407,9 @@ function renderQueueUI() {
     playBtn.addEventListener("click", () => {
       upNextIds = upNextIds.filter((q) => q !== ep.id);
       saveQueue(upNextIds);
+      saveNumberPref(QUEUE_UPDATED_KEY, Date.now());
       renderQueueUI();
+      scheduleStateSync(true);
       void select(ep, true, getPosition(ep.id));
     });
     li.appendChild(playBtn);
@@ -1749,8 +2422,10 @@ function renderQueueUI() {
     rm.addEventListener("click", () => {
       upNextIds = upNextIds.filter((q) => q !== ep.id);
       saveQueue(upNextIds);
+      saveNumberPref(QUEUE_UPDATED_KEY, Date.now());
       renderQueueUI();
       render();
+      scheduleStateSync(true);
     });
     li.appendChild(rm);
     items.push(li);
@@ -1802,6 +2477,10 @@ function renderChaptersUI(episode, duration) {
     btn.addEventListener("click", () => {
       if (Number.isFinite(audio.duration) || audio.readyState >= 1) {
         audio.currentTime = Math.min(ch.startTime, audio.duration || ch.startTime);
+        if (current) savePosition(current.id, audio.currentTime);
+        updateActiveChapter(audio.currentTime);
+        updateActiveCue(audio.currentTime, true);
+        scheduleStateSync(true);
         if (audio.paused) void audio.play().catch(() => {});
       } else if (current) {
         void select(current, true, ch.startTime);
@@ -1838,9 +2517,193 @@ function updateActiveChapter(currentTime) {
   }
 }
 
+// ---- Synced Read-Along (WebVTT + article fallback) ----------------------
+
+const VTT_TIMESTAMP_RE = /^(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?$/;
+
+/** @param {string} raw @returns {number | null} */
+function parseVttTimestamp(raw) {
+  const match = VTT_TIMESTAMP_RE.exec(raw.trim());
+  if (!match) return null;
+  const hours = match[1] !== undefined ? Number(match[1]) : 0;
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  const millis = Number((match[4] ?? "0").padEnd(3, "0"));
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes) ||
+    !Number.isFinite(seconds) ||
+    !Number.isFinite(millis) ||
+    minutes >= 60 ||
+    seconds >= 60
+  ) {
+    return null;
+  }
+  return hours * 3600 + minutes * 60 + seconds + millis / 1000;
+}
+
+/** @param {string} text @returns {string} */
+function decodeVttEntities(text) {
+  return text
+    .replaceAll("&nbsp;", " ")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&apos;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}
+
+/**
+ * Parse a WebVTT transcript into ordered timed cues (plain text, safe for textContent).
+ * @param {string} raw
+ * @returns {TranscriptCue[]}
+ */
+function parseWebVtt(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  const normalized = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  const blocks = normalized.split(/\n{2,}/);
+  /** @type {TranscriptCue[]} */
+  const cues = [];
+  for (const block of blocks) {
+    const lines = block.split("\n").map((l) => l.trimEnd());
+    const first = lines.find((l) => l.trim().length > 0)?.trim() ?? "";
+    if (
+      !first ||
+      first.startsWith("WEBVTT") ||
+      first.startsWith("NOTE") ||
+      first.startsWith("STYLE") ||
+      first.startsWith("REGION")
+    ) {
+      continue;
+    }
+    const timingIndex = lines.findIndex((l) => l.includes("-->"));
+    if (timingIndex === -1) continue;
+    const timingLine = lines[timingIndex] ?? "";
+    const arrowIndex = timingLine.indexOf("-->");
+    const start = parseVttTimestamp(timingLine.slice(0, arrowIndex).trim());
+    const endRaw = timingLine.slice(arrowIndex + 3).trim().split(/\s+/)[0] ?? "";
+    const end = parseVttTimestamp(endRaw);
+    if (start === null || end === null || end < start) continue;
+
+    const rawBody = lines.slice(timingIndex + 1).join("\n").trim();
+    if (!rawBody) continue;
+    let speaker = "";
+    let body = rawBody;
+    const voiceMatch = /^<v(?:\.[^>\s]+)*\s+([^>]+)>([\s\S]*?)(?:<\/v>)?$/i.exec(body);
+    if (voiceMatch) {
+      speaker = decodeVttEntities((voiceMatch[1] ?? "").trim());
+      body = voiceMatch[2] ?? "";
+    }
+    const cleanText = decodeVttEntities(body.replace(/<[^>]+>/g, ""))
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (!cleanText) continue;
+    cues.push(speaker ? { start, end, text: cleanText, speaker } : { start, end, text: cleanText });
+  }
+  cues.sort((a, b) => a.start - b.start || a.end - b.end);
+  return cues;
+}
+
+/**
+ * Find the active cue index for `currentTime`.
+ * @param {TranscriptCue[]} cues
+ * @param {number} currentTime
+ * @returns {number}
+ */
+function findActiveCueIndex(cues, currentTime) {
+  if (cues.length === 0 || !Number.isFinite(currentTime) || currentTime < 0) return -1;
+  let hit = -1;
+  for (let i = 0; i < cues.length; i++) {
+    const cue = cues[i];
+    if (!cue) continue;
+    if (currentTime >= cue.start - 0.05 && currentTime < cue.end) {
+      hit = i;
+    } else if (cue.start - 0.05 > currentTime) {
+      break;
+    }
+  }
+  if (hit !== -1) return hit;
+  const first = cues[0];
+  const last = cues[cues.length - 1];
+  if (first && last && currentTime >= first.start && currentTime <= last.end) {
+    let prev = -1;
+    for (let i = 0; i < cues.length; i++) {
+      const cue = cues[i];
+      if (cue && cue.start <= currentTime) prev = i;
+      else break;
+    }
+    return prev;
+  }
+  return -1;
+}
+
+/** @param {boolean} follow */
+function setReadAlongAutoFollow(follow) {
+  readAlongAutoFollow = follow;
+  if (npFollowBtn) {
+    npFollowBtn.classList.toggle("hidden", follow || activeCues.length === 0);
+  }
+}
+
+/**
+ * Highlight the active timed cue and gently scroll `#npReadBody` while auto-follow is enabled.
+ * @param {number} currentTime
+ * @param {boolean} [forceScroll=false]
+ */
+function updateActiveCue(currentTime, forceScroll = false) {
+  if (!npReadBody || activeCues.length === 0) return;
+  const idx = findActiveCueIndex(activeCues, currentTime);
+  if (idx === activeCueIndex && !forceScroll) return;
+
+  if (activeCueIndex >= 0) {
+    const prevEl = npReadBody.querySelector(`button.np-cue[data-cue-index="${activeCueIndex}"]`);
+    if (prevEl) {
+      prevEl.removeAttribute("data-active");
+      prevEl.removeAttribute("aria-current");
+    }
+  }
+  activeCueIndex = idx;
+  if (idx < 0) return;
+
+  const nextEl = /** @type {HTMLElement | null} */ (
+    npReadBody.querySelector(`button.np-cue[data-cue-index="${idx}"]`)
+  );
+  if (!nextEl) return;
+  nextEl.dataset.active = "true";
+  nextEl.setAttribute("aria-current", "true");
+
+  if (readAlongAutoFollow && npDialog?.open && activeNpTab === "read") {
+    const reduced = typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const containerRect = npReadBody.getBoundingClientRect();
+    const elRect = nextEl.getBoundingClientRect();
+    const targetTop = Math.max(
+      0,
+      npReadBody.scrollTop + (elRect.top - containerRect.top) -
+        (npReadBody.clientHeight - nextEl.offsetHeight) * 0.35,
+    );
+    readAlongProgrammaticScroll = true;
+    if (readAlongScrollGuardTimer !== null) clearTimeout(readAlongScrollGuardTimer);
+    if (typeof npReadBody.scrollTo === "function") {
+      npReadBody.scrollTo({ top: targetTop, behavior: reduced ? "auto" : "smooth" });
+    } else {
+      npReadBody.scrollTop = targetTop;
+    }
+    readAlongScrollGuardTimer = setTimeout(() => {
+      readAlongProgrammaticScroll = false;
+      readAlongScrollGuardTimer = null;
+    }, reduced ? 80 : 450);
+  }
+}
+
 /** @param {PlayerEpisode | null} episode */
 async function loadReadAlong(episode) {
   if (!npReadBody) return;
+  activeCues = [];
+  activeCueIndex = -1;
+  setReadAlongAutoFollow(true);
   if (!episode) {
     npReadBody.replaceChildren();
     return;
@@ -1854,6 +2717,86 @@ async function loadReadAlong(episode) {
       npExternalLink.classList.add("hidden");
     }
   }
+
+  // 1. Try timed WebVTT transcript first for synced Read-Along.
+  let cues = transcriptCache.has(episode.id) ? (transcriptCache.get(episode.id) ?? null) : undefined;
+  if (cues === undefined) {
+    const loading = document.createElement("p");
+    loading.className = "np-empty";
+    loading.textContent = "Loading read-along…";
+    npReadBody.replaceChildren(loading);
+    try {
+      const vttRes = await fetch(
+        ORIGIN + "/feed/" + encodeURIComponent(TOKEN) + "/transcript/" +
+          encodeURIComponent(episode.id),
+        { headers: { accept: "text/vtt, text/plain" } },
+      );
+      if (vttRes.ok) {
+        const parsedCues = parseWebVtt(await vttRes.text());
+        cues = parsedCues.length > 0 ? parsedCues : null;
+        transcriptCache.set(episode.id, cues);
+      } else if (vttRes.status === 404) {
+        cues = null;
+        transcriptCache.set(episode.id, null);
+      } else {
+        cues = null;
+      }
+    } catch {
+      cues = null;
+    }
+  }
+  if (current?.id !== episode.id) return;
+
+  if (cues && cues.length > 0) {
+    activeCues = cues;
+    const buttons = cues.map((cue, idx) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "np-cue";
+      btn.dataset.cueIndex = String(idx);
+      btn.dataset.start = String(cue.start);
+
+      const meta = document.createElement("span");
+      meta.className = "np-cue-meta";
+      const timeEl = document.createElement("span");
+      timeEl.className = "np-cue-time";
+      timeEl.textContent = fmt(cue.start);
+      meta.appendChild(timeEl);
+      if (cue.speaker) {
+        const spk = document.createElement("span");
+        spk.className = "np-cue-speaker";
+        spk.textContent = cue.speaker;
+        meta.appendChild(spk);
+      }
+      btn.appendChild(meta);
+
+      const textEl = document.createElement("span");
+      textEl.className = "np-cue-text";
+      textEl.textContent = cue.text;
+      btn.appendChild(textEl);
+
+      btn.addEventListener("click", () => {
+        setReadAlongAutoFollow(true);
+        if (Number.isFinite(audio.duration) || audio.readyState >= 1) {
+          audio.currentTime = Math.min(cue.start, audio.duration || cue.start);
+          if (current) savePosition(current.id, audio.currentTime);
+          updateActiveChapter(audio.currentTime);
+          updateActiveCue(audio.currentTime, true);
+          scheduleStateSync(true);
+          if (audio.paused) void audio.play().catch(() => {});
+        } else if (current) {
+          void select(current, true, cue.start);
+        }
+      });
+      return btn;
+    });
+    npReadBody.replaceChildren(...buttons);
+    setReadAlongAutoFollow(true);
+    updateActiveCue(audio.currentTime, true);
+    return;
+  }
+
+  // 2. Graceful fallback to plain article text when timed transcript is unavailable.
   let cached = articleCache.get(episode.id);
   if (!cached) {
     const loading = document.createElement("p");
@@ -1976,10 +2919,12 @@ function playNextEpisode() {
   while (upNextIds.length > 0) {
     const nextId = upNextIds.shift();
     saveQueue(upNextIds);
+    saveNumberPref(QUEUE_UPDATED_KEY, Date.now());
     const nextEp = EPISODES.find((e) => e.id === nextId);
     if (nextEp) {
       renderQueueUI();
       render();
+      scheduleStateSync(true);
       void select(nextEp, true, getPosition(nextEp.id));
       return true;
     }
@@ -2010,13 +2955,14 @@ function playPreviousEpisode() {
 
 /** @param {PlayerEpisode} episode @param {boolean} autoplay @param {number} [startPos] */
 async function select(episode, autoplay, startPos) {
+  stopTrimSilenceLoop();
   current = episode;
+  updateAudioFxUI();
   const isSameSrc = audio.src === episode.audioUrl;
   if (!isSameSrc) {
     audio.src = episode.audioUrl;
   }
-  const savedRate = Number(rate.value) || loadSavedRate();
-  audio.playbackRate = savedRate;
+  audio.playbackRate = basePlaybackRate;
 
   const artSrc = episode.artworkUrl || "/icon.png";
   if (nowArt) nowArt.src = artSrc;
@@ -2066,15 +3012,17 @@ async function select(episode, autoplay, startPos) {
       audio.currentTime = seekTarget;
       setProgress();
       updateActiveChapter(seekTarget);
+      updateActiveCue(seekTarget);
     } else {
       /** @type {() => void} */
       const onLoaded = () => {
         audio.removeEventListener("loadedmetadata", onLoaded);
         if (current?.id === episode.id) {
           audio.currentTime = seekTarget;
-          audio.playbackRate = Number(rate.value) || loadSavedRate();
+          audio.playbackRate = basePlaybackRate;
           setProgress();
           updateActiveChapter(seekTarget);
+          updateActiveCue(seekTarget);
           if ("mediaSession" in navigator && audio.duration) {
             try {
               navigator.mediaSession.setPositionState({
@@ -2092,6 +3040,7 @@ async function select(episode, autoplay, startPos) {
     audio.currentTime = 0;
     setProgress();
     updateActiveChapter(0);
+    updateActiveCue(0);
   }
 
   if ("mediaSession" in navigator) {
@@ -2159,9 +3108,19 @@ function setProgress() {
 playPause.addEventListener("click", toggle);
 backBtn.addEventListener("click", () => {
   audio.currentTime = Math.max(0, audio.currentTime - 15);
+  if (current) {
+    savePosition(current.id, audio.currentTime);
+    updateActiveCue(audio.currentTime);
+    scheduleStateSync(true);
+  }
 });
 fwdBtn.addEventListener("click", () => {
   audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30);
+  if (current) {
+    savePosition(current.id, audio.currentTime);
+    updateActiveCue(audio.currentTime);
+    scheduleStateSync(true);
+  }
 });
 
 /** @param {number} value */
@@ -2179,18 +3138,80 @@ function handleSeekInput(value) {
       ));
       if (rowEl) updateRowResumeUI(rowEl, current);
       updateActiveChapter(audio.currentTime);
+      updateActiveCue(audio.currentTime);
     }
   }
   setProgress();
 }
 
 seek.addEventListener("input", () => handleSeekInput(Number(seek.value)));
-if (npSeek) npSeek.addEventListener("input", () => handleSeekInput(Number(npSeek.value)));
+seek.addEventListener("change", () => scheduleStateSync(true));
+if (npSeek) {
+  npSeek.addEventListener("input", () => handleSeekInput(Number(npSeek.value)));
+  npSeek.addEventListener("change", () => scheduleStateSync(true));
+}
 rate.addEventListener("change", () => {
   const next = Number(rate.value);
-  audio.playbackRate = next;
-  saveRate(next);
+  if (Number.isFinite(next) && next >= 0.5 && next <= 3) {
+    basePlaybackRate = next;
+    restoreBasePlaybackRate();
+    saveRate(basePlaybackRate);
+    saveNumberPref(PREFS_UPDATED_KEY, Date.now());
+    scheduleStateSync(true);
+  }
 });
+
+if (voiceBoostBtn) {
+  voiceBoostBtn.addEventListener("click", () => {
+    if (!canAttachWebAudio(current)) {
+      updateAudioFxUI();
+      return;
+    }
+    voiceBoostEnabled = !voiceBoostEnabled;
+    saveBoolPref(VOICE_BOOST_KEY, voiceBoostEnabled);
+    saveNumberPref(PREFS_UPDATED_KEY, Date.now());
+    syncWebAudioForPlayback();
+    updateAudioFxUI();
+    scheduleStateSync(true);
+    say(voiceBoostEnabled ? "Voice Boost enabled." : "Voice Boost disabled.", "ok");
+  });
+}
+if (trimSilenceBtn) {
+  trimSilenceBtn.addEventListener("click", () => {
+    if (!canAttachWebAudio(current)) {
+      updateAudioFxUI();
+      return;
+    }
+    trimSilenceEnabled = !trimSilenceEnabled;
+    saveBoolPref(TRIM_SILENCE_KEY, trimSilenceEnabled);
+    saveNumberPref(PREFS_UPDATED_KEY, Date.now());
+    syncWebAudioForPlayback();
+    updateAudioFxUI();
+    scheduleStateSync(true);
+    say(trimSilenceEnabled ? "Trim Silence enabled." : "Trim Silence disabled.", "ok");
+  });
+}
+if (npFollowBtn) {
+  npFollowBtn.addEventListener("click", () => {
+    setReadAlongAutoFollow(true);
+    updateActiveCue(audio.currentTime, true);
+  });
+}
+if (npReadBody) {
+  const pauseAutoFollow = () => {
+    if (activeCues.length > 0 && readAlongAutoFollow) {
+      setReadAlongAutoFollow(false);
+    }
+  };
+  npReadBody.addEventListener("wheel", pauseAutoFollow, { passive: true });
+  npReadBody.addEventListener("touchstart", pauseAutoFollow, { passive: true });
+  npReadBody.addEventListener("pointerdown", pauseAutoFollow, { passive: true });
+  npReadBody.addEventListener("scroll", () => {
+    if (!readAlongProgrammaticScroll && activeCues.length > 0 && readAlongAutoFollow) {
+      setReadAlongAutoFollow(false);
+    }
+  }, { passive: true });
+}
 
 if (expandPlayerBtn) expandPlayerBtn.addEventListener("click", () => openNowPlaying());
 if (openQueueBtn) openQueueBtn.addEventListener("click", () => openNowPlaying("queue"));
@@ -2199,11 +3220,21 @@ if (npPlayPauseBtn) npPlayPauseBtn.addEventListener("click", toggle);
 if (npBackBtn) {
   npBackBtn.addEventListener("click", () => {
     audio.currentTime = Math.max(0, audio.currentTime - 15);
+    if (current) {
+      savePosition(current.id, audio.currentTime);
+      updateActiveCue(audio.currentTime);
+      scheduleStateSync(true);
+    }
   });
 }
 if (npFwdBtn) {
   npFwdBtn.addEventListener("click", () => {
     audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30);
+    if (current) {
+      savePosition(current.id, audio.currentTime);
+      updateActiveCue(audio.currentTime);
+      scheduleStateSync(true);
+    }
   });
 }
 if (npPrevBtn) npPrevBtn.addEventListener("click", playPreviousEpisode);
@@ -2227,8 +3258,10 @@ if (npClearQueueBtn) {
   npClearQueueBtn.addEventListener("click", () => {
     upNextIds = [];
     saveQueue(upNextIds);
+    saveNumberPref(QUEUE_UPDATED_KEY, Date.now());
     renderQueueUI();
     render();
+    scheduleStateSync(true);
     say("Cleared Up Next queue.");
   });
 }
@@ -2243,8 +3276,10 @@ let lastSavedTime = 0;
 let lastSavedRealTime = 0;
 
 audio.addEventListener("play", () => {
-  const savedRate = Number(rate.value) || loadSavedRate();
-  if (audio.playbackRate !== savedRate) audio.playbackRate = savedRate;
+  if (!trimSilenceBoosting && audio.playbackRate !== basePlaybackRate) {
+    audio.playbackRate = basePlaybackRate;
+  }
+  syncWebAudioForPlayback();
   setIcon(playIcon, "pause");
   playPause.setAttribute("aria-label", "Pause");
   playPause.setAttribute("aria-pressed", "true");
@@ -2256,6 +3291,7 @@ audio.addEventListener("play", () => {
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
 });
 audio.addEventListener("pause", () => {
+  stopTrimSilenceLoop();
   setIcon(playIcon, "play");
   playPause.setAttribute("aria-label", "Play");
   playPause.setAttribute("aria-pressed", "false");
@@ -2272,9 +3308,11 @@ audio.addEventListener("pause", () => {
     ));
     if (rowEl) updateRowResumeUI(rowEl, current);
     renderContinueListening();
+    scheduleStateSync(true);
   }
 });
 audio.addEventListener("ended", () => {
+  stopTrimSilenceLoop();
   if (current) {
     const played = loadPlayed();
     played.add(current.id);
@@ -2286,6 +3324,7 @@ audio.addEventListener("ended", () => {
     ));
     if (rowEl) updateRowResumeUI(rowEl, current);
     renderContinueListening();
+    scheduleStateSync(true);
   }
   if (sleepTimerTarget === "episode") {
     clearSleepTimer();
@@ -2306,10 +3345,15 @@ audio.addEventListener("loadedmetadata", () => {
   const curFmt = fmt(audio.currentTime);
   nowTime.textContent = curFmt;
   if (npTime) npTime.textContent = curFmt;
-  audio.playbackRate = Number(rate.value) || loadSavedRate();
+  if (!trimSilenceBoosting) audio.playbackRate = basePlaybackRate;
   renderChaptersUI(current, audio.duration || 0);
   updateActiveChapter(audio.currentTime);
+  updateActiveCue(audio.currentTime);
   setProgress();
+});
+audio.addEventListener("seeked", () => {
+  updateActiveChapter(audio.currentTime);
+  updateActiveCue(audio.currentTime);
 });
 audio.addEventListener("timeupdate", () => {
   const curStr = String(audio.currentTime);
@@ -2319,6 +3363,7 @@ audio.addEventListener("timeupdate", () => {
   nowTime.textContent = curFmt;
   if (npTime) npTime.textContent = curFmt;
   updateActiveChapter(audio.currentTime);
+  updateActiveCue(audio.currentTime);
   setProgress();
   if ("mediaSession" in navigator && audio.duration) {
     try {
@@ -2341,10 +3386,12 @@ audio.addEventListener("timeupdate", () => {
         `li[data-episode-id="${current.id}"]`,
       ));
       if (rowEl) updateRowResumeUI(rowEl, current);
+      scheduleStateSync(false);
     }
   }
 });
 audio.addEventListener("error", () => {
+  stopTrimSilenceLoop();
   say(
     "That audio could not be played. If you are offline, download it while online first.",
     "error",
@@ -2354,6 +3401,7 @@ audio.addEventListener("error", () => {
 function saveCurrentPlaybackPosition() {
   if (current && audio.currentTime > 2 && !audio.ended) {
     savePosition(current.id, audio.currentTime);
+    syncDirty = true;
   }
 }
 
@@ -2363,12 +3411,12 @@ function saveCurrentPlaybackPosition() {
 // reliably persist playback state without preventing bfcache restoration.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
-    saveCurrentPlaybackPosition();
+    flushStateBeacon();
   }
 });
 
 window.addEventListener("pagehide", () => {
-  saveCurrentPlaybackPosition();
+  flushStateBeacon();
 });
 
 // ---- OS media controls --------------------------------------------------
@@ -2586,7 +3634,11 @@ async function downloadEpisode(episode, button) {
   }
 }
 
-window.addEventListener("online", updateCounts);
+window.addEventListener("online", () => {
+  updateCounts();
+  if (syncDirty) void pushPlaybackState();
+  else void hydratePlaybackState();
+});
 window.addEventListener("offline", updateCounts);
 
 // ---- install ------------------------------------------------------------
@@ -2660,11 +3712,12 @@ async function boot() {
   await refreshDownloaded();
 
   // Restore persisted playback speed across reloads
-  const savedRate = loadSavedRate();
-  if ([...rate.options].some((o) => Number(o.value) === savedRate)) {
-    rate.value = String(savedRate);
+  basePlaybackRate = loadSavedRate();
+  if ([...rate.options].some((o) => Number(o.value) === basePlaybackRate)) {
+    rate.value = String(basePlaybackRate);
   }
-  audio.playbackRate = savedRate;
+  audio.playbackRate = basePlaybackRate;
+  updateAudioFxUI();
 
   // Restore persisted filter state for this token (audio-feed-3h1)
   const savedFilter = loadFilterState();
@@ -2684,8 +3737,11 @@ async function boot() {
       await select(first, false, isResume ? pos : 0);
     }
   }
+  updateAudioFxUI();
   updateCounts();
   void updateAppBadge();
+  // Hydrate cross-device playback state asynchronously after local-first render.
+  void hydratePlaybackState();
 
   if ("serviceWorker" in navigator) {
     try {

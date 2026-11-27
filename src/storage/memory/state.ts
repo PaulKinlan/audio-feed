@@ -13,6 +13,7 @@ import type {
   Episode,
   OutboxNotification,
   PasskeyCredential,
+  PlaybackState,
   Session,
   SetupLink,
   Source,
@@ -62,6 +63,7 @@ export interface MemoryState {
   credentials: Map<string, PasskeyCredential>;
   setupLinks: Map<string, SetupLink>;
   challenges: Map<string, AuthChallenge>;
+  playbackStates: Map<string, PlaybackState>;
 }
 
 /** Builds the state every domain repository takes. */
@@ -94,6 +96,7 @@ export function createMemoryState(): MemoryState {
     credentials: new Map<string, PasskeyCredential>(),
     setupLinks: new Map<string, SetupLink>(),
     challenges: new Map<string, AuthChallenge>(),
+    playbackStates: new Map<string, PlaybackState>(),
   };
 }
 

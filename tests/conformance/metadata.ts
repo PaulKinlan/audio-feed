@@ -24,6 +24,7 @@ import { registerNotificationsCases } from "./metadata/notifications.ts";
 import { registerAuthCases } from "./metadata/auth.ts";
 import { registerSegmentsCases } from "./metadata/segments.ts";
 import { registerRepositoriesCases } from "./metadata/repositories.ts";
+import { registerPlaybackStateCases } from "./metadata/playback-state.ts";
 import {
   registerLifecycleLogCases,
   registerLogCeilingCases,
@@ -46,6 +47,7 @@ export function runMetadataConformance(options: MetadataSuiteOptions) {
   registerAuthCases(suite);
   registerSegmentsCases(suite);
   registerRepositoriesCases(suite);
+  registerPlaybackStateCases(suite);
   registerLogsCases(suite);
   registerLifecycleLogCases(suite);
   registerLogCeilingCases(suite);

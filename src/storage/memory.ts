@@ -5,6 +5,7 @@ import type {
   Episode,
   OutboxNotification,
   PasskeyCredential,
+  PlaybackState,
   Session,
   SetupLink,
   Source,
@@ -12,6 +13,7 @@ import type {
   SynthesisSegmentRecord,
   User,
 } from "../types.ts";
+import type { PlaybackStatePatch } from "../playback_state.ts";
 import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
 import type { ListSynthesizingOptions, ListSynthesizingResult } from "./mod.ts";
 import type { AtomicWrite, EpisodePage, EpisodePageResult } from "./mod.ts";
@@ -49,6 +51,7 @@ import { createNotificationsRepository } from "./memory/notifications.ts";
 import { createRunsRepository } from "./memory/runs.ts";
 import { createLogsRepository } from "./memory/logs.ts";
 import { createAuthRepository } from "./memory/auth.ts";
+import { createPlaybackStateRepository } from "./memory/playback-state.ts";
 
 // The collections and the sort helpers moved to ./memory/state.ts (audio-feed-8r1e); they
 // stay re-exported here because this module is where callers and tests already import them.
@@ -171,6 +174,7 @@ export class MemoryMetadataStore implements MetadataStore {
       logs: createLogsRepository(this.#state, () => this),
       runs: createRunsRepository(this.#state, () => this),
       auth: createAuthRepository(this.#state, () => this),
+      playbackState: createPlaybackStateRepository(this.#state, () => this),
     };
   }
 
@@ -485,6 +489,16 @@ export class MemoryMetadataStore implements MetadataStore {
   }
   consumeChallenge(challenge: string): Promise<AuthChallenge | null> {
     return this.repositories.auth.consumeChallenge(challenge);
+  }
+  // -- playbackState --
+  getPlaybackState(userId: string): Promise<PlaybackState | null> {
+    return this.repositories.playbackState.getPlaybackState(userId);
+  }
+  putPlaybackState(userId: string, state: PlaybackState): Promise<void> {
+    return this.repositories.playbackState.putPlaybackState(userId, state);
+  }
+  mergePlaybackState(userId: string, incoming: PlaybackStatePatch): Promise<PlaybackState> {
+    return this.repositories.playbackState.mergePlaybackState(userId, incoming);
   }
 
   /**

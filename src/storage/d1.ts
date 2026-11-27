@@ -12,6 +12,7 @@ import type {
   Episode,
   OutboxNotification,
   PasskeyCredential,
+  PlaybackState,
   Session,
   SetupLink,
   Source,
@@ -19,6 +20,7 @@ import type {
   SynthesisSegmentRecord,
   User,
 } from "../types.ts";
+import type { PlaybackStatePatch } from "../playback_state.ts";
 import type {
   AtomicWrite,
   DownloadCounts,
@@ -54,6 +56,7 @@ import { createD1NotificationsRepository } from "./d1/notifications.ts";
 import { createD1RunsRepository } from "./d1/runs.ts";
 import { createD1LogsRepository } from "./d1/logs.ts";
 import { createD1AuthRepository } from "./d1/auth.ts";
+import { createD1PlaybackStateRepository } from "./d1/playback-state.ts";
 
 export {
   CorruptArticleError,
@@ -87,6 +90,7 @@ export class D1MetadataStore implements MetadataStore {
       runs: createD1RunsRepository(this.#core, () => this),
       logs: createD1LogsRepository(this.#core, () => this),
       auth: createD1AuthRepository(this.#core, () => this),
+      playbackState: createD1PlaybackStateRepository(this.#core, () => this),
     };
   }
 
@@ -404,6 +408,17 @@ export class D1MetadataStore implements MetadataStore {
   }
   consumeChallenge(challenge: string): Promise<AuthChallenge | null> {
     return this.repositories.auth.consumeChallenge(challenge);
+  }
+
+  // -- playback state --------------------------------------------------------
+  getPlaybackState(userId: string): Promise<PlaybackState | null> {
+    return this.repositories.playbackState.getPlaybackState(userId);
+  }
+  putPlaybackState(userId: string, state: PlaybackState): Promise<void> {
+    return this.repositories.playbackState.putPlaybackState(userId, state);
+  }
+  mergePlaybackState(userId: string, incoming: PlaybackStatePatch): Promise<PlaybackState> {
+    return this.repositories.playbackState.mergePlaybackState(userId, incoming);
   }
 
   // -- shared counters / rate limiters ---------------------------------------

@@ -22,6 +22,7 @@ import type {
   EpisodeStatus,
   OutboxNotification,
   PasskeyCredential,
+  PlaybackState,
   Session,
   SetupLink,
   Source,
@@ -29,6 +30,7 @@ import type {
   SynthesisSegmentRecord,
   User,
 } from "../types.ts";
+import type { PlaybackStatePatch } from "../playback_state.ts";
 export { utcDayKey } from "../types.ts";
 
 // ---------------------------------------------------------------------------
@@ -860,6 +862,21 @@ export interface LogRepository {
 }
 
 /**
+ * Cross-device playback state sync: per-subscriber positions, played history,
+ * Up Next queue, and playback/audio preferences.
+ */
+export interface PlaybackStateRepository {
+  getPlaybackState(userId: string): Promise<PlaybackState | null>;
+  putPlaybackState(userId: string, state: PlaybackState): Promise<void>;
+  /**
+   * Conflict-free merge of `incoming` into the user's persisted playback state:
+   * per-episode newest `updatedAt` wins on positions, set union on `played`,
+   * LWW on `queue` and audio preferences. Returns the persisted merged state.
+   */
+  mergePlaybackState(userId: string, incoming: PlaybackStatePatch): Promise<PlaybackState>;
+}
+
+/**
  * Every domain of the metadata store, as one object.
  *
  * This composition is what keeps Phase 1 behaviour-preserving: a `MetadataStore` IS each of its
@@ -878,7 +895,8 @@ export interface MetadataStore
     NotificationRepository,
     RunRepository,
     AuthRepository,
-    LogRepository {
+    LogRepository,
+    PlaybackStateRepository {
   /**
    * The domain views of this store; see `MetadataRepositories`.
    *
@@ -948,6 +966,7 @@ export interface MetadataRepositories {
   readonly runs: RunRepository;
   readonly auth: AuthRepository;
   readonly logs: LogRepository;
+  readonly playbackState: PlaybackStateRepository;
 }
 
 /** The outcome of `MetadataStore.atomicUpdate`: what is stored, and whether we wrote it. */

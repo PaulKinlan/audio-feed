@@ -52,6 +52,10 @@ import {
   handleListenStatus,
   renderListenLanding,
 } from "./routes/listen.ts";
+import {
+  handleGetPlaybackState,
+  handlePostPlaybackState,
+} from "./routes/playback_state.ts";
 import { handleAsset } from "./routes/assets.ts";
 import { htmlResponse, newCspNonce } from "./routes/csp.ts";
 import { handleShare } from "./routes/share.ts";
@@ -254,6 +258,8 @@ export function createRouter(
   // behind that weaker credential, so it is same-origin walled, rate-limited per
   // (token, address) and per token, and ceilinged per episode for life (audio-feed-8jzgl).
   router.get("/listen/:token/status", handleListenStatus);
+  router.get("/listen/:token/state", handleGetPlaybackState);
+  router.post("/listen/:token/state", handlePostPlaybackState);
   router.get("/listen/:token/episodes/:episodeId/article", handleListenArticle);
   router.post("/listen/:token/episodes/:episodeId/retry", handleListenRetry);
   // PWA surface, served as routes because this app has no static file pipeline.
