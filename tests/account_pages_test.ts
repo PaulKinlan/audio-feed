@@ -910,3 +910,41 @@ Deno.test(
     );
   },
 );
+
+Deno.test(
+  "GET /account updates episode Retry/Regenerate in-place without calling location.reload()",
+  async () => {
+    const { fetch, stores } = app();
+    const me = await seed(stores, { displayName: "Paul", status: "approved" });
+    await stores.metadata.putSource(makeSource({ id: "mine", userId: me.id, title: "My Blog" }));
+    await stores.metadata.putEpisode(makeEpisode({
+      id: "ep-fail-inplace",
+      userId: me.id,
+      sourceId: "mine",
+      title: "Failed Episode",
+      status: "failed",
+      error: "Gemini timeout",
+    }));
+
+    const res = await get(fetch, "/account", stores, me.id);
+    assertEquals(res.status, 200);
+    const html = await res.text();
+
+    assertStringIncludes(html, 'id="episodesList"');
+    assertStringIncludes(html, 'data-episode-id="ep-fail-inplace"');
+    assertStringIncludes(html, 'data-episode-status="failed"');
+    assertStringIncludes(html, '<span class="ep-phase">');
+    assertEquals(/\.innerHTML\s*=/.test(html), false, "no innerHTML assignment on /account");
+
+    const start = html.indexOf('const episodesList = $("episodesList");');
+    const end = html.indexOf("scheduleEpisodePoll();", start);
+    assert(start > 0 && end > start, "episode in-place handler block must exist");
+    const block = html.slice(start, end);
+    assert(
+      !block.includes("location.reload"),
+      "Retry / Regenerate / Retry Failed must update the DOM in-place without location.reload()",
+    );
+    assertStringIncludes(block, "setRowStatus");
+    assertStringIncludes(block, "pollEpisodeStatuses");
+  },
+);

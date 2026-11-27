@@ -3,7 +3,8 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { type RateLimitStore, SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
-import { KvMetadataStore } from "../src/storage/kv.ts";
+import { D1MetadataStore } from "../src/storage/d1.ts";
+import { createTestD1 } from "./sqlite_d1.ts";
 import type { AtomicWrite } from "../src/storage/mod.ts";
 import { createUser } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -294,19 +295,16 @@ Deno.test("SlidingWindowRateLimiter: the bound is shared across limiter instance
   assertEquals((await isolateB.peek("1.2.3.4", now)).allowed, false);
 });
 
-Deno.test("SlidingWindowRateLimiter: the bound is global across isolates sharing KV (audio-feed-2zvc)", async () => {
-  const kv = await Deno.openKv(":memory:");
-  // Two limiters over two adapter objects, as a Deno Deploy deployment has two
-  // isolates over one KV. Before this, each isolate held its own Map, so the
-  // bound multiplied by the number of live isolates.
+Deno.test("SlidingWindowRateLimiter: the bound is global across isolates sharing D1 (audio-feed-2zvc)", async () => {
+  const d1 = createTestD1();
   const isolateA = new SlidingWindowRateLimiter(
     { maxRequests: 3, windowMs: 60_000 },
-    new KvMetadataStore(kv, { ownsConnection: false }),
+    new D1MetadataStore(d1),
     "test",
   );
   const isolateB = new SlidingWindowRateLimiter(
     { maxRequests: 3, windowMs: 60_000 },
-    new KvMetadataStore(kv, { ownsConnection: false }),
+    new D1MetadataStore(d1),
     "test",
   );
   try {
@@ -314,13 +312,10 @@ Deno.test("SlidingWindowRateLimiter: the bound is global across isolates sharing
     for (let i = 0; i < 3; i++) {
       assertEquals((await isolateA.check("9.9.9.9", now)).allowed, true, `attempt ${i + 1}`);
     }
-    // The fourth attempt arrives at the OTHER isolate and is still refused:
-    // the window is in the store, not in either isolate's memory.
     assertEquals((await isolateB.check("9.9.9.9", now)).allowed, false);
-    // A different client is unaffected by the first client's lockout.
     assertEquals((await isolateB.check("8.8.8.8", now)).allowed, true);
   } finally {
-    kv.close();
+    d1.close();
   }
 });
 
@@ -370,10 +365,11 @@ Deno.test("SlidingWindowRateLimiter: a window that could not be recorded refuses
 });
 
 Deno.test("SlidingWindowRateLimiter: concurrent attempts are never admitted uncounted (audio-feed-2zvc)", async () => {
-  const kv = await Deno.openKv(":memory:");
+  const d1 = createTestD1();
+  const store = new D1MetadataStore(d1);
   const limiter = new SlidingWindowRateLimiter(
     { maxRequests: 10, windowMs: 60_000 },
-    new KvMetadataStore(kv, { ownsConnection: false }),
+    store,
     "test",
   );
   try {
@@ -382,7 +378,7 @@ Deno.test("SlidingWindowRateLimiter: concurrent attempts are never admitted unco
       Array.from({ length: 50 }, () => limiter.check("flooder", now)),
     );
     const admitted = results.filter((result) => result.allowed).length;
-    const recorded = (await kv.get<number[]>(["atomic", "test:flooder"])).value?.length ?? 0;
+    const recorded = (await store.atomicUpdate<number[]>("test:flooder", () => null)).value?.length ?? 0;
     // The safety property: every attempt reported as allowed is IN the store.
     // Before the `committed` flag, a CAS retry exhaustion reported allowed while
     // writing nothing, so a concurrent burst exceeded the bound.
@@ -390,7 +386,7 @@ Deno.test("SlidingWindowRateLimiter: concurrent attempts are never admitted unco
     assert(admitted <= 10, `the bound admitted ${admitted}, over 10`);
     assert(recorded > 0, "the burst must not fail closed entirely");
   } finally {
-    kv.close();
+    d1.close();
   }
 });
 

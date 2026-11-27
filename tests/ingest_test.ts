@@ -226,10 +226,15 @@ Deno.test("socket DNS callback validates every address and pins the returned res
 Deno.test("Deno node:http honors lookup on the actual connection (no silent native re-resolution)", async () => {
   let connections = 0;
   let calls = 0;
-  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen() {} }, () => {
+  let onReady!: () => void;
+  const ready = new Promise<void>((r) => {
+    onReady = r;
+  });
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen() { onReady(); } }, () => {
     connections++;
     return new Response("lookup honored");
   });
+  await ready;
   try {
     const body = await new Promise<string>((resolve, reject) => {
       const request = httpRequest(`http://lookup-probe.invalid:${server.addr.port}`, {

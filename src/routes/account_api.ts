@@ -571,6 +571,13 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       const queued = (ep.status === "failed" || ep.status === "synthesizing")
         ? await store.retryEpisode(user.id, episodeId)
         : await store.requeueEpisode(user.id, episodeId);
+      if (queued && ctx.triggerSynthesis) {
+        try {
+          await ctx.triggerSynthesis(queued.id, user.id, { fresh: true });
+        } catch (err) {
+          console.warn(`[audio-feed] workflow retry trigger failed for episode ${queued.id}:`, err);
+        }
+      }
       return reply({ ok: true, queued: queued ? 1 : 0 });
     },
 

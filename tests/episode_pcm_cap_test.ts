@@ -29,8 +29,8 @@ import { collect } from "../src/storage/mod.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 
 const body = [
-  "First. " + "An episode speaks through a durable segment. ".repeat(54),
-  "Second. " + "Its following audio belongs to the same episode. ".repeat(52),
+  "First. " + "An episode speaks through a durable segment. ".repeat(35),
+  "Second. " + "Its following audio belongs to the same episode. ".repeat(34),
 ].join("\n\n");
 const article = { title: "Continuous narration", body };
 const plan = splitTtsText(formatNarrationPrompt(article), MAX_TTS_INPUT_BYTES);

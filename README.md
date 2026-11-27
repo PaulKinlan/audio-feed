@@ -1,6 +1,7 @@
 # audio-feed
 
-Personal podcast feed generator powered by **Gemini 3.8 Flash TTS** on **Deno Deploy**.
+Personal podcast feed generator powered by **Gemini 3.8 Flash TTS** on **Cloudflare Workers**
+(D1 + R2 + Workflows + Queues).
 
 Converts RSS feeds and on-demand web articles into custom podcast feeds with single-voice author
 reads and two-voice deep dive analysis.
@@ -58,39 +59,41 @@ subscribe to individual per-source feeds:
 ## Quickstart
 
 ```bash
-# Run locally with Deno
-deno task dev
+# Install dependencies
+npm install
 
-# Run all tests
-deno test -A
+# Run locally with Wrangler (local D1 + R2)
+npm run dev
 
-# Fast tier while iterating: fmt + lint + type-check + only the tests your
-# change affects (import graph + name convention; falls back to the full
-# suite for deno.json/deno.lock, cross-cutting files, or uncovered code).
-# Measured: ~11s for a typical route change vs ~65-108s for the full gate.
-deno task test:fast
+# Run all tests (Node + Vitest)
+npm test
+
+# Full local verification gate: asset build, TypeScript typecheck,
+# wrangler deploy --dry-run, and the entire Vitest suite (~8s)
+npm run gate
+
+# Deploy to Cloudflare Workers (https://audiofeed.app)
+npm run deploy
 ```
 
 ## Configuration
 
-Set the following environment variables on Deno Deploy or in your local `.env`:
+Bindings (`DB`, `AUDIO_BUCKET`, `EPISODE_WORKFLOW`, `FEED_POLL_QUEUE`) and non-secret variables are
+configured in `wrangler.jsonc`. Secrets are uploaded via `npx wrangler secret put <NAME>`:
 
 ```env
-# Gemini TTS Synthesis (Required)
+# Gemini TTS Synthesis (Required secret)
 GEMINI_API_KEY=<your-google-ai-studio-api-key>
 
-# Admin Security Token (Required for user approvals; 16+ chars recommended)
+# Admin Security Token (Required secret; 16+ chars recommended)
 ADMIN_TOKEN=<your-secret-admin-passphrase>
 
-# Object Storage: Cloudflare R2 / S3 (Required in production)
-STORAGE_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
-STORAGE_BUCKET=audio-feed
-STORAGE_ACCESS_KEY_ID=<cloudflare-r2-access-key-id>
-STORAGE_SECRET_ACCESS_KEY=<cloudflare-r2-secret-access-key>
-STORAGE_REGION=auto
+# Optional: Observability endpoint token (secret)
+# AUDIOFEED_OBSERVABILITY_KEY=<secret>
 
-# Optional Origin Overrides
-# PUBLIC_BASE_URL=https://audio-feed.paulkinlan-ea.deno.net
+# Optional Origin Overrides (configured in wrangler.jsonc vars)
+# PUBLIC_BASE_URL=https://audiofeed.app
+# WEBAUTHN_RP_ID=audiofeed.app
 # TRUST_PROXY_HEADERS=1
 # Enable only behind a proxy that APPENDS the client address it saw. The rate limiter keys on the
 # last x-forwarded-for entry for that reason: a caller that prepends a forged address is ignored
@@ -224,43 +227,22 @@ development and testing.
 
 ---
 
-## Cloudflare R2 Object Storage Setup
+## Cloudflare Workers, D1, R2, Workflows & Queues
 
-When configuring Cloudflare R2 for `audio-feed`:
+`audio-feed` runs natively on Cloudflare Workers (`src/worker_entry.ts`, configured in `wrangler.jsonc`):
 
-### 1. Endpoint vs Bucket Name Split
+- **Cloudflare D1 (`DB`)**: SQLite metadata store (`migrations/0001_initial.sql`) with chunked
+  article storage and batched URL deduplication.
+- **Cloudflare R2 (`AUDIO_BUCKET`)**: Native binding (zero S3 credentials needed in production) with
+  same-origin HTTP Range playback and streaming **R2 Multipart Upload** WAV assembly (~16 MB
+  constant peak RAM for multi-hour episodes).
+- **Cloudflare Workflows (`EPISODE_WORKFLOW` — `EpisodeSynthesisWorkflow`)**: Durable per-episode
+  synthesis pipeline where each TTS segment runs as an independent `step.do(...)` with exponential
+  backoff and `step.sleepUntil(nextUtcMidnight)` on daily budget limits.
+- **Cloudflare Queues (`FEED_POLL_QUEUE` — `audio-feed-poll` / `audio-feed-poll-dlq`)**: `*/15`
+  cron fans out due RSS sources so each feed polls inside an isolated Worker with automatic retries.
 
-Do not combine the bucket name into the endpoint URL. For a bucket URL such as
-`https://<account_id>.r2.cloudflarestorage.com/audio-feed`:
-
-- **`STORAGE_ENDPOINT`**: `https://<account_id>.r2.cloudflarestorage.com` (host only, no trailing
-  bucket or slash)
-- **`STORAGE_BUCKET`**: `audio-feed` (the bucket name)
-
-### 2. Securing the R2 Bucket & Generating API Credentials
-
-Cloudflare R2 buckets are **100% private by default** — neither public writes nor unauthenticated
-reads are permitted:
-
-1. In the **Cloudflare Dashboard**, navigate to **R2 Object Storage**.
-2. In the right-hand panel, select **Manage R2 API Tokens**.
-3. Click **Create API token**.
-4. Configure permissions:
-   - **Permissions**: Select **Object Read & Write**.
-   - **Apply to specific bucket**: Select `audio-feed` (recommended for least-privilege access).
-5. Click **Create API Token**.
-6. Cloudflare will display:
-   - **Access Key ID** → set as `STORAGE_ACCESS_KEY_ID`
-   - **Secret Access Key** → set as `STORAGE_SECRET_ACCESS_KEY`
-
-`audio-feed` uses AWS SigV4 via `aws4fetch` to sign every PUT request directly from the Deno Deploy
-worker using these credentials.
-
-### 3. Private Bucket Playback
-
-Because the R2 bucket remains completely private, `audio-feed` automatically creates temporary
-**presigned GET URLs** (expiring in 1 hour) when podcast clients request episode audio. Podcast apps
-stream seamlessly without exposing public read or write access to the bucket.
+See `docs/cloudflare-migration.md` for provisioning, D1 migrations, and passkey recovery details.
 
 ---
 
@@ -281,47 +263,29 @@ characters emit a startup/admin advisory warning.
 Example:
 
 ```bash
-curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/users/usr_12345/approve \
+curl -X POST https://audiofeed.app/api/admin/users/usr_12345/approve \
   -H "x-admin-token: your-secret-admin-passphrase"
 ```
 
-### CLI User Provisioning Tool
-
-To create and approve a subscriber directly, use `scripts/create-user.ts`:
-
-```bash
-# Provision a user against local or remote Deno KV:
-deno run -A scripts/create-user.ts you@example.com "Your Name"
-
-# To provision against a remote Deno Deploy KV database:
-DENO_KV_ACCESS_TOKEN=... deno run -A scripts/create-user.ts you@example.com "Your Name" \
-  --kv https://api.deno.com/databases/<database-id>/connect
-```
-
-This generates and displays:
-
-- The user's secret `feedToken`
-- The personal RSS Master Feed URL (`/feed/<token>/master.xml`)
-- Ready-to-use curl and web submission parameters
-
 ### Background Workers & Manual Triggers
 
-On serverless platforms like Deno Deploy, background workers operate on native `Deno.cron` to ensure
-tasks run even when the HTTP isolate sleeps:
+Background jobs run on Cloudflare Cron Triggers, Queues, and Workflows:
 
-- **`audio-feed-poll-feeds` (`*/15 * * * *`)**: Polls due RSS/Atom feeds every 15 minutes.
-- **`audio-feed-synthesis` (`*/2 * * * *`)**: Drains the pending synthesis queue every 2 minutes.
+- **`*/15 * * * *`**: Enqueues all due RSS/Atom feeds onto `FEED_POLL_QUEUE` (`audio-feed-poll`).
+- **`*/2 * * * *`**: Safety-net sweep that triggers `EpisodeSynthesisWorkflow` for any unstarted
+  pending episodes.
+- **`17 4 * * *`**: Enforces structured log retention (`LOG_RETENTION_DAYS`).
 
 Operators can trigger immediate batch runs on demand via the `/admin` console UI ("Poll Feeds Now"
 and "Synthesize Queue Now" buttons) or directly via REST API:
 
 ```bash
 # Immediately poll all due RSS feeds
-curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/poll-now \
+curl -X POST https://audiofeed.app/api/admin/poll-now \
   -H "x-admin-token: <your-admin-token>"
 
 # Immediately run a synthesis batch on pending episodes
-curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/synthesize-now \
+curl -X POST https://audiofeed.app/api/admin/synthesize-now \
   -H "x-admin-token: <your-admin-token>"
 ```
 
@@ -331,12 +295,12 @@ curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/synthesize-now 
 
 Approved users can submit articles to be synthesized:
 
-1. **Web UI:** Open `GET /` (`https://audio-feed.paulkinlan-ea.deno.net/`), enter the article URL,
+1. **Web UI:** Open `GET /` (`https://audiofeed.app/`), enter the article URL,
    select the mode (_Author narration_ or _Two-voice dialogue_), and enter your `feedToken`.
 2. **REST API:**
 
 ```bash
-curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/ingest \
+curl -X POST https://audiofeed.app/api/ingest \
   -H "content-type: application/json" \
   -H "x-feed-token: <your-feed-token>" \
   -d '{"url":"https://example.com/article","mode":"dialogue"}'

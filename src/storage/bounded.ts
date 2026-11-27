@@ -96,6 +96,17 @@ export function boundedBlobStore(
       }
       return store.put(key, body, opts);
     },
+    ...(store.createMultipartUpload
+      ? {
+        createMultipartUpload(key, opts) {
+          if (!opts?.signal) {
+            const refusal = admission(key, "createMultipartUpload");
+            if (refusal) return Promise.reject(refusal);
+          }
+          return store.createMultipartUpload!(key, opts);
+        },
+      }
+      : {}),
     putIfAbsent(key, body, opts) {
       if (!opts?.signal) {
         const refusal = admission(key, "putIfAbsent");

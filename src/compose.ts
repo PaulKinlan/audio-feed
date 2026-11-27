@@ -145,7 +145,15 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
       discoverFeeds: deps.discoverFeeds ?? ((url, signal) => discoverFeeds(url, { signal })),
       deleteUserSource: (req, userId, sourceId) => deleteUserSource(ctx, req, userId, sourceId),
       regenerateOutdated: (userId, scope = "outdated") =>
-        regenerateUserEpisodes(ctx.stores.metadata, userId, scope),
+        regenerateUserEpisodes(
+          ctx.stores.metadata,
+          userId,
+          scope,
+          {},
+          ctx.triggerSynthesis
+            ? (episodeId) => ctx.triggerSynthesis!(episodeId, userId, { fresh: true })
+            : undefined,
+        ),
       adminAuthLimiter: deps.adminAuthLimiter,
     }),
     voiceSample: createVoiceSampleHandler(ctx, { client: deps.ttsClient }),

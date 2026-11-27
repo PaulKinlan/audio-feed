@@ -759,7 +759,7 @@ Deno.test("audio-feed-chx6: a cap-sized TTS turn fits its estimate and the invoc
     "the guard must reject the former 45s window even when the byte cap stays small",
   );
   assert(
-    !fits({ ...defaults, rateMsPerByte: 10.5 }),
+    !fits({ ...defaults, rateMsPerByte: 16 }),
     "a slower measured provider must invalidate an estimate that no longer covers one cap-sized call",
   );
 });

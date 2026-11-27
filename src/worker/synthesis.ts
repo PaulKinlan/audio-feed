@@ -42,14 +42,23 @@ import {
   DEFAULT_NARRATION_VOICE,
   DEFAULT_TIMEOUT_MS,
   formatCodeForTts,
+  formatDialoguePrompt,
   GeminiTtsClient,
   GeminiTtsError,
   GeminiTtsTruncatedError,
+  isPermanentTtsStatus,
   MAX_PUBLICATION_PCM_BYTES,
   MAX_TTS_INPUT_BYTES,
   MAX_TTS_SEGMENTS,
+  parseWavHeader,
   ttsClientConfig,
 } from "../tts/gemini.ts";
+import {
+  assembleWavToBlobStore,
+  computeStreamingWavRevisionHash,
+  inspectStoredWavSegment,
+  type StoredWavSegment,
+} from "../storage/wav_assembly.ts";
 import type { DecodedAudioResult, DialogueSpeaker } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
 import { PROMPT_VERSION } from "../tts/prompt_version.ts";
@@ -153,21 +162,16 @@ export interface SegmentResume {
   prepare: (
     segmentText: string,
     voice: string,
-  ) => Promise<{ wav: Uint8Array } | "synthesize" | "held">;
+  ) => Promise<{ wav: Uint8Array } | { stored: StoredWavSegment } | "synthesize" | "held">;
   commit: (
     segmentText: string,
     decoded: DecodedAudioResult,
     voice: string,
     /** The stage's abort signal: the segment put must be interruptible (audio-feed-y9kk). */
     signal?: AbortSignal,
-  ) => Promise<void>;
-  /**
-   * Records that a paid turn was INITIATED — called by the synthesizer only AFTER the
-   * pre-turn budget preflight has passed and the provider request is about to be spent
-   * (audio-feed-preturn). Claim-level, so it survives the synthesizer's per-retry-attempt
-   * counter resets; the yield handler reads it to tell a pure pre-turn refusal (zero
-   * initiated turns, nothing spent) from a yield that follows real paid work.
-   */
+  ) => Promise<StoredWavSegment | void>;
+  /** True when the underlying BlobStore supports streaming R2 multipart assembly (~16 MB RAM). */
+  streamingAssembly?: boolean;
   noteTurnInitiated?: () => void;
 }
 
@@ -258,10 +262,15 @@ export interface SynthesisWorkerOptions {
 }
 
 /**
- * One id per process. Two isolates therefore never share an owner, which is
- * what lets `completeEpisode` tell "my claim" from "someone else's".
+ * One id per process/isolate, created lazily on first handler execution so runtimes that forbid
+ * `crypto.randomUUID()` during top-level module evaluation (Cloudflare Workers) boot cleanly.
+ * Two isolates therefore never share an owner, which is what lets `completeEpisode` tell
+ * "my claim" from "someone else's".
  */
-const WORKER_ID = `worker-${crypto.randomUUID()}`;
+let cachedWorkerId: string | undefined;
+function getWorkerId(): string {
+  return (cachedWorkerId ??= `worker-${crypto.randomUUID()}`);
+}
 
 const DEFAULTS: Required<
   Omit<
@@ -288,7 +297,9 @@ const DEFAULTS: Required<
   leaseMs: DEFAULT_CLAIM_LEASE_MS,
   maxClaims: DEFAULT_MAX_CLAIMS,
   maxUploadRetries: DEFAULT_MAX_UPLOAD_RETRIES,
-  owner: WORKER_ID,
+  get owner(): string {
+    return getWorkerId();
+  },
   // A full UUID: 8 hex digits could repeat a key still on the orphan list (audio-feed-8oz).
   revision: () => crypto.randomUUID(),
 };
@@ -462,13 +473,12 @@ function supersededEntry(
 function isPermanent(error: unknown): boolean {
   // audio-feed-9yu8: the whole-episode wrapper carries the verdict explicitly, because its own
   // status is not the provider's. A status-less deadline abort is retryable here; a provider
-  // verdict, our spend-guard 409 or a truncation is not, whatever number it happens to carry.
+  // permanent 4xx verdict, our spend-guard 409 or a truncation is not.
   if (error instanceof GeminiTtsError && error.permanent) return true;
   if (error instanceof GeminiTtsTruncatedError) return true;
   const status = (error as { status?: number }).status;
   if (typeof status === "number") {
-    // 429/503 are transient; anything else is a request the API rejected.
-    return status !== 429 && status !== 503 && status < 500;
+    return isPermanentTtsStatus(status);
   }
   const message = String((error as Error)?.message ?? error);
   if (/SAFETY/i.test(message)) return true;
@@ -563,7 +573,9 @@ export function startClaimHeartbeat(
   if (!opts.clock) {
     const timer = setInterval(beat, intervalMs);
     try {
-      Deno.unrefTimer(timer);
+      if (typeof Deno !== "undefined" && typeof Deno.unrefTimer === "function") {
+        Deno.unrefTimer(timer as unknown as number);
+      }
     } catch {
       // Not a Deno timer handle in this runtime; the stop function still clears it.
     }
@@ -905,9 +917,11 @@ export function createGeminiSynthesizer(
           voice: string,
           signal?: AbortSignal,
         ) => {
-          await resume.commit(segmentText, decoded, voice, signal);
+          const meta = await resume.commit(segmentText, decoded, voice, signal);
           committedTurnsCount++;
+          return meta;
         },
+        streamingAssembly: resume.streamingAssembly,
       }
       : undefined;
 
@@ -1061,6 +1075,58 @@ export function createGeminiSynthesizer(
                 0,
                 turns.length,
                 `Script generated; yielding before first turn: remaining budget ${
+                  Math.round(remaining)
+                }ms < required ${turnEstimate + flushMargin}ms`,
+              );
+            }
+          }
+        } else if (
+          scriptGenerator && claimedBy &&
+          invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs
+        ) {
+          // Grounded script generation failed or timed out and fell back to static dialogue.
+          // If remaining invocation budget can no longer fit turn 1, persist the static fallback
+          // turns as durable progress so the episode yields cleanly instead of burning a claim
+          // with zero durable progress and re-running the failing script generator on the next tick.
+          const elapsed = budgetNow() - invocationBudget.startTimeMonotonicMs;
+          const remaining = invocationBudget.maxDurationMs - elapsed;
+          const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
+            deps.estimatedTurnDurationMs ??
+            ESTIMATED_TTS_TURN_DURATION_MS;
+          if (remaining < turnEstimate + flushMargin) {
+            const fallbackBody = await formatCodeForTts(
+              article.content,
+              codeHandling,
+              deps.codeSummarizer,
+            );
+            const fallback = formatDialoguePrompt({
+              title: article.title,
+              article: {
+                title: article.title,
+                author: article.author,
+                body: fallbackBody,
+                summary: article.excerpt,
+              },
+              speakers,
+            });
+            if (fallback.turns.length > 0) {
+              turns = fallback.turns;
+              getTotalTurns = () => turns!.length;
+              await checkpointEpisodeClaim(
+                ctx.stores.metadata,
+                episode.userId,
+                episode.id,
+                claimedBy,
+                {
+                  phase: "script_generated",
+                  scriptTurns: turns,
+                },
+              );
+              episode.scriptTurns = turns;
+              throw new SynthesisYieldError(
+                0,
+                turns.length,
+                `Grounded script fell back to static dialogue; yielding before first turn: remaining budget ${
                   Math.round(remaining)
                 }ms < required ${turnEstimate + flushMargin}ms`,
               );
@@ -1261,31 +1327,38 @@ export function buildSegmentResume(
   claimSpend: { initiatedTurns: number };
 } {
   const { metadata, blobs } = ctx.stores;
+  const streamingAssembly = Boolean(blobs.createMultipartUpload);
   const now = () => options.nowMs ?? Date.now();
   let listed: Promise<SynthesisSegmentRecord[]> | null = null;
   const records = () => listed ??= metadata.listSynthesisSegments(episode.userId, episode.id);
   const claimSpend = { initiatedTurns: 0 };
 
+  const loadExistingSegment = async (
+    record: SynthesisSegmentRecord,
+    segmentText: string,
+  ): Promise<{ wav: Uint8Array } | { stored: StoredWavSegment } | null> => {
+    if (record.text !== segmentText) return null;
+    if (streamingAssembly) {
+      const meta = await inspectStoredWavSegment(blobs, record.audioKey, record.byteLength);
+      if (meta) return { stored: meta };
+      return null;
+    }
+    const blob = await blobs.get(record.audioKey).catch(() => null);
+    if (blob && (blob.size ?? record.byteLength) === record.byteLength) {
+      return { wav: await collect(blob.body) };
+    }
+    return null;
+  };
+
   const prepare = async (segmentText: string, voice: string) => {
     const textHash = segmentTextHash(segmentText);
-    // Reuse is gated on prompt version AND voice: either changing means different words or
-    // a different speaker, and neither may serve the old bytes. Slots are keyed by
-    // (hash, version, voice), so drift does not fight the old record — it opens a new slot
-    // beside it, and the episode's sweep reclaims the old blob once audio is committed.
     const existing = (await records()).find((record) =>
       record.textHash === textHash && record.finalized &&
       record.promptVersion === PROMPT_VERSION && record.voice === voice
     );
     if (existing) {
-      const blob = await blobs.get(existing.audioKey).catch(() => null);
-      if (
-        blob && (blob.size ?? existing.byteLength) === existing.byteLength &&
-        existing.text === segmentText
-      ) {
-        return { wav: await collect(blob.body) };
-      }
-      // Blob gone or record inconsistent with its own hash: speak again into a fresh
-      // revision; the stranded record is sweep fodder, never reuse fodder.
+      const loaded = await loadExistingSegment(existing, segmentText);
+      if (loaded) return loaded;
     }
     const outcome = await metadata.reserveSynthesisSegment(
       episode.userId,
@@ -1306,27 +1379,18 @@ export function buildSegmentResume(
       options.leaseMs,
     );
     if (outcome === "finalized") {
-      // Lost a reserve race to a record that finished between our list and our reserve:
-      // reuse it if it matches, else speak again.
       const record = (await metadata.listSynthesisSegments(episode.userId, episode.id)).find(
         (r) =>
           r.textHash === textHash && r.finalized && r.promptVersion === PROMPT_VERSION &&
           r.voice === voice,
       );
       if (record) {
-        const blob = await blobs.get(record.audioKey).catch(() => null);
-        if (
-          blob && (blob.size ?? record.byteLength) === record.byteLength &&
-          record.text === segmentText
-        ) {
-          return { wav: await collect(blob.body) };
-        }
+        const loaded = await loadExistingSegment(record, segmentText);
+        if (loaded) return loaded;
       }
       return "synthesize";
     }
     if (outcome === "no-claim") {
-      // This worker's claim is gone (superseded or lease-expired). "held" aborts the spend
-      // before the paid call; the batch then reports the episode superseded.
       return "held";
     }
     return "synthesize";
@@ -1337,14 +1401,11 @@ export function buildSegmentResume(
     decoded: DecodedAudioResult,
     voice: string,
     signal?: AbortSignal,
-  ) => {
+  ): Promise<StoredWavSegment | void> => {
     const textHash = segmentTextHash(segmentText);
     const wav = decoded.format === "wav" ? decoded.rawBytes : decoded.toWav();
     const audioKey = segmentBlobKey(episode, textHash, options.revision());
     let byteLength = wav.length;
-    // The put is signed with the stage's signal when the caller provides one; otherwise it
-    // is bound to the CLAIM'S REMAINING LEASE — a segment put may not outlive its claim
-    // (audio-feed-y9kk). A caller that passes neither gets refused by the bounded store.
     const claimedAtMs = Date.parse(episode.claimedAt ?? "");
     const leaseDeadlineMs = Number.isFinite(claimedAtMs) && options.leaseMs
       ? claimedAtMs + options.leaseMs
@@ -1363,8 +1424,6 @@ export function buildSegmentResume(
       });
       byteLength = stored.size ?? wav.length;
     } catch (error) {
-      // The segment audio exists only in this run's memory; stitching still succeeds, but
-      // the next claimant cannot reuse it. Say so loudly rather than pretending.
       console.error(
         `[audio-feed] segment blob write failed for episode ${episode.id} segment ${textHash}:`,
         error,
@@ -1381,12 +1440,30 @@ export function buildSegmentResume(
       options.leaseMs,
     );
     if (!finalized) {
-      // Superseded between reserve and finalize: the blob is this attempt's own key, so
-      // deleting it can never take another worker's audio with it.
       try {
         await blobs.delete(audioKey);
       } catch {
         await metadata.recordOrphanBlob(audioKey).catch(() => {});
+      }
+      return;
+    }
+    if (streamingAssembly) {
+      try {
+        const info = parseWavHeader(wav);
+        if (info.audioFormat === 1 && info.declaredDataLength > 0) {
+          return {
+            audioKey,
+            pcmOffset: info.dataOffset,
+            pcmByteLength: info.declaredDataLength,
+            sampleRate: info.sampleRate,
+            channels: info.channels,
+            bitsPerSample: info.bitsPerSample,
+            durationSeconds: info.durationSeconds,
+            byteLength,
+          };
+        }
+      } catch {
+        // Fall back to in-memory buffer if WAV header inspection fails
       }
     }
   };
@@ -1396,10 +1473,6 @@ export function buildSegmentResume(
     const keys = all
       .map((record) => record.audioKey)
       .filter((key): key is string => Boolean(key) && key !== excludeAudioKey);
-    // audio-feed-ikst: bounded concurrency over the deletions. When an episode has ten
-    // segments, serial deletes made the sweep the slowest part of finishing a run.
-    // Each delete keeps its own failure handling, so one blob that refuses to go is
-    // recorded as an orphan and the rest are still reclaimed.
     await mapWithConcurrency(keys, SEGMENT_DELETE_CONCURRENCY, async (key) => {
       try {
         await blobs.delete(key);
@@ -1414,6 +1487,7 @@ export function buildSegmentResume(
     resume: {
       prepare,
       commit,
+      streamingAssembly,
       noteTurnInitiated: () => claimSpend.initiatedTurns++,
     },
     sweep,
@@ -2413,6 +2487,8 @@ async function runSynthesisBatchCore(
 
     let audio: DecodedAudioResult | null = null;
     let lastError: unknown = null;
+    /** Preserves the real upstream/provider/transport failure separately from invocation budget yields. */
+    let lastProviderError: unknown = null;
     let currentEpisode = claimed;
     // audio-feed-zrkn: set ONLY by the zero-progress exhaustion break below, so the terminal reason
     // can tell "out of road" apart from "out of slice". Those are the two cases that read alike.
@@ -2422,6 +2498,7 @@ async function runSynthesisBatchCore(
       .filter((s) => s.finalized).length;
 
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
+      const attemptStartedMs = clock.now();
       try {
         // audio-feed-sp38: Claim heartbeat while the TTS stage is awaited. Multi-segment synthesis
         // runs long and can span multiple turns before completing; keep the claim lease alive so
@@ -2454,7 +2531,6 @@ async function runSynthesisBatchCore(
         }
         break;
       } catch (error) {
-        lastError = error;
         if (isInvocationBudgetAbort(error)) {
           // audio-feed-8iwis: keep the abort's OWN text when it has one. A budget abort that
           // landed inside a provider fetch comes back wrapped as "TTS turn failed; ...", so the
@@ -2464,28 +2540,15 @@ async function runSynthesisBatchCore(
           const yieldErr = error instanceof SynthesisYieldError
             ? error
             : new InvocationBudgetAbortError(0, 0, stoppingMechanismMessage(error));
-          lastError = yieldErr;
+          // Never mask a real upstream/provider error from an earlier attempt in this tick with
+          // a subsequent budget yield.
+          lastError = lastProviderError ?? yieldErr;
 
           // FOUR-PROPERTY SYNTHESIS INVOCATION INVARIANT (audio-feed-fsr3, audio-feed-o88z):
           // 1. Bound: Per-invocation work is bounded by maxDurationMs and maxSegments.
           // 2. Preflight: Work is verified to fit before initiation, yielding if margin is insufficient.
           // 3. Provenance: Only our explicit InvocationBudgetAbortError sentinel yields; provider/lease aborts take retry/failure.
           // 4. Progress: DURABLE PROGRESS = observable on the next tick after a restart; anything else is not progress.
-          //    Every yield must either make durable progress (finalized segments committed or scriptTurns checkpointed)
-          //    resetting attempts and refusals to 0, or count against opts.maxAttempts — EXCEPT the pure pre-turn
-          //    refusal (audio-feed-preturn): a yield raised by the pre-turn preflight before THIS CLAIM
-          //    initiated any paid turn has spent nothing, so burning one of three claims on it produced
-          //    permanent "claim 3/3; zero durable progress" deaths for episodes whose pre-turn stage
-          //    (e.g. slow script work or slow store reads) ate the invocation budget. The cap still
-          //    burns for every claim that initiated at least one paid turn: real spend with zero durable
-          //    result remains bounded at opts.maxAttempts claims (audio-feed-zrkn's livelock guard), so
-          //    a genuinely doomed episode still terminates. A pure-refusal loop costs zero provider
-          //    spend per tick and is bounded by the refusals counter (audio-feed-refcap): each pure
-          //    refusal increments episode.refusals and returns only its own claim's attempt increment,
-          //    and claimEpisode fails the episode with a distinct reason once refusals reaches
-          //    preturnRefusalCap(maxClaims) — lease expiry and the pre-claim batch gate do NOT bound
-          //    this loop (the gate sees a fresh invocation budget every tick, and a clean yield
-          //    releases the lease before it could expire).
           const refreshed = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
           const finalScriptTurns = refreshed?.scriptTurns?.length ?? 0;
           const finalSegments =
@@ -2505,11 +2568,6 @@ async function runSynthesisBatchCore(
             !madeProgress && claimInitiatedTurns > 0 &&
             (claimed.attempts ?? 1) >= opts.maxAttempts
           ) {
-            // Refuse infinite livelock: zero progress after real spend across maxAttempts must
-            // fail the episode.
-            // audio-feed-zrkn: unlike every other failure on this path, this one is NOT a budget
-            // problem - the episode is out of attempts, not out of slice - so it must not be
-            // recorded with the deadline text that the progressful failures carry.
             zeroProgressExhausted = true;
             break;
           }
@@ -2528,31 +2586,24 @@ async function runSynthesisBatchCore(
               {
                 phase: yieldPhase,
                 advanceAttempts: !madeProgress && !preTurnRefusal,
-                // audio-feed-refcap: a pure refusal is counted on its own counter and its claim's
-                // attempt increment is returned, so attempts never resets over earlier spend
-                // history — and claimEpisode's refusal cap bounds the zero-spend loop.
                 incrementRefusals: preTurnRefusal,
               },
             ), currentEpisode.id);
           if (yielded) {
-            // Same structured verdict as the terminal-upload yield (audio-feed-2sec): the
-            // claim was released to resume later; no terminal write happened. Best-effort -
-            // the durable truth is the yield itself and the episode's phase.
             try {
+              const causePrefix = lastProviderError
+                ? `prior error: ${stoppingMechanismMessage(lastProviderError)}; `
+                : "";
               await metadata.appendLog(
                 claimLifecycleEvent(currentEpisode, {
                   phase: yieldPhase,
                   attempt: currentEpisode.attempts ?? 1,
                   claimOutcome: "yielded",
-                  // audio-feed-8iwis: the reason names the MECHANISM that stopped this turn
-                  // first, in the abort's own words (deadline ms + stage, or the segment
-                  // limit), so a hung provider reads as "deadline (85000ms) exceeded during
-                  // stage \"dialogue_tts\"" rather than as a generic budget yield.
                   reason: preTurnRefusal
-                    ? `${
+                    ? `${causePrefix}${
                       stoppingMechanismMessage(yieldErr)
                     }; refused before any paid turn (0 initiated in this claim); no attempt consumed; resuming on a later tick`
-                    : `${stoppingMechanismMessage(yieldErr)}; ${finalSegments} of ${
+                    : `${causePrefix}${stoppingMechanismMessage(yieldErr)}; ${finalSegments} of ${
                       observedPlanSize(yieldErr) ??
                         yieldErr.totalTurns
                     } segments committed; resuming on a later tick`,
@@ -2572,7 +2623,77 @@ async function runSynthesisBatchCore(
           }
           break;
         }
+        lastProviderError = error;
+        lastError = error;
         if (isPermanent(error) || attempt === opts.maxAttempts) break;
+
+        // Avoid same-tick retry storms and subsequent SynthesisYieldError masking:
+        // if a transient failure already consumed >= 10s (e.g. ~31s connection drop) or left
+        // insufficient invocation budget for another turn, yield cleanly for the next tick
+        // rather than burning back-to-back calls inside this same invocation.
+        const attemptElapsedMs = clock.now() - attemptStartedMs;
+        const remainingForRetry = maxInvocationDurationMs
+          ? maxInvocationDurationMs - (clock.now() - invocationStartMonotonicMs)
+          : Infinity;
+        const requiredForNextTurn =
+          (options.estimatedTurnDurationMs ?? ESTIMATED_TTS_TURN_DURATION_MS) + flushMargin;
+        if (
+          maxInvocationDurationMs &&
+          (remainingForRetry < requiredForNextTurn || attemptElapsedMs >= 10_000)
+        ) {
+          const refreshedProgress = await metadata.getEpisode(
+            currentEpisode.userId,
+            currentEpisode.id,
+          );
+          const finalScriptTurns = refreshedProgress?.scriptTurns?.length ?? 0;
+          const finalSegments =
+            (await metadata.listSynthesisSegments(currentEpisode.userId, currentEpisode.id))
+              .filter((s) => s.finalized).length;
+          const madeProgress = synthesisMadeProgress(
+            { segments: initialSegments, scriptTurns: initialScriptTurns },
+            { segments: finalSegments, scriptTurns: finalScriptTurns },
+          );
+          if (!madeProgress && (claimed.attempts ?? 1) >= opts.maxAttempts) {
+            zeroProgressExhausted = true;
+            break;
+          }
+          const yieldPhase = `transient_retry_${finalSegments}_segments`;
+          const yielded = await markStage("yield", () =>
+            metadata.yieldEpisodeClaim(
+              currentEpisode.userId,
+              currentEpisode.id,
+              opts.owner,
+              {
+                phase: yieldPhase,
+                advanceAttempts: !madeProgress,
+              },
+            ), currentEpisode.id);
+          if (yielded) {
+            try {
+              await metadata.appendLog(
+                claimLifecycleEvent(currentEpisode, {
+                  phase: yieldPhase,
+                  attempt: currentEpisode.attempts ?? 1,
+                  claimOutcome: "yielded",
+                  reason: `transient synthesis error (${
+                    stoppingMechanismMessage(error, String((error as Error)?.message ?? error))
+                  }); yielding cleanly to avoid same-tick retry storm`,
+                }),
+              );
+            } catch {
+              // best-effort logging
+            }
+            result.yielded.push({
+              episodeId: currentEpisode.id,
+              completedTurns: finalSegments,
+              totalTurns: Math.max(finalSegments + 1, 1),
+            });
+          } else {
+            result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+          }
+          break;
+        }
+
         // Re-read current episode from store so any turns or phase touched during attempt 1
         // are available to subsequent retry attempts within this same claim (audio-feed-siv1)!
         const refreshed = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
@@ -2586,14 +2707,9 @@ async function runSynthesisBatchCore(
     }
 
     if (!audio) {
-      if (
-        isInvocationBudgetAbort(lastError) &&
-        result.yielded.some((y) => y.episodeId === currentEpisode.id)
-      ) {
-        // audio-feed-vqu4, audio-feed-sp38: clean yield to respect invocation budget.
-        // A time-budget yield means this isolate has exhausted its safe execution window;
-        // do not claim the next episode in an isolate near its wall-clock limit.
-        // Only continue the batch loop if the yield was solely due to a per-episode segment cap.
+      if (result.yielded.some((y) => y.episodeId === currentEpisode.id)) {
+        // audio-feed-vqu4, audio-feed-sp38: clean yield to respect invocation budget or avoid
+        // a same-tick retry storm after a slow transient failure.
         const isSegmentCapYield = maxSegmentsPerInvocation !== undefined &&
           lastError instanceof SynthesisYieldError &&
           lastError.message.includes("segment limit");
@@ -2643,8 +2759,15 @@ async function runSynthesisBatchCore(
     }
 
     const audioDurationSeconds = audio.durationSeconds;
-    const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
-    const audioByteLength = bytes.byteLength;
+    const storedSegments = audio.storedSegments && audio.storedSegments.length > 0
+      ? audio.storedSegments
+      : null;
+    const bytes = storedSegments
+      ? null
+      : (audio.format === "wav" ? audio.rawBytes : audio.toWav());
+    const audioByteLength = storedSegments
+      ? 44 + storedSegments.reduce((total, seg) => total + seg.pcmByteLength, 0)
+      : bytes!.byteLength;
     // Fail before publication even for injected synthesizers that bypass Gemini's stitcher.
     if (audioByteLength > MAX_PUBLICATION_PCM_BYTES + 44) {
       const error = "Episode exceeds the RIFF WAV publication limit";
@@ -2660,94 +2783,65 @@ async function runSynthesisBatchCore(
 
     audio = null; // Free decoded audio result structure and intermediate references (audio-feed-sp38)
 
-    // audio-feed-aqms: the upload estimate must be honest about PAYLOAD SIZE. The flat
-    // 5s floor is fine for a small blob and a lie for an episode WAV: a preflight bound
-    // enforced by an estimate that ignores bytes STARTS a put that cannot finish inside
-    // the remaining budget, and a put that outlives the invocation dies without a
-    // terminal write (the phase is checkpointed BEFORE the put starts). Scale by bytes
-    // so the preflight refuses to start what cannot fit, and the claim is yielded
-    // resumably instead: the next 2-minute tick retries with a fresh budget and the
-    // durable segment cache, converting a lost episode into lost minutes.
     const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
     const sizeScaledUploadEstimate = estimateUploadDurationMs(audioByteLength, uploadEstimate);
 
-    // FOUR-PROPERTY INVARIANT COVERS TERMINAL PERSISTENCE (audio-feed-dv4p):
-    // 1. Bound: Invocation bound covers terminal audio blob write and metadata completion.
-    // 2. Preflight: Verify remaining budget fits upload + flush margin; yield before starting if it cannot.
-    // 3. Provenance: Upload timeout uses explicit InvocationBudgetAbortError sentinel; real blob store errors fail.
-    // 4. Progress: Preserves all segment checkpoints on yield so subsequent tick can complete the upload.
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
-    // audio-feed-avgc: the terminal key follows the bytes, not the invocation.
-    // A yielded claim re-stitches the same finalized segments and can discover a
-    // completed PUT on the next tick. Fold in the old published key so even an
-    // identical regeneration gets a new immutable URL. Explicit revisions are
-    // retained for tests that deliberately exercise repeated-key orphan handling;
-    // segment-commit keys continue to use the per-attempt revision above.
-    let audioDigest: Uint8Array;
-    if (audioByteLength > 4 * 1024 * 1024) {
-      // audio-feed-1ib3: Chunked hashing for large payloads (>4 MB) to prevent V8 external-memory spikes in crypto.subtle.digest
-      const CHUNK_SIZE = 2 * 1024 * 1024;
-      const numChunks = Math.ceil(audioByteLength / CHUNK_SIZE);
-      const intermediateDigests = new Uint8Array(numChunks * 32);
-      for (let i = 0; i < numChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, audioByteLength);
-        const chunk = bytes.subarray(start, end);
-        const digest = await crypto.subtle.digest("SHA-256", chunk as unknown as BufferSource);
-        intermediateDigests.set(new Uint8Array(digest), i * 32);
-      }
-      audioDigest = new Uint8Array(
-        await crypto.subtle.digest("SHA-256", intermediateDigests),
+    let revisionHash: string;
+    if (storedSegments) {
+      revisionHash = await computeStreamingWavRevisionHash(
+        storedSegments,
+        currentEpisode.audioKey,
       );
     } else {
-      const digestInput = bytes.buffer instanceof ArrayBuffer
-        ? (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-          ? (bytes as unknown as BufferSource)
-          : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength))
-        : new Uint8Array(bytes);
-      audioDigest = new Uint8Array(
-        await crypto.subtle.digest("SHA-256", digestInput),
+      let audioDigest: Uint8Array;
+      if (audioByteLength > 4 * 1024 * 1024) {
+        const CHUNK_SIZE = 2 * 1024 * 1024;
+        const numChunks = Math.ceil(audioByteLength / CHUNK_SIZE);
+        const intermediateDigests = new Uint8Array(numChunks * 32);
+        for (let i = 0; i < numChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, audioByteLength);
+          const chunk = bytes!.subarray(start, end);
+          const digest = await crypto.subtle.digest("SHA-256", chunk as unknown as BufferSource);
+          intermediateDigests.set(new Uint8Array(digest), i * 32);
+        }
+        audioDigest = new Uint8Array(
+          await crypto.subtle.digest("SHA-256", intermediateDigests),
+        );
+      } else {
+        const digestInput = bytes!.buffer instanceof ArrayBuffer
+          ? (bytes!.byteOffset === 0 && bytes!.byteLength === bytes!.buffer.byteLength
+            ? (bytes! as unknown as BufferSource)
+            : new Uint8Array(bytes!.buffer, bytes!.byteOffset, bytes!.byteLength))
+          : new Uint8Array(bytes!);
+        audioDigest = new Uint8Array(
+          await crypto.subtle.digest("SHA-256", digestInput),
+        );
+      }
+      const audioHash = Array.from(audioDigest, (byte) => byte.toString(16).padStart(2, "0")).join(
+        "",
       );
+      const revisionSeed = new TextEncoder().encode(`${currentEpisode.audioKey ?? ""}:${audioHash}`);
+      const revisionDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", revisionSeed));
+      revisionHash = Array.from(revisionDigest, (byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
     }
-    const audioHash = Array.from(audioDigest, (byte) => byte.toString(16).padStart(2, "0")).join(
-      "",
-    );
-    const revisionSeed = new TextEncoder().encode(`${currentEpisode.audioKey ?? ""}:${audioHash}`);
-    const revisionDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", revisionSeed));
-    const revisionHash = Array.from(revisionDigest, (byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
     const stagingRevision = opts.revision === DEFAULTS.revision
       ? `sha256-${revisionHash}`
       : opts.revision();
     const stagingKey = audioBlobKey(currentEpisode, "wav", stagingRevision);
     const inFlightStagingKey = stagingKey;
 
-    // audio-feed-i7vi: the synthesis phase ends where the terminal persistence block begins; the
-    // blob upload and the commit that follow are the write phase, measured from here.
     const synthesisEndedAt = performance.now();
 
-    // audio-feed-aqms: NEVER start an upload whose BYTE-SCALED duration alone cannot
-    // fit even a FRESH invocation. A payload too large for the whole budget is not
-    // deferrable - every tick would refuse it and yield forever with attempts reset
-    // to zero (an unbounded livelock that the four-property invariant forbids). Fail
-    // TERMINALLY with a legible reason instead: the operator learns the payload cannot
-    // be uploaded under the current budget and what to change, instead of the episode
-    // stalling for 15-minute leases and being abandoned with a reason that names no
-    // cause.
-    //
-    // The gate deliberately ignores the conservative small-payload FLOOR: a floor that
-    // exceeds a small budget (a test fixture, or a deliberately tiny deployment
-    // budget) still yields resumably - a later invocation with a workable budget can
-    // upload a small payload, exactly as the dv4p(a) test pins. Only the size-driven
-    // term is a verdict about THIS payload: no invocation at this budget can ever
-    // upload it.
-    const byteScaledUploadEstimateMs = Math.ceil(bytes.length / ASSUMED_UPLOAD_BYTES_PER_MS);
+    const byteScaledUploadEstimateMs = Math.ceil(audioByteLength / ASSUMED_UPLOAD_BYTES_PER_MS);
     if (
       maxInvocationDurationMs !== undefined && maxInvocationDurationMs > 0 &&
       byteScaledUploadEstimateMs + flushMargin > maxInvocationDurationMs
     ) {
       const error =
-        `terminal audio upload cannot fit the invocation budget: ${bytes.length} bytes at the assumed ` +
+        `terminal audio upload cannot fit the invocation budget: ${audioByteLength} bytes at the assumed ` +
         `${ASSUMED_UPLOAD_BYTES_PER_MS} bytes/ms (~${
           Math.round(byteScaledUploadEstimateMs / 1000)
         }s plus ` +
@@ -2782,34 +2876,23 @@ async function runSynthesisBatchCore(
       DEFAULT_MAX_UPLOAD_RETRIES;
     const uploadRetryExceeded = nextUploadRetry > maxRetries;
     const terminalRetryError = uploadRetryExceeded
-      ? `terminal audio upload exceeded retry cap (${maxRetries}): ${bytes.length} bytes repeatedly ` +
+      ? `terminal audio upload exceeded retry cap (${maxRetries}): ${audioByteLength} bytes repeatedly ` +
         `interrupted by invocation budget (assumed ${ASSUMED_UPLOAD_BYTES_PER_MS} bytes/ms, ~${
           Math.round(byteScaledUploadEstimateMs / 1000)
         }s estimated duration vs ${maxInvocationDurationMs}ms budget); ` +
         `raise MAX_INVOCATION_DURATION_MS or MAX_UPLOAD_RETRIES (audio-feed-lqd6)`
       : undefined;
 
-    const terminalEstimate = sizeScaledUploadEstimate + 10; // Upload + terminal commit + usage accounting (audio-feed-uecw)
-    // audio-feed-aqms: timer heartbeat while the terminal stage is awaited. The phase
-    // is checkpointed BEFORE the put starts, so without this the claim's heartbeat
-    // freezes at "uploading_audio" entry and a lease that expires mid-upload cannot
-    // distinguish "still uploading" from "died at the checkpoint".
+    const terminalEstimate = sizeScaledUploadEstimate + 10;
     const stopTerminalHeartbeat = startClaimHeartbeat(
       metadata,
       currentEpisode.userId,
       currentEpisode.id,
       opts.owner,
-      // audio-feed-uswe0, per review finding audio-feed-72nv9: pass the
-      // CALLER-INJECTED clock only. `clock` (the resolved local) is always
-      // truthy - REAL_INVOCATION_CLOCK fallback - so production would always
-      // take the clocked branch and lose the unref'd real-interval invariant.
-      // Undefined in production -> the real setInterval path; a test that
-      // injects a clock (the aqms rows) still drives the beats on it.
       { leaseMs: opts.leaseMs, clock: options.clock },
     );
     let terminalOutcome: BudgetedOutcome<{ stored: BlobInfo; byteLength: number; wrote: boolean }>;
     try {
-      // Universal helper withInvocationBudget governs terminal persistence (audio-feed-dv4p, audio-feed-mv1d, audio-feed-fsbk)
       terminalOutcome = await withInvocationBudget({
         name: "terminal_persistence",
         budget: {
@@ -2822,7 +2905,6 @@ async function runSynthesisBatchCore(
         completedTurns: 1,
         totalTurns: 1,
         cleanupOnAbort: async () => {
-          // Shared terminal settlement helper owns commit/settle/delete decision (audio-feed-g5bi)
           await settleTerminalPersistence(
             metadata,
             blobs,
@@ -2845,56 +2927,52 @@ async function runSynthesisBatchCore(
             opts.owner,
             {
               phase: "uploading_audio",
-              // audio-feed-amhn: the size about to be uploaded, durably recorded ON ENTRY so an
-              // attempt killed inside the put is diagnosable from the store alone. Read back by
-              // claimLifecycleEvent and carried on the abandonment record.
-              bytesAttempted: bytes.length,
+              bytesAttempted: audioByteLength,
             },
           );
           if (signal?.aborted) {
             throw signal.reason;
           }
 
-          // A whole-object PUT may have completed after the previous claim
-          // yielded. Measure the HEAD and full-byte verification as its own
-          // stage, including when nothing exists yet or a mismatch throws;
-          // never mistake the cheap reuse path for another upload.
           let existing: BlobInfo | null = null;
           let stored: BlobInfo | null = null;
           await markStage("verify", async () => {
             existing = await blobs.head(stagingKey);
             if (existing && existing.size === audioByteLength) {
-              const object = await blobs.get(stagingKey);
-              if (object) {
-                // audio-feed-sp38: Stream-compare directly against bytes without allocating
-                // a duplicate 90MB array via collect(object.body) to prevent isolate OOM.
-                const reader = object.body.getReader();
-                let matched = true;
-                let offset = 0;
-                try {
-                  while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    if (offset + value.length > audioByteLength) {
-                      matched = false;
-                      break;
-                    }
-                    for (let i = 0; i < value.length; i++) {
-                      if (value[i] !== bytes[offset + i]) {
+              if (storedSegments) {
+                // Streaming assembly key is content-addressed from immutable segment keys & lengths.
+                stored = existing;
+              } else {
+                const object = await blobs.get(stagingKey);
+                if (object) {
+                  const reader = object.body.getReader();
+                  let matched = true;
+                  let offset = 0;
+                  try {
+                    while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      if (offset + value.length > audioByteLength) {
                         matched = false;
                         break;
                       }
+                      for (let i = 0; i < value.length; i++) {
+                        if (value[i] !== bytes![offset + i]) {
+                          matched = false;
+                          break;
+                        }
+                      }
+                      if (!matched) break;
+                      offset += value.length;
                     }
-                    if (!matched) break;
-                    offset += value.length;
+                  } finally {
+                    reader.releaseLock();
                   }
-                } finally {
-                  reader.releaseLock();
-                }
-                if (matched && offset === audioByteLength) {
-                  stored = existing;
-                  if (ctx.stores.blobs instanceof S3BlobStore) {
-                    detachUint8Array(bytes);
+                  if (matched && offset === audioByteLength) {
+                    stored = existing;
+                    if (ctx.stores.blobs instanceof S3BlobStore) {
+                      detachUint8Array(bytes!);
+                    }
                   }
                 }
               }
@@ -2907,10 +2985,6 @@ async function runSynthesisBatchCore(
             );
           }
           if (!stored) {
-            // audio-feed-091i: record a durable cleanup marker BEFORE starting the PUT so
-            // an interrupted or retried upload that later abandons the episode leaves a
-            // discoverable key for terminal failure, lease-expiry abandonment, or source
-            // deletion to sweep.
             await metadata.reserveSynthesisSegment(
               currentEpisode.userId,
               currentEpisode.id,
@@ -2929,55 +3003,38 @@ async function runSynthesisBatchCore(
               nowMs,
               opts.leaseMs,
             ).catch(() => {});
-            // audio-feed-wnv8, AND THIS IS BEHAVIOUR: the check sits BEFORE the entry record and the
-            // transfer, so that an `entering` record keeps meaning "a PUT was actually handed to the
-            // storage layer". The deadline usually expires during the durable reservation above - a
-            // store write, the slowest await between the last abort check and the transfer - and a PUT
-            // started after that moment is handed over already doomed, to be aborted by its own signal
-            // mid-flight. The worker therefore does not attempt it, and accounts for that decision with
-            // the deadline it was measured against and the time actually observed, rather than leaving
-            // a gap where an attempt would have been.
             if (signal?.aborted) {
               await recordUploadSkipped(currentEpisode.id, {
                 bytesAttempted: audioByteLength,
                 uploadRetry: nextUploadRetry,
                 abortReason: signal.reason instanceof Error ? signal.reason.name : undefined,
               });
-              // The stage ends here, exactly where the doomed transfer would have ended it: throwing the
-              // abort reason this signal already carries is what the PUT's own rejection produced, so
-              // the wrapper classifies this as a budget abort by provenance rather than by estimate.
               throw signal.reason;
             } else {
-              // Only a real whole-object PUT receives an upload mark. Abort still
-              // closes its socket; if it committed anyway, the stable key survives
-              // for a later invocation to verify and settle.
               inFlightUploadKeys.add(inFlightStagingKey);
-              // audio-feed-amhn: the durable "we are about to PUT" record, written BEFORE the await.
-              // A platform kill inside `blobs.put` then leaves evidence of the entry AND the payload
-              // size being attempted, rather than only the absence of a completion mark.
               await recordUploadEntered(currentEpisode.id, {
                 bytesAttempted: audioByteLength,
                 uploadRetry: nextUploadRetry,
               });
-              // NOTE FOR A LATER READER (audio-feed-amhn, round-1 review finding 2). The invocation
-              // deadline can expire WHILE the record above is being written, because that write is an
-              // await. So the record is a claim that the terminal stage was ENTERED, not that bytes
-              // moved, and the read that separates those two is the JOINT signature in
-              // docs/observability-api.md: an entering record with no upload completion and no
-              // `synthesis.invocation` terminal for the same correlationId is a killed transfer, while
-              // one whose invocation DID close is a cancellation or a failure. The residual window
-              // between that record and the PUT below is deliberately NOT guarded: it is a log append,
-              // and a transfer started inside it is aborted by its own signal
-              // (src/storage/s3.ts:72-75), which is the path the joint signature was built to read.
-              const putPromise = markStage("upload", () =>
-                blobs.put(stagingKey, bytes, {
+              const putPromise = markStage("upload", async () => {
+                if (storedSegments) {
+                  const assembled = await assembleWavToBlobStore({
+                    blobs,
+                    destinationKey: stagingKey,
+                    segments: storedSegments,
+                    signal,
+                  });
+                  return assembled.stored;
+                }
+                return await blobs.put(stagingKey, bytes!, {
                   contentType: "audio/wav",
                   signal,
-                }), currentEpisode.id);
+                });
+              }, currentEpisode.id);
               putPromise.finally(() => inFlightUploadKeys.delete(inFlightStagingKey))
                 .catch(() => {});
               stored = await putPromise;
-              if (ctx.stores.blobs instanceof S3BlobStore) {
+              if (bytes && ctx.stores.blobs instanceof S3BlobStore) {
                 detachUint8Array(bytes);
               }
             }

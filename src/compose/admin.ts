@@ -704,6 +704,13 @@ export function createAdminRegenerateEpisodeHandler(
     const queued = ep.status === "failed"
       ? await ctx.stores.metadata.retryEpisode(resolved.user.id, episodeId)
       : await ctx.stores.metadata.requeueEpisode(resolved.user.id, episodeId);
+    if (queued && ctx.triggerSynthesis) {
+      try {
+        await ctx.triggerSynthesis(queued.id, resolved.user.id, { fresh: true });
+      } catch (err) {
+        console.warn(`[audio-feed] workflow retry trigger failed for episode ${queued.id}:`, err);
+      }
+    }
     return Response.json(
       { ok: true, queued: queued ? 1 : 0 },
       { headers: { "cache-control": "no-store" } },
@@ -745,10 +752,18 @@ export function createAdminRegenerateFeedHandler(
     if ("denied" in resolved) return resolved.denied;
     const userId = resolved.user.id;
 
-    const queued = await regenerateUserEpisodes(ctx.stores.metadata, userId, scope, {
-      sourceId: body.sourceId,
-      mode: body.mode,
-    });
+    const queued = await regenerateUserEpisodes(
+      ctx.stores.metadata,
+      userId,
+      scope,
+      {
+        sourceId: body.sourceId,
+        mode: body.mode,
+      },
+      ctx.triggerSynthesis
+        ? (episodeId) => ctx.triggerSynthesis!(episodeId, userId, { fresh: true })
+        : undefined,
+    );
     return Response.json(
       { ok: true, scope, queued },
       { headers: { "cache-control": "no-store" } },

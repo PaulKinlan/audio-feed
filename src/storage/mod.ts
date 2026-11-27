@@ -304,6 +304,11 @@ export interface ArticleRepository {
   getArticles(userId: string, ids: string[]): Promise<(Article | null)[]>;
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;
+  /**
+   * Batched URL existence check querying only the URL index (no article/chunk hydration).
+   * Returns the subset of `urls` already present for `userId`.
+   */
+  findExistingArticleUrls(userId: string, urls: string[]): Promise<Set<string>>;
   deleteArticle(userId: string, id: string): Promise<void>;
 }
 
@@ -999,12 +1004,33 @@ export interface BlobObject extends BlobInfo {
   range?: { start: number; end: number; total: number };
 }
 
+export interface BlobMultipartPart {
+  partNumber: number;
+  etag: string;
+}
+
+export interface BlobMultipartUpload {
+  readonly key: string;
+  readonly uploadId: string;
+  uploadPart(partNumber: number, data: Uint8Array): Promise<BlobMultipartPart>;
+  complete(parts: BlobMultipartPart[]): Promise<BlobInfo>;
+  abort(): Promise<void>;
+}
+
 export interface BlobStore {
   put(
     key: string,
     body: Uint8Array | ReadableStream<Uint8Array>,
     opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo>;
+  /**
+   * Optional streaming multipart upload (e.g. Cloudflare R2 native createMultipartUpload).
+   * Every non-final part must be at least 5 MiB (5,242,880 bytes) per R2/S3 rules.
+   */
+  createMultipartUpload?(
+    key: string,
+    opts?: { contentType?: string; signal?: AbortSignal },
+  ): Promise<BlobMultipartUpload>;
   /**
    * Atomic conditional create.
    * If the key already exists, returns `null` without modifying the existing object.

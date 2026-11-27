@@ -1,4 +1,5 @@
 import type { CodeHandling } from "../types.ts";
+import type { StoredWavSegment } from "../storage/wav_assembly.ts";
 import { attemptDeadline } from "./deadline.ts";
 import {
   assertTextSeams,
@@ -82,30 +83,16 @@ export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
  * upper bound for transcript tokens: each text token consumes at least one input byte, even
  * in CJK/multibyte text. 3000 bytes keeps single-turn TTS latency ~20-25s and within invocation budgets (audio-feed-9lrl).
  * Exact counts still require the provider countTokens endpoint. */
-export const MAX_TTS_INPUT_BYTES = 3_000;
+export const MAX_TTS_INPUT_BYTES = 2_000;
 /** Explicit audio output ceiling for the current TTS model, rather than an implicit default. */
 export const MAX_TTS_OUTPUT_TOKENS = 16_384;
 /**
  * Bound paid calls per episode (audio-feed-9yu8, audio-feed-9lrl). Further adaptive splits count too; long
- * articles fail before sending any requests. Raised 24 -> 64 (audio-feed-cco6g): resumable segment claims
- * (audio-feed-wr1u) landed, so a document needing between 25 and 64 segments synthesises across invocation
- * slices instead of failing at ingest.
- *
- * THE WALL-CLOCK CHECK THIS RAISE HAD TO SURVIVE (audio-feed-cco6g): 64 segments x the 45s worst-case turn
- * estimate is ~48 minutes, far beyond the 15-minute claim lease (DEFAULT_CLAIM_LEASE_MS) — and that is
- * safe BY DESIGN, not by tuning. Three mechanisms carry an episode longer than any single lease: (1) the
- * invocation budget (maxInvocationDurationMs, 90s default) yields the claim with durable progress well
- * inside the lease, and a progress-yield resets the attempts counter (audio-feed-vqu4), so a long episode
- * crosses many cron ticks without ever being superseded; (2) the worker stops paid work 60s before lease
- * expiry and passes a lease AbortSignal, and resumable segments mean a claim that DOES expire mid-episode
- * (crash, hang, eviction) re-pays only the segment that was in flight; (3) the per-attempt TTS deadline
- * (TTS_TIMEOUT_MS, 120s) bounds one request, independent of how many the episode needs. What a raise here
- * must never do is make the cap the wall-clock bound: superseded-after-lease work is reported (the
- * `superseded` result field), and a rising count means the lease — not this constant — needs
- * attention. With 64 segments the narration input ceiling is 3 KB x 64 = 192,000 bytes
- * (MAX_NARRATION_BYTES, src/ingest/upload.ts).
+ * articles fail before sending any requests. Raised 24 -> 64 (audio-feed-cco6g) -> 96 when lowering
+ * MAX_TTS_INPUT_BYTES from 3,000 to 2,000 so the narration input ceiling stays 2 KB x 96 = 192,000 bytes
+ * (MAX_NARRATION_BYTES, src/ingest/upload.ts) while each turn runs faster with fewer mid-stream drops.
  */
-export const MAX_TTS_SEGMENTS = 64;
+export const MAX_TTS_SEGMENTS = 96;
 /** audio-feed-zxv2k, audio-feed-votua:
  * DISPOSITION: The 60-minute limit applies per invocation, NOT per published episode.
  *
@@ -344,6 +331,11 @@ export interface DecodedAudioResult {
   finishReason?: string;
   /** True when finishReason is anything other than STOP — the audio is incomplete. */
   truncated: boolean;
+  /**
+   * When present, the segment audio already lives durably in the blob store and will be
+   * stream-assembled via R2 Multipart Upload without holding full-episode WAV bytes in RAM.
+   */
+  storedSegments?: StoredWavSegment[];
   toWav(): Uint8Array;
 }
 
@@ -375,14 +367,13 @@ export interface SynthesisOptions {
    */
   resume?: {
     /**
-     * `wav` carries the stored bytes and the voice that spoke them: the client reuses them
-     * only if it is about to use that same voice, so a voice change re-speaks rather than
-     * serving another voice's audio.
+     * `wav` carries stored bytes (in-memory path) or `stored` carries lightweight WAV metadata
+     * (streaming R2 multipart path — avoids loading megabytes back into Worker RAM).
      */
     prepare: (
       segmentText: string,
       voice: string,
-    ) => Promise<{ wav: Uint8Array } | "synthesize" | "held">;
+    ) => Promise<{ wav: Uint8Array } | { stored: StoredWavSegment } | "synthesize" | "held">;
     commit: (
       segmentText: string,
       decoded: DecodedAudioResult,
@@ -390,7 +381,12 @@ export interface SynthesisOptions {
       /** The caller's abort signal (budget + lease): the segment put must be interruptible
        * (audio-feed-y9kk) — a commit that uploads without it is a background zombie. */
       signal?: AbortSignal,
-    ) => Promise<void>;
+    ) => Promise<StoredWavSegment | void>;
+    /**
+     * When true, drop each segment's in-memory PCM/WAV buffer immediately after `commit` returns
+     * `StoredWavSegment` and return `DecodedAudioResult.storedSegments` for streaming assembly.
+     */
+    streamingAssembly?: boolean;
   };
   /** audio-feed-votua: injected budget for testability without allocating gigabytes of PCM. */
   pcmBudget?: ReturnType<typeof invocationPcmBudget>;
@@ -475,6 +471,27 @@ export class GeminiTtsTruncatedError extends GeminiTtsError {
   }
 }
 
+export interface EmptyCandidateDiagnostics {
+  finishReason?: string;
+  blockReason?: string;
+  safetyRatings?: unknown;
+  promptFeedback?: unknown;
+}
+
+/**
+ * Raised when Gemini returns HTTP 200 with a candidate that has no content parts.
+ * Retryable (status-less, permanent: false) and eligible for adaptive segment splitting.
+ */
+export class GeminiTtsEmptyCandidateError extends GeminiTtsError {
+  constructor(
+    message: string,
+    public readonly diagnostics: EmptyCandidateDiagnostics = {},
+  ) {
+    super(message, undefined, diagnostics, false);
+    this.name = "GeminiTtsEmptyCandidateError";
+  }
+}
+
 /**
  * Client configuration
  */
@@ -531,11 +548,19 @@ export function ttsClientConfig(
  * hardcoded 400 is what keeps a truncation terminal: its own class carries no status, so a
  * status-only propagation would have silently made it retryable and thrice-billed that segment.
  */
+/** True only for non-retryable 4xx client errors (excludes 408 timeout, 429 rate-limit, and all 5xx). */
+export function isPermanentTtsStatus(status: number): boolean {
+  if (status === 408 || status === 429 || status >= 500) return false;
+  return status >= 400 && status < 500;
+}
+
 function wrapTurnFailure(error: unknown): GeminiTtsError {
   const detail = error instanceof Error ? error.message : String(error);
   const status = error instanceof GeminiTtsError ? error.status : undefined;
   const permanent = error instanceof GeminiTtsError &&
-    (error.status !== undefined || error instanceof GeminiTtsTruncatedError);
+    (error.permanent ||
+      error instanceof GeminiTtsTruncatedError ||
+      (error.status !== undefined && isPermanentTtsStatus(error.status)));
   return new GeminiTtsError(
     permanent
       ? `TTS turn failed; refusing whole-episode retry: ${detail}`
@@ -754,6 +779,7 @@ export function parseWavHeader(bytes: Uint8Array): {
   bitsPerSample: number;
   dataOffset: number;
   dataLength: number;
+  declaredDataLength: number;
   durationSeconds: number;
 } {
   if (bytes.length < 44) {
@@ -786,6 +812,7 @@ export function parseWavHeader(bytes: Uint8Array): {
   let bitsPerSample = 16;
   let dataOffset = 44;
   let dataLength = bytes.length - 44;
+  let declaredDataLength = dataLength;
 
   while (offset + 8 <= bytes.length) {
     const b0 = bytes[offset];
@@ -812,11 +839,12 @@ export function parseWavHeader(bytes: Uint8Array): {
       bitsPerSample = view.getUint16(offset + 22, true);
     } else if (chunkId === "data") {
       dataOffset = offset + 8;
+      declaredDataLength = chunkSize;
       dataLength = Math.min(chunkSize, bytes.length - dataOffset);
       break;
     }
 
-    offset += 8 + chunkSize;
+    offset += 8 + chunkSize + (chunkSize & 1);
   }
 
   const bytesPerSecond = byteRate > 0 ? byteRate : (sampleRate * channels * bitsPerSample) / 8;
@@ -831,6 +859,7 @@ export function parseWavHeader(bytes: Uint8Array): {
     bitsPerSample,
     dataOffset,
     dataLength,
+    declaredDataLength,
     durationSeconds,
   };
 }
@@ -1734,15 +1763,72 @@ export function decodedFromWav(bytes: Uint8Array): DecodedAudioResult {
   };
 }
 
+/** Check whether any bytes following a WAV `data` chunk are valid RIFF padding or sub-chunks. */
+function hasValidTrailingRiff(
+  bytes: Uint8Array,
+  dataOffset: number,
+  declaredDataLength: number,
+): boolean {
+  const afterData = dataOffset + declaredDataLength;
+  if (afterData > bytes.byteLength) return false;
+  if (afterData === bytes.byteLength) return true;
+  let pos = afterData + (declaredDataLength & 1);
+  if (pos === bytes.byteLength) return true;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  while (pos < bytes.byteLength) {
+    if (pos + 8 > bytes.byteLength) return false;
+    for (let i = 0; i < 4; i++) {
+      const ch = bytes[pos + i]!;
+      if (ch < 0x20 || ch > 0x7e) return false;
+    }
+    const chunkSize = view.getUint32(pos + 4, true);
+    if (pos + 8 + chunkSize > bytes.byteLength) return false;
+    pos = Math.min(pos + 8 + chunkSize + (chunkSize & 1), bytes.byteLength);
+  }
+  return true;
+}
+
 /** Measure actual decoded PCM, never a duration estimate or a compressed byte count. */
-function ttsPcmBytes(audio: DecodedAudioResult): number {
-  if (audio.format === "pcm") return audio.rawBytes.byteLength;
+export function ttsPcmBytes(
+  audio: DecodedAudioResult,
+  source: "stored" | "fresh" = "stored",
+): number {
+  if (audio.format === "pcm") {
+    if (audio.rawBytes.byteLength <= 0) {
+      if (source === "fresh") {
+        throw new GeminiTtsError(
+          "Gemini TTS returned empty PCM audio (0 bytes)",
+          undefined,
+          undefined,
+          false,
+        );
+      }
+      throw new GeminiTtsError("Stored TTS segment has incomplete PCM data", 400);
+    }
+    return audio.rawBytes.byteLength;
+  }
   if (audio.format === "wav") {
     const info = parseWavHeader(audio.rawBytes);
+    const truncated = info.dataOffset + info.declaredDataLength > audio.rawBytes.byteLength;
+    const empty = info.declaredDataLength <= 0 || info.dataLength <= 0;
+    const misaligned = info.blockAlign <= 0 || info.dataLength % info.blockAlign !== 0;
+    if (source === "fresh") {
+      if (info.audioFormat !== 1 || empty || truncated || misaligned) {
+        throw new GeminiTtsError(
+          empty
+            ? "Gemini TTS returned 0-byte WAV PCM audio"
+            : "Gemini TTS returned incomplete WAV PCM data",
+          undefined,
+          undefined,
+          false,
+        );
+      }
+      // Valid RIFF trailing chunks or padding (dataOffset + declaredDataLength <= byteLength) are accepted.
+      return info.dataLength;
+    }
     if (
-      info.audioFormat !== 1 || info.dataLength <= 0 ||
-      info.dataOffset + info.dataLength !== audio.rawBytes.byteLength ||
-      info.dataLength % info.blockAlign !== 0
+      info.audioFormat !== 1 || empty || truncated || misaligned ||
+      !hasValidTrailingRiff(audio.rawBytes, info.dataOffset, info.declaredDataLength)
     ) {
       throw new GeminiTtsError("Stored TTS segment has incomplete PCM data", 400);
     }
@@ -1752,13 +1838,87 @@ function ttsPcmBytes(audio: DecodedAudioResult): number {
 }
 
 /** Convert decoded PCM duration to the canonical writer format for a 60-minute comparison. */
-function canonicalDurationBytes(audio: DecodedAudioResult): number {
-  const actualBytes = ttsPcmBytes(audio);
+function canonicalDurationBytes(
+  audio: DecodedAudioResult,
+  source: "stored" | "fresh" = "stored",
+): number {
+  const actualBytes = ttsPcmBytes(audio, source);
   const rate = audio.sampleRate * audio.channels * audio.bitsPerSample;
   if (!Number.isFinite(rate) || rate <= 0) {
     throw new GeminiTtsError("TTS segment has invalid PCM format", 400);
   }
   return actualBytes * (WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_BITS_PER_SAMPLE) / rate;
+}
+
+/** Lightweight DecodedAudioResult backed by a finalized segment blob in R2 (zero PCM RAM). */
+export function decodedFromStoredSegment(seg: StoredWavSegment): DecodedAudioResult {
+  return {
+    rawBytes: new Uint8Array(0),
+    mimeType: "audio/wav",
+    format: "wav",
+    sampleRate: seg.sampleRate,
+    channels: seg.channels,
+    bitsPerSample: seg.bitsPerSample,
+    durationSeconds: seg.durationSeconds,
+    finishReason: "STOP",
+    truncated: false,
+    storedSegments: [seg],
+    toWav() {
+      throw new Error(
+        `DecodedAudioResult for ${seg.audioKey} is backed by streaming storedSegments; use assembleWavToBlobStore`,
+      );
+    },
+  };
+}
+
+/** Combine lightweight stored segment refs into one streaming DecodedAudioResult (zero PCM RAM). */
+function joinStoredSegments(
+  chunks: readonly DecodedAudioResult[],
+  allowTruncated = false,
+): DecodedAudioResult | null {
+  if (chunks.length === 0) return null;
+  const allSegments: StoredWavSegment[] = [];
+  for (const chunk of chunks) {
+    if (!chunk.storedSegments || chunk.storedSegments.length === 0) return null;
+    if (chunk.truncated && !allowTruncated) {
+      throw new GeminiTtsError("TTS segment returned incomplete audio");
+    }
+    allSegments.push(...chunk.storedSegments);
+  }
+  const first = allSegments[0]!;
+  let totalPcmBytes = 0;
+  let totalDuration = 0;
+  for (const seg of allSegments) {
+    if (
+      seg.sampleRate !== first.sampleRate ||
+      seg.channels !== first.channels ||
+      seg.bitsPerSample !== first.bitsPerSample
+    ) {
+      throw new GeminiTtsError("TTS segments returned incompatible or incomplete audio");
+    }
+    totalPcmBytes += seg.pcmByteLength;
+    totalDuration += seg.durationSeconds;
+  }
+  if (totalPcmBytes > MAX_PUBLICATION_PCM_BYTES) {
+    throw new GeminiTtsError("Episode exceeds the RIFF WAV publication limit", 400);
+  }
+  return {
+    rawBytes: new Uint8Array(0),
+    mimeType: "audio/wav",
+    format: "wav",
+    sampleRate: first.sampleRate,
+    channels: first.channels,
+    bitsPerSample: first.bitsPerSample,
+    durationSeconds: totalDuration,
+    finishReason: chunks.some((c) => c.truncated) ? "MAX_TOKENS" : "STOP",
+    truncated: chunks.some((c) => c.truncated),
+    storedSegments: allSegments,
+    toWav() {
+      throw new Error(
+        "Stitched audio is backed by streaming storedSegments; use assembleWavToBlobStore",
+      );
+    },
+  };
 }
 
 export function invocationPcmBudget(
@@ -1771,7 +1931,7 @@ export function invocationPcmBudget(
     getStoredBytes: () => storedBytes,
     getNewlyProduced: () => newlyProduced,
     stored(audio: DecodedAudioResult) {
-      const bytes = canonicalDurationBytes(audio);
+      const bytes = canonicalDurationBytes(audio, "stored");
       if (bytes > maxInvocationBytes) {
         throw new GeminiTtsError("Stored TTS segment exceeds the invocation PCM limit", 400);
       }
@@ -1781,8 +1941,24 @@ export function invocationPcmBudget(
       }
       return audio;
     },
+    storedMeta(seg: StoredWavSegment) {
+      const rate = seg.sampleRate * seg.channels * seg.bitsPerSample;
+      if (!Number.isFinite(rate) || rate <= 0 || seg.pcmByteLength <= 0) {
+        throw new GeminiTtsError("Stored TTS segment has invalid PCM format", 400);
+      }
+      const bytes = seg.pcmByteLength * (WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_BITS_PER_SAMPLE) /
+        rate;
+      if (bytes > maxInvocationBytes) {
+        throw new GeminiTtsError("Stored TTS segment exceeds the invocation PCM limit", 400);
+      }
+      storedBytes += bytes;
+      if (storedBytes > maxPublicationBytes) {
+        throw new GeminiTtsError("Episode exceeds the RIFF WAV publication limit", 400);
+      }
+      return decodedFromStoredSegment(seg);
+    },
     produced(audio: DecodedAudioResult, completed: number, total: number) {
-      const bytes = canonicalDurationBytes(audio);
+      const bytes = canonicalDurationBytes(audio, "fresh");
       if (bytes > maxInvocationBytes) {
         throw new GeminiTtsError("One TTS segment exceeds the invocation PCM limit", 400);
       }
@@ -1896,21 +2072,54 @@ export function decodeAudioResponse(
     );
   }
 
+  const promptFeedback = res.promptFeedback as Record<string, unknown> | undefined;
+  const blockReason = typeof promptFeedback?.blockReason === "string"
+    ? promptFeedback.blockReason
+    : undefined;
+  const formatDiagnostics = (diag: EmptyCandidateDiagnostics): string => {
+    const bits: string[] = [];
+    if (diag.finishReason) bits.push(`finishReason=${diag.finishReason}`);
+    if (diag.blockReason) bits.push(`blockReason=${diag.blockReason}`);
+    if (diag.safetyRatings !== undefined) {
+      try {
+        bits.push(`safetyRatings=${JSON.stringify(diag.safetyRatings)}`);
+      } catch {
+        // ignore unserializable safetyRatings
+      }
+    }
+    if (diag.promptFeedback !== undefined) {
+      try {
+        bits.push(`promptFeedback=${JSON.stringify(diag.promptFeedback)}`);
+      } catch {
+        // ignore unserializable promptFeedback
+      }
+    }
+    return bits.length > 0 ? ` (${bits.join(", ")})` : "";
+  };
+
   const candidates = res.candidates as
     | Array<Record<string, unknown>>
     | undefined;
   if (!candidates || candidates.length === 0) {
-    throw new GeminiTtsError("Gemini API response contained no candidates");
+    const diagnostics: EmptyCandidateDiagnostics = {
+      ...(blockReason ? { blockReason } : {}),
+      ...(promptFeedback !== undefined ? { promptFeedback } : {}),
+    };
+    throw new GeminiTtsEmptyCandidateError(
+      `Gemini API response contained no candidates${formatDiagnostics(diagnostics)}`,
+      diagnostics,
+    );
   }
 
   const firstCandidate = candidates[0];
   if (!firstCandidate) {
-    throw new GeminiTtsError(
+    throw new GeminiTtsEmptyCandidateError(
       "Gemini API response contained no valid candidates",
     );
   }
 
   const finishReason = firstCandidate.finishReason as string | undefined;
+  const safetyRatings = firstCandidate.safetyRatings;
   const incomplete = Boolean(
     finishReason && finishReason !== "STOP" &&
       finishReason !== "FINISH_REASON_UNSPECIFIED",
@@ -1924,7 +2133,15 @@ export function decodeAudioResponse(
   const content = firstCandidate.content as Record<string, unknown> | undefined;
   const parts = content?.parts as Array<Record<string, unknown>> | undefined;
   if (!parts || parts.length === 0) {
-    throw new GeminiTtsError("Gemini API candidate contained no content parts");
+    const diagnostics: EmptyCandidateDiagnostics = {
+      ...(finishReason ? { finishReason } : {}),
+      ...(blockReason ? { blockReason } : {}),
+      ...(safetyRatings !== undefined ? { safetyRatings } : {}),
+      ...(promptFeedback !== undefined ? { promptFeedback } : {}),
+    };
+    const msg = `Gemini API candidate contained no content parts${formatDiagnostics(diagnostics)}`;
+    console.warn(`[audio-feed] ${msg}`);
+    throw new GeminiTtsEmptyCandidateError(msg, diagnostics);
   }
 
   // Find inline audio part
@@ -2051,7 +2268,10 @@ export class GeminiTtsClient {
     this.baseUrl = config.baseUrl
       ? getGeminiApiBaseUrl(config.baseUrl)
       : getGeminiApiBaseUrl(undefined, config.env);
-    this.fetchFn = config.fetchFn || fetch;
+    // Never assign bare `fetch` onto `this`: in Cloudflare Workers (`workerd`), invoking
+    // `this.fetchFn(...)` binds `this` to the client instance and throws
+    // `TypeError: Illegal invocation: function called with incorrect 'this' reference`.
+    this.fetchFn = config.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.timeoutRetries = config.timeoutRetries ?? DEFAULT_TIMEOUT_RETRIES;
@@ -2100,7 +2320,10 @@ export class GeminiTtsClient {
               409,
             );
           }
-          if (prepared !== "synthesize") return pcmBudget.stored(decodedFromWav(prepared.wav));
+          if (prepared !== "synthesize") {
+            if ("stored" in prepared) return pcmBudget.storedMeta(prepared.stored);
+            return pcmBudget.stored(decodedFromWav(prepared.wav));
+          }
           const decoded = await this.sendRequest(
             buildSingleVoiceRequest(segment, voice, options.temperature, style),
             segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
@@ -2110,24 +2333,39 @@ export class GeminiTtsClient {
           // serve it later as STOP-complete. Only complete audio becomes resume material.
           // The stage signal rides along so the segment put is abortable (audio-feed-y9kk).
           if (!decoded.truncated) {
-            await options.resume?.commit(segment, decoded, voice, options.signal);
+            const committedMeta = await options.resume?.commit(
+              segment,
+              decoded,
+              voice,
+              options.signal,
+            );
+            if (options.resume?.streamingAssembly && committedMeta) {
+              // Drop the raw PCM/WAV bytes immediately to keep Worker RAM constant (~16 MB).
+              return decodedFromStoredSegment(committedMeta);
+            }
           }
           return decoded;
         },
         splitOnOutputLimit: (segment, error) => {
-          if (
-            !(error instanceof GeminiTtsTruncatedError) || error.finishReason !== "MAX_TOKENS" ||
-            new TextEncoder().encode(segment).length < 8
-          ) return null;
+          const byteLen = new TextEncoder().encode(segment).length;
+          const isMaxTokens = error instanceof GeminiTtsTruncatedError &&
+            error.finishReason === "MAX_TOKENS" && byteLen >= 8;
+          const isEmptyCandidate = error instanceof GeminiTtsEmptyCandidateError && byteLen >= 200;
+          if (!isMaxTokens && !isEmptyCandidate) return null;
           const halves = splitTextUnderByteBudget(
             segment,
-            Math.floor(new TextEncoder().encode(segment).length / 2),
+            Math.floor(byteLen / 2),
           );
+          if (halves.length < 2) return null;
           assertTextSeams(segment, halves);
           return halves;
         },
         stitch: (audio) => {
           assertTextSeams(prompt, segments);
+          if (options.resume?.streamingAssembly) {
+            const streamed = joinStoredSegments(audio, options.allowTruncated);
+            if (streamed) return streamed;
+          }
           return joinTtsAudio(audio, options.allowTruncated);
         },
         onProgress: options.onProgress,
@@ -2208,7 +2446,10 @@ export class GeminiTtsClient {
               409,
             );
           }
-          if (prepared !== "synthesize") return pcmBudget.stored(decodedFromWav(prepared.wav));
+          if (prepared !== "synthesize") {
+            if ("stored" in prepared) return pcmBudget.storedMeta(prepared.stored);
+            return pcmBudget.stored(decodedFromWav(prepared.wav));
+          }
           const decoded = await this.sendRequest(
             buildDialogueRequest(part, speakers, options.temperature),
             batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
@@ -2216,12 +2457,42 @@ export class GeminiTtsClient {
           pcmBudget.produced(decoded, completed.length, batches.length);
           if (!decoded.truncated) {
             // The stage signal rides along so the segment put is abortable (audio-feed-y9kk).
-            await options.resume?.commit(segmentText, decoded, dialogueVoice, options.signal);
+            const committedMeta = await options.resume?.commit(
+              segmentText,
+              decoded,
+              dialogueVoice,
+              options.signal,
+            );
+            if (options.resume?.streamingAssembly && committedMeta) {
+              return decodedFromStoredSegment(committedMeta);
+            }
           }
           return decoded;
         },
+        splitOnOutputLimit: (part, error) => {
+          const isMaxTokens = error instanceof GeminiTtsTruncatedError &&
+            error.finishReason === "MAX_TOKENS";
+          const isEmptyCandidate = error instanceof GeminiTtsEmptyCandidateError;
+          if (!isMaxTokens && !isEmptyCandidate) return null;
+          if (part.length >= 2) {
+            const mid = Math.ceil(part.length / 2);
+            return [part.slice(0, mid), part.slice(mid)];
+          }
+          const only = part[0];
+          if (!only) return null;
+          const byteLen = encoder.encode(only.text).length;
+          if (byteLen < (isEmptyCandidate ? 200 : 8)) return null;
+          const halves = splitTextUnderByteBudget(only.text, Math.floor(byteLen / 2));
+          if (halves.length < 2) return null;
+          assertTextSeams(only.text, halves);
+          return halves.map((text) => [{ ...only, text }]);
+        },
         stitch: (audio) => {
           assertTextSeams(sourceText, batchText());
+          if (options.resume?.streamingAssembly) {
+            const streamed = joinStoredSegments(audio, options.allowTruncated);
+            if (streamed) return streamed;
+          }
           return joinTtsAudio(audio, options.allowTruncated);
         },
         onProgress: options.onProgress,
@@ -2284,7 +2555,8 @@ export class GeminiTtsClient {
 
       let res: Response;
       try {
-        res = await this.fetchFn(url, {
+        const doFetch = this.fetchFn;
+        res = await doFetch(url, {
           method: "POST",
           headers,
           body: JSON.stringify(request),

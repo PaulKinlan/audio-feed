@@ -45,6 +45,9 @@ function makeSyntheticPdf(options: {
   }
   const infoObj = infoEntries.length > 0 ? `6 0 obj\n<< ${infoEntries.join(" ")} >>\nendobj\n` : "";
 
+  const minY = Math.min(0, 700 - options.lines.length * 25 - 50);
+  const maxWidth = Math.max(612, ...options.lines.map((l) => 100 + l.length * 10));
+
   const pdf = `%PDF-1.4
 1 0 obj
 << /Type /Catalog /Pages 2 0 R >>
@@ -53,7 +56,7 @@ endobj
 << /Type /Pages /Kids [3 0 R] /Count 1 >>
 endobj
 3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+<< /Type /Page /Parent 2 0 R /MediaBox [0 ${minY} ${maxWidth} 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
 endobj
 4 0 obj
 << /Length ${streamLength} >>

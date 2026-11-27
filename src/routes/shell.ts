@@ -20,14 +20,13 @@ import { DESIGN_TOKENS } from "./tokens.ts";
 // The confirm client's single source is src/assets/confirm-shared.js (audio-feed-0r0s, lifted
 // out of admin.js by audio-feed-3xq part 4c); the same `with { type: "text" }` idiom
 // src/routes/assets.ts uses to serve it.
-import confirmSharedSource from "../assets/confirm-shared.js" with { type: "text" };
-// The other client helper with a single source (audio-feed-fg18i): the guard every path-forwarding
-// wrapper runs its caller's path through. src/routes/assets.ts composes these same bytes in front
-// of src/assets/admin.js for the console module; the classic-script pages get them inline below.
-import sameOriginPathSource from "../assets/same-origin-path.js" with { type: "text" };
-import cwvStatsSource from "../assets/cwv-stats.js" with { type: "text" };
-import cwvClientSource from "../assets/cwv.js" with { type: "text" };
-import tooltipClientSource from "../assets/tooltip-client.js" with { type: "text" };
+import { ASSETS_RAW } from "../assets/bundle.ts";
+
+const confirmSharedSource = ASSETS_RAW["confirm-shared.js"];
+const sameOriginPathSource = ASSETS_RAW["same-origin-path.js"];
+const cwvStatsSource = ASSETS_RAW["cwv-stats.js"];
+const cwvClientSource = ASSETS_RAW["cwv.js"];
+const tooltipClientSource = ASSETS_RAW["tooltip-client.js"];
 
 /** Who the header says is signed in. `null` for a visitor. */
 export interface Viewer {

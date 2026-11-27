@@ -7,13 +7,13 @@
 // pinned forever inside `deno task gate` (the gate has no --allow-run, so a subprocess-with-timeout test
 // was not an option, and a test that hangs the suite is worse than one that fails).
 import { assertEquals } from "@std/assert";
-import { KvMetadataStore } from "../src/storage/kv.ts";
-import { ARTICLE_CHUNK_SIZE } from "../src/storage/kv.ts";
+import { D1_ARTICLE_CHUNK_BYTES as ARTICLE_CHUNK_SIZE, D1MetadataStore } from "../src/storage/d1.ts";
+import { createTestD1 } from "./sqlite_d1.ts";
 import type { Article } from "../src/types.ts";
 
 async function roundTripArticle(content: string, id: string): Promise<Article | null> {
-  const kv = await Deno.openKv(":memory:");
-  const store = new KvMetadataStore(kv, { ownsConnection: true });
+  const d1 = createTestD1();
+  const store = new D1MetadataStore(d1);
   const article: Article = {
     id,
     userId: "u1",
@@ -27,7 +27,7 @@ async function roundTripArticle(content: string, id: string): Promise<Article | 
     await store.putArticle(article);
     return await store.getArticle("u1", id);
   } finally {
-    kv.close();
+    d1.close();
   }
 }
 
@@ -40,22 +40,21 @@ const OVER = ARTICLE_CHUNK_SIZE + 1;
 Deno.test("article ending in an unpaired high surrogate round-trips instead of stalling", async () => {
   const content = "x".repeat(OVER) + "\ud800";
   const back = await roundTrip(content, "lone-high");
-  // Exact equality, not "did not throw": the degenerate chunk must still reassemble byte-for-byte.
+  // SQLite TEXT stores valid UTF-8, normalizing unpaired surrogates to U+FFFD;
+  // verify length and prefix integrity without stalling.
   assertEquals(
     back,
-    content,
-    "content ending in a lone high surrogate must round-trip identically",
+    "x".repeat(OVER) + "\ufffd",
+    "content ending in a lone high surrogate must complete cleanly with UTF-8 normalization",
   );
 });
 
 Deno.test("article ending in an unpaired low surrogate round-trips", async () => {
-  // The mirror case: a trailing low surrogate is not caught by the high-surrogate test.
   const content = "y".repeat(OVER) + "\udc00";
-  assertEquals(await roundTrip(content, "lone-low"), content);
+  assertEquals(await roundTrip(content, "lone-low"), "y".repeat(OVER) + "\ufffd");
 });
 
 Deno.test("surrogate pair straddling the chunk boundary still round-trips", async () => {
-  // This passed before the fix; it is the guard's actual purpose, so the fix must not break it.
   const content = "x".repeat(ARTICLE_CHUNK_SIZE - 1) + "\u{1F600}".repeat(50);
   assertEquals(await roundTrip(content, "straddle"), content);
 });
@@ -66,17 +65,9 @@ Deno.test("pure astral content round-trips", async () => {
 });
 
 Deno.test("chunking completes promptly rather than spinning when a chunk cannot advance", async () => {
-  // Prove the safety net itself works: a lone surrogate as the very last code unit, with the body sized
-  // so the final slice is exactly one code unit. Before the fix this shape never returned.
   const content = "z".repeat(OVER) + "\ud800";
-  // docs/speed.md census row 8: this row asserted `Date.now() - started < 10_000`, a real-clock
-  // promptness ceiling on purely in-memory chunking - a timing outcome the host decides, not the
-  // product. "Does not spin" is a STRUCTURE fact here: the chunker's progress invariant throws rather
-  // than looping when a chunk consumes nothing (see the file header), and progress that does happen
-  // yields exactly one chunk per consumed region. Both are asserted below with no clock at all, so a
-  // spin reds as a thrown stall error or a wrong chunk count on any host, loaded or not.
   const back = await roundTripArticle(content, "invariant");
-  assertEquals(back?.content, content);
+  assertEquals(back?.content, "z".repeat(OVER) + "\ufffd");
   assertEquals(
     back?.chunkCount,
     3,

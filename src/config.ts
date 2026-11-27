@@ -10,7 +10,8 @@
 
 import type { BlobStore, MetadataStore } from "./storage/mod.ts";
 import { MemoryBlobStore, MemoryMetadataStore } from "./storage/memory.ts";
-import { KvMetadataStore } from "./storage/kv.ts";
+import { D1MetadataStore, type D1DatabaseLike } from "./storage/d1.ts";
+import { R2BlobStore, type R2BucketLike } from "./storage/r2.ts";
 import { S3BlobStore } from "./storage/s3.ts";
 import {
   DEFAULT_TIMEOUT_MS,
@@ -18,6 +19,13 @@ import {
   GEMINI_TTS_VOICES,
   type GeminiTtsVoice,
 } from "./tts/gemini.ts";
+
+function defaultEnvReader(): EnvReader {
+  if (typeof Deno !== "undefined" && typeof Deno.env?.get === "function") {
+    return Deno.env;
+  }
+  return { get: () => undefined };
+}
 
 /**
  * The daily per-user episode ceiling that applies when a subscriber has no
@@ -222,7 +230,7 @@ function envFrom(reader: EnvReader, name: string): string | undefined {
   return value && value.trim() !== "" ? value.trim() : undefined;
 }
 
-export function loadConfig(reader: EnvReader = Deno.env): AppConfig {
+export function loadConfig(reader: EnvReader = defaultEnvReader()): AppConfig {
   const port = Number(envFrom(reader, "PORT") ?? 8000);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`Invalid PORT: ${envFrom(reader, "PORT")}`);
@@ -386,7 +394,7 @@ export interface Stores {
  * set is a configuration error, never a silent downgrade to memory.
  */
 export function selectBlobStore(
-  reader: EnvReader = Deno.env,
+  reader: EnvReader = defaultEnvReader(),
 ): { store: BlobStore; describe: string } {
   const bucket = envFrom(reader, "STORAGE_BUCKET");
   const endpoint = envFrom(reader, "STORAGE_ENDPOINT");
@@ -421,13 +429,54 @@ export function selectBlobStore(
   };
 }
 
+let localMetadataOpener: ((path?: string) => Promise<MetadataStore>) | null = null;
+
+/** Register a local SQLite/D1 opener for tests running on Node/Vitest without Deno KV. */
+export function registerLocalMetadataOpener(
+  fn: (path?: string) => Promise<MetadataStore>,
+): void {
+  localMetadataOpener = fn;
+}
+
 export async function openStores(opts?: { kvPath?: string }): Promise<Stores> {
   const blob = selectBlobStore();
-  const metadata = await KvMetadataStore.open(opts?.kvPath);
+  if (!localMetadataOpener) {
+    throw new Error(
+      "No local metadata store opener registered. Use openD1Stores(env.DB) on Cloudflare Workers or registerLocalMetadataOpener() in local tests.",
+    );
+  }
+  const metadata = await localMetadataOpener(opts?.kvPath);
   return {
     metadata,
     blobs: blob.store,
-    describe: `metadata=kv ${blob.describe}`,
+    describe: `metadata=d1 ${blob.describe}`,
+  };
+}
+
+/** Cloudflare Workers store wiring backed by D1 + native R2 binding (or S3/R2 env credentials). */
+export function openD1Stores(
+  db: D1DatabaseLike,
+  reader: EnvReader = defaultEnvReader(),
+  r2Bucket?: R2BucketLike,
+): Stores {
+  const hasS3Creds = Boolean(
+    envFrom(reader, "STORAGE_BUCKET") &&
+      envFrom(reader, "STORAGE_ENDPOINT") &&
+      (envFrom(reader, "STORAGE_ACCESS_KEY_ID") ?? envFrom(reader, "STORAGE_ACCESS_KEY")) &&
+      (envFrom(reader, "STORAGE_SECRET_ACCESS_KEY") ?? envFrom(reader, "STORAGE_SECRET_KEY")),
+  );
+  if (r2Bucket && !hasS3Creds) {
+    return {
+      metadata: new D1MetadataStore(db),
+      blobs: new R2BlobStore(r2Bucket),
+      describe: "metadata=d1 blobs=r2",
+    };
+  }
+  const blob = selectBlobStore(reader);
+  return {
+    metadata: new D1MetadataStore(db),
+    blobs: blob.store,
+    describe: `metadata=d1 ${blob.describe}`,
   };
 }
 

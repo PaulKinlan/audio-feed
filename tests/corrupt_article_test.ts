@@ -12,10 +12,10 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
-import { isCorruptArticleError, KvMetadataStore } from "../src/storage/kv.ts";
+import { CorruptArticleError, D1MetadataStore, isCorruptArticleError } from "../src/storage/d1.ts";
+import { createTestD1 } from "./sqlite_d1.ts";
 import { MemoryBlobStore } from "../src/storage/memory.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
-import { CorruptArticleError } from "../src/storage/kv.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 
 const BASE = "https://audio.example.com";
@@ -26,11 +26,9 @@ const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-
 const LONG_BODY = "x".repeat(120_000);
 
 async function seededWithCorruption() {
-  // A real KV store, because chunking only exists in the KV backend — memoryStores() would silently
-  // test nothing, since it never splits an article and so never has a chunk to lose.
-  const kv = await Deno.openKv(":memory:");
-  const metadata = new KvMetadataStore(kv, { ownsConnection: false });
-  const stores: Stores = { metadata, blobs: new MemoryBlobStore(), describe: "test=kv" };
+  const kv = createTestD1();
+  const metadata = new D1MetadataStore(kv);
+  const stores: Stores = { metadata, blobs: new MemoryBlobStore(), describe: "test=d1" };
 
   await stores.metadata.putUser(
     makeUser({ id: "user-1", displayName: "Paul", status: "approved", feedToken: TOKEN }),
@@ -78,9 +76,13 @@ async function seededWithCorruption() {
   }
 
   // Damage it the way reality does: the base article still claims its chunkCount, one chunk is gone.
-  const before = await kv.get<number>(["article_chunk", "user-1", "art-damaged", 1]);
-  assert(before.value !== null, "precondition: the damaged article must actually be chunked");
-  await kv.delete(["article_chunk", "user-1", "art-damaged", 1]);
+  const before = await kv.prepare(
+    `SELECT chunk FROM article_chunks WHERE user_id = ? AND article_id = ? AND chunk_index = 1`,
+  ).bind("user-1", "art-damaged").first<{ chunk: string }>();
+  assert(before !== null, "precondition: the damaged article must actually be chunked");
+  await kv.prepare(
+    `DELETE FROM article_chunks WHERE user_id = ? AND article_id = ? AND chunk_index = 1`,
+  ).bind("user-1", "art-damaged").run();
 
   const ctx = { config, stores };
   const { fetch } = createApp(ctx, createHandlers(ctx));

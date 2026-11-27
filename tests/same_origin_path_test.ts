@@ -108,9 +108,9 @@ Deno.test("audio-feed-fg18i: the shipped guard refuses every path that leaves th
 // ── The population, derived from source ─────────────────────────────────────────────────────
 const SOURCE_FILE = /\.(?:ts|js)$/;
 
-/** Every `.ts`/`.js` file the server ships: all of src/, plus main.ts. */
+/** Every `.ts`/`.js` file the server ships: all of src/. */
 async function runtimeSourceFiles(): Promise<string[]> {
-  const files: string[] = ["main.ts"];
+  const files: string[] = [];
   // The LITERAL root is load-bearing: scripts/test-selection.ts derives this suite's relation to the
   // "src/" tree from a readDir call whose argument is the directory name, and this suite must be
   // selected by a change to any file it scans. A parameterised read reaches the same files and

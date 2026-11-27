@@ -331,10 +331,13 @@ Deno.test("the manifest is installable metadata (audio-feed-4xb)", async () => {
   assertEquals(manifest.start_url, "/listen");
   assertEquals(manifest.theme_color, "#18181b");
   assertEquals(manifest.background_color, "#09090b");
-  // Installability needs at least one icon of at least 144px; an SVG with
-  // sizes "any" satisfies that and keeps the repo free of binary assets.
+  // Installability needs at least one icon of at least 144px (SVG "any" or procedural 512x512 PNG).
   assert(Array.isArray(manifest.icons) && manifest.icons.length > 0);
-  assert(manifest.icons.every((icon: { sizes: string }) => icon.sizes === "any"));
+  assert(
+    manifest.icons.every((icon: { sizes: string }) =>
+      icon.sizes === "any" || icon.sizes === "512x512"
+    ),
+  );
 });
 
 Deno.test("the service worker caches audio first and pages network-first (audio-feed-4xb)", async () => {

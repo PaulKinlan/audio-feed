@@ -21,7 +21,8 @@ import {
   FEED_TOKEN_WINDOW,
 } from "../src/compose/feeds.ts";
 import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
-import { KvMetadataStore } from "../src/storage/kv.ts";
+import { D1MetadataStore } from "../src/storage/d1.ts";
+import { createTestD1 } from "./sqlite_d1.ts";
 import { MemoryBlobStore } from "../src/storage/memory.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { Episode } from "../src/types.ts";
@@ -245,12 +246,17 @@ Deno.test("feed row (a): 600 pending/failed followed by 10 ready episodes yields
     "feed must reach all 10 ready episodes despite 600 preceding junk records",
   );
 
-  // Also verify against KvMetadataStore to prove reach across storage adapters:
-  const kv = await Deno.openKv(":memory:");
+  // Also verify against D1MetadataStore to prove reach across storage adapters:
+  const d1 = createTestD1();
+  const d1Meta = new D1MetadataStore(d1);
+  d1Meta.close = () => {
+    d1.close();
+    return Promise.resolve();
+  };
   const kvStores: Stores = {
-    metadata: new KvMetadataStore(kv, { ownsConnection: true }),
+    metadata: d1Meta,
     blobs: new MemoryBlobStore(),
-    describe: "blobs=memory metadata=kv",
+    describe: "blobs=memory metadata=d1",
   };
   await seedUser(kvStores, "user-kv-reach", REACH_TOKEN);
   for (let i = 0; i < 10; i++) {

@@ -363,16 +363,33 @@ Deno.test("the wrapper propagates the verdict: status-less for our own abort, pe
   assertEquals((timedOut as GeminiTtsError).permanent, false);
   assertStringIncludes((timedOut as Error).message, "timed out after 40ms");
 
-  // A provider verdict: the real status survives, and the failure stays terminal.
+  // A permanent 4xx provider rejection: the real status survives, and the failure stays terminal.
   const rejected = await assertRejects(() =>
-    client(() => Promise.resolve(errorResponse(500)), { retryOn: "none" }).synthesizeNarration({
+    client(() => Promise.resolve(errorResponse(400)), { retryOn: "none" }).synthesizeNarration({
       title: "An Article",
       body: "hello",
     })
   );
-  assertEquals((rejected as GeminiTtsError).status, 500);
+  assertEquals((rejected as GeminiTtsError).status, 400);
   assertEquals((rejected as GeminiTtsError).permanent, true);
   assertStringIncludes((rejected as Error).message, "refusing whole-episode retry");
+
+  // Transient 5xx / 429 provider responses must NEVER be marked permanent.
+  for (const transientStatus of [429, 500, 502, 503, 504]) {
+    const transient = await assertRejects(() =>
+      client(() => Promise.resolve(errorResponse(transientStatus)), { retryOn: "none" })
+        .synthesizeNarration({
+          title: "An Article",
+          body: "hello",
+        })
+    );
+    assertEquals((transient as GeminiTtsError).status, transientStatus);
+    assertEquals(
+      (transient as GeminiTtsError).permanent,
+      false,
+      `HTTP ${transientStatus} must remain transient/retryable`,
+    );
+  }
 
   // A truncation: terminal by CLASS, with no status to carry the verdict. A status-only
   // propagation would have made this retryable and thrice-billed the segment.

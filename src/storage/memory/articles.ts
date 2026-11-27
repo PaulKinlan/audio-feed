@@ -77,6 +77,13 @@ export function createArticlesRepository(
       if (!id) return Promise.resolve(null);
       return host().getArticle(userId, id);
     },
+    findExistingArticleUrls(userId: string, urls: string[]): Promise<Set<string>> {
+      const found = new Set<string>();
+      for (const url of urls) {
+        if (hasArticleByUrl(state, userId, url)) found.add(url);
+      }
+      return Promise.resolve(found);
+    },
     deleteArticle(userId: string, id: string): Promise<void> {
       const key = scoped(userId, id);
       const existing = state.articles.get(key);

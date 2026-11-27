@@ -20,7 +20,6 @@ import {
 } from "./worker/synthesis.ts";
 import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts";
 import type { Stores } from "./config.ts";
-import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
 import { screenErrorMessage, screenErrorName } from "./observability/error_screen.ts";
 import { normaliseRequestHost } from "./http.ts";
@@ -456,14 +455,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   };
 }
 
-// audio-feed-dsn / audio-feed-ncf: Native Deno.cron background jobs on Deno Deploy.
-// Registered at module top-level for Deno Deploy static discovery and single registration.
-registerCronJobs(async () => {
-  const { ctx, synthesizer } = await getBootstrap();
-  return { ctx, synthesizer };
-});
-
-if (import.meta.main || isDeploy) {
+if (import.meta.main) {
   await getBootstrap();
 }
 

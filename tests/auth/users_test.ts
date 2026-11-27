@@ -30,12 +30,19 @@ import {
   tokensMatch,
   updatePreferences,
 } from "../../src/auth/users.ts";
-import { KvMetadataStore } from "../../src/storage/kv.ts";
+import { D1MetadataStore } from "../../src/storage/d1.ts";
+import { createTestD1 } from "../sqlite_d1.ts";
 
 const ADMIN_TOKEN = "s3cret-admin-token-value";
 
 async function setup() {
-  const store = await KvMetadataStore.open(":memory:");
+  const d1 = createTestD1();
+  const store = new D1MetadataStore(d1);
+  const origClose = store.close.bind(store);
+  store.close = async () => {
+    await origClose();
+    d1.close();
+  };
   const admin = await createUser(store, {
     email: "admin@example.com",
     displayName: "Admin",

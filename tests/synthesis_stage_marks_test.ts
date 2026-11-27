@@ -369,7 +369,7 @@ Deno.test("audio-feed-938b: production default stage mark cap formula and cron i
   assertEquals(defaultStageMarkCap(10), 40);
 
   // Assert cron invocation passes no stageMarkCap override:
-  const cronSource = await Deno.readTextFile(new URL("../src/cron.ts", import.meta.url));
+  const cronSource = await Deno.readTextFile(new URL("../src/worker_entry.ts", import.meta.url));
   assert(
     cronSource.includes("runSynthesisBatch(ctx, synthesizer)"),
     "cron synthesis run must pass no stageMarkCap override",

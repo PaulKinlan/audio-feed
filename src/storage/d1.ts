@@ -1,3 +1,10 @@
+/**
+ * Cloudflare D1 (SQLite) implementation of `MetadataStore`.
+ *
+ * Composes the 11 domain repositories under `src/storage/d1/` with full atomic CAS
+ * and transaction semantics matching `KvMetadataStore` and `MemoryMetadataStore`.
+ */
+
 import type {
   ApprovalRecord,
   Article,
@@ -9,9 +16,9 @@ import type {
   SetupLink,
   Source,
   SynthesisCounts,
+  SynthesisSegmentRecord,
   User,
 } from "../types.ts";
-import { SynthesisSegmentRecord } from "../types.ts";
 import type {
   AtomicWrite,
   DownloadCounts,
@@ -31,138 +38,59 @@ import type {
   LogSummary,
   MetadataRepositories,
   MetadataStore,
+  RunKind,
   RunRecord,
 } from "./mod.ts";
-import { createKvCore } from "./kv/core.ts";
-import type { KvCore } from "./kv/core.ts";
-import { pendingKey } from "./kv/core.ts";
-import { createUsersRepository } from "./kv/users.ts";
-import { createSourcesRepository } from "./kv/sources.ts";
-import { createArticlesRepository } from "./kv/articles.ts";
-import { createEpisodesRepository } from "./kv/episodes.ts";
-import { createSegmentsRepository } from "./kv/synthesis-segments.ts";
-import { createOrphanBlobsRepository } from "./kv/orphan-blobs.ts";
-import { createUsageRepository } from "./kv/usage.ts";
-import { createNotificationsRepository } from "./kv/notifications.ts";
-import { createRunsRepository } from "./kv/runs.ts";
-import { createLogsRepository } from "./kv/logs.ts";
-import { createAuthRepository } from "./kv/auth.ts";
+import { createD1Core, type D1Core } from "./d1/core.ts";
+import type { D1DatabaseLike } from "./d1/types.ts";
+import { createD1UsersRepository } from "./d1/users.ts";
+import { createD1SourcesRepository } from "./d1/sources.ts";
+import { createD1ArticlesRepository } from "./d1/articles.ts";
+import { createD1EpisodesRepository } from "./d1/episodes.ts";
+import { createD1SegmentsRepository } from "./d1/synthesis-segments.ts";
+import { createD1OrphanBlobsRepository } from "./d1/orphan-blobs.ts";
+import { createD1UsageRepository } from "./d1/usage.ts";
+import { createD1NotificationsRepository } from "./d1/notifications.ts";
+import { createD1RunsRepository } from "./d1/runs.ts";
+import { createD1LogsRepository } from "./d1/logs.ts";
+import { createD1AuthRepository } from "./d1/auth.ts";
 
 export {
-  ARTICLE_CHUNK_SIZE,
   CorruptArticleError,
+  D1_ARTICLE_CHUNK_BYTES,
   descendingKey,
-  EPISODE_READ_BATCH,
   isCorruptArticleError,
-} from "./kv/core.ts";
+} from "./d1/core.ts";
+export type { D1DatabaseLike, D1PreparedStatementLike, D1ResultLike } from "./d1/types.ts";
 
-export class KvMetadataStore implements MetadataStore {
-  #kv: Deno.Kv;
-  #ownsConnection: boolean;
-  #core: KvCore;
+interface AtomicRow {
+  value: string;
+  version: number;
+  expires_at: number | null;
+}
 
-  /**
-   * The per-domain implementations (audio-feed-8r1e). Each member is the object that owns
-   * that entity's keys and logic, not a view of this store: `repositories.episodes.getEpisode`
-   * and `getEpisode` below are the same call, but the work happens in
-   * `src/storage/kv/episodes.ts`.
-   */
+export class D1MetadataStore implements MetadataStore {
+  #core: D1Core;
   readonly repositories: MetadataRepositories;
 
-  constructor(kv: Deno.Kv, opts?: { ownsConnection?: boolean }) {
-    this.#kv = kv;
-    this.#ownsConnection = opts?.ownsConnection ?? false;
-    this.#core = createKvCore(kv);
+  constructor(db: D1DatabaseLike) {
+    this.#core = createD1Core(db);
     this.repositories = {
-      users: createUsersRepository(this.#core, () => this),
-      sources: createSourcesRepository(this.#core, () => this),
-      articles: createArticlesRepository(this.#core, () => this),
-      episodes: createEpisodesRepository(this.#core, () => this),
-      segments: createSegmentsRepository(this.#core, () => this),
-      orphanBlobs: createOrphanBlobsRepository(this.#core, () => this),
-      usage: createUsageRepository(this.#core, () => this),
-      notifications: createNotificationsRepository(this.#core, () => this),
-      logs: createLogsRepository(this.#core, () => this),
-      runs: createRunsRepository(this.#core, () => this),
-      auth: createAuthRepository(this.#core, () => this),
+      users: createD1UsersRepository(this.#core, () => this),
+      sources: createD1SourcesRepository(this.#core, () => this),
+      articles: createD1ArticlesRepository(this.#core, () => this),
+      episodes: createD1EpisodesRepository(this.#core, () => this),
+      segments: createD1SegmentsRepository(this.#core, () => this),
+      orphanBlobs: createD1OrphanBlobsRepository(this.#core, () => this),
+      usage: createD1UsageRepository(this.#core, () => this),
+      notifications: createD1NotificationsRepository(this.#core, () => this),
+      runs: createD1RunsRepository(this.#core, () => this),
+      logs: createD1LogsRepository(this.#core, () => this),
+      auth: createD1AuthRepository(this.#core, () => this),
     };
   }
 
-  static async open(path?: string): Promise<KvMetadataStore> {
-    const kv = await Deno.openKv(path);
-    const store = new KvMetadataStore(kv, { ownsConnection: true });
-    await store.#ensurePendingEpisodesIndexed();
-    return store;
-  }
-
-  /**
-   * One-time backfill for pre-existing pending and synthesizing episodes (audio-feed-7li).
-   * Scans ["episode"] prefix and ensures ["pending_episodes"] and ["synthesizing_episodes"]
-   * index pointers exist for any legacy un-indexed episodes.
-   */
-
-  async reindexPendingEpisodes(): Promise<{ scanned: number; indexed: number }> {
-    let scanned = 0;
-    let indexed = 0;
-    for await (const entry of this.#kv.list<Episode>({ prefix: ["episode"] })) {
-      scanned++;
-      const ep = entry.value;
-      if (!ep) continue;
-      if (ep.status === "pending") {
-        // Priority-aware, so a fresh backfill never recreates the single-queue shape (15e).
-        const indexKey: Deno.KvKey = pendingKey(ep);
-        if (!(await this.#kv.get(indexKey)).value) {
-          await this.#kv.set(indexKey, { userId: ep.userId, id: ep.id });
-          indexed++;
-        }
-        // A pre-15e pointer has no priority segment, and a prefix scan matches BOTH shapes - so
-        // leaving it would list the same episode twice in one tick. Removed only after its
-        // replacement is in place.
-        const legacyKey: Deno.KvKey = ["pending_episodes", ep.createdAt, ep.id];
-        // `.value`, not the response: Deno KV's get() always resolves to an envelope object, so
-        // `if (await get(k))` is true whether or not the key exists — which counted a deletion
-        // that never happened. The audio-feed-7li test caught that.
-        if ((await this.#kv.get(legacyKey)).value) {
-          await this.#kv.delete(legacyKey);
-          indexed++;
-        }
-      } else if (ep.status === "synthesizing") {
-        const indexKey: Deno.KvKey = ["synthesizing_episodes", ep.createdAt, ep.id];
-        const existing = await this.#kv.get(indexKey);
-        if (!existing.value) {
-          await this.#kv.set(indexKey, { userId: ep.userId, id: ep.id });
-          indexed++;
-        }
-      }
-    }
-    return { scanned, indexed };
-  }
-
-  async #ensurePendingEpisodesIndexed(): Promise<void> {
-    const migrationKey: Deno.KvKey = ["migration", "pending_episodes_reindex_v1"];
-    if (!(await this.#kv.get(migrationKey)).value) {
-      await this.reindexPendingEpisodes();
-      await this.#kv.set(migrationKey, true);
-    }
-
-    // audio-feed-15e: a second marker, run after the first, so an instance upgrading across both
-    // gets its pointers rewritten into priority segments rather than merely backfilled.
-    const priorityKey: Deno.KvKey = ["migration", "pending_episodes_priority_v2"];
-    if ((await this.#kv.get(priorityKey)).value) return;
-    await this.reindexPendingEpisodes();
-    await this.#kv.set(priorityKey, true);
-  }
-
-  // -- users ----------------------------------------------------------------
-
-  /**
-   * Atomic first write. The `check`s are the point: a read-then-write cannot
-   * stop two concurrent signups for one email from both observing "free" and
-   * both committing. Resolves `false` rather than throwing so the caller owns
-   * the wording of the duplicate error.
-   */
-
-  // -- users --
+  // -- users -----------------------------------------------------------------
   insertUser(user: User): Promise<boolean> {
     return this.repositories.users.insertUser(user);
   }
@@ -194,7 +122,8 @@ export class KvMetadataStore implements MetadataStore {
   ): Promise<"changed" | "unchanged" | "last-admin" | "missing"> {
     return this.repositories.users.setAdminRole(userId, isAdmin, by);
   }
-  // -- sources --
+
+  // -- sources ---------------------------------------------------------------
   putSource(source: Source): Promise<void> {
     return this.repositories.sources.putSource(source);
   }
@@ -207,7 +136,8 @@ export class KvMetadataStore implements MetadataStore {
   deleteSource(userId: string, id: string): Promise<void> {
     return this.repositories.sources.deleteSource(userId, id);
   }
-  // -- articles --
+
+  // -- articles --------------------------------------------------------------
   putArticle(article: Article): Promise<void> {
     return this.repositories.articles.putArticle(article);
   }
@@ -229,10 +159,14 @@ export class KvMetadataStore implements MetadataStore {
   findArticleByUrl(userId: string, url: string): Promise<Article | null> {
     return this.repositories.articles.findArticleByUrl(userId, url);
   }
+  findExistingArticleUrls(userId: string, urls: string[]): Promise<Set<string>> {
+    return this.repositories.articles.findExistingArticleUrls(userId, urls);
+  }
   deleteArticle(userId: string, id: string): Promise<void> {
     return this.repositories.articles.deleteArticle(userId, id);
   }
-  // -- episodes --
+
+  // -- episodes --------------------------------------------------------------
   putEpisode(episode: Episode): Promise<void> {
     return this.repositories.episodes.putEpisode(episode);
   }
@@ -245,7 +179,6 @@ export class KvMetadataStore implements MetadataStore {
   backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean> {
     return this.repositories.episodes.backfillEpisodeSourceTitle(userId, id, sourceTitle);
   }
-
   updateEpisodeAudioKeyIfCurrent(
     userId: string,
     id: string,
@@ -268,9 +201,7 @@ export class KvMetadataStore implements MetadataStore {
   listPendingEpisodes(opts?: ListPendingOptions): Promise<ListPendingResult> {
     return this.repositories.episodes.listPendingEpisodes(opts);
   }
-  listSynthesizingEpisodes(
-    opts?: ListSynthesizingOptions,
-  ): Promise<ListSynthesizingResult> {
+  listSynthesizingEpisodes(opts?: ListSynthesizingOptions): Promise<ListSynthesizingResult> {
     return this.repositories.episodes.listSynthesizingEpisodes(opts);
   }
   claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
@@ -281,11 +212,7 @@ export class KvMetadataStore implements MetadataStore {
     owner: string,
     ...args: E extends { status: "ready" } ? [billing: EpisodeBilling] : [billing?: EpisodeBilling]
   ): Promise<boolean> {
-    return (this.repositories.episodes.completeEpisode as (
-      ep: Episode,
-      ow: string,
-      b?: EpisodeBilling,
-    ) => Promise<boolean>)(episode, owner, args[0]);
+    return this.repositories.episodes.completeEpisode(episode, owner, ...args);
   }
   touchEpisodeClaim(
     userId: string,
@@ -295,6 +222,7 @@ export class KvMetadataStore implements MetadataStore {
       phase?: string;
       now?: string;
       scriptTurns?: Array<{ speaker: string; text: string }>;
+      bytesAttempted?: number;
     },
   ): Promise<boolean> {
     return this.repositories.episodes.touchEpisodeClaim(userId, episodeId, owner, update);
@@ -307,7 +235,6 @@ export class KvMetadataStore implements MetadataStore {
       phase?: string;
       now?: string;
       advanceAttempts?: boolean;
-      /** Pure pre-turn refusal: count the refusal and return the claim own increment (attempts stays monotone) (audio-feed-refcap). */
       incrementRefusals?: boolean;
       uploadRetry?: number;
       incrementUploadRetry?: boolean;
@@ -324,7 +251,8 @@ export class KvMetadataStore implements MetadataStore {
   cancelRegeneration(userId: string, id: string): Promise<boolean> {
     return this.repositories.episodes.cancelRegeneration(userId, id);
   }
-  // -- segments --
+
+  // -- segments --------------------------------------------------------------
   reserveSynthesisSegment(
     userId: string,
     episodeId: string,
@@ -365,7 +293,8 @@ export class KvMetadataStore implements MetadataStore {
   clearSynthesisSegments(userId: string, episodeId: string): Promise<void> {
     return this.repositories.segments.clearSynthesisSegments(userId, episodeId);
   }
-  // -- orphanBlobs --
+
+  // -- orphan blobs ----------------------------------------------------------
   recordOrphanBlob(key: string): Promise<void> {
     return this.repositories.orphanBlobs.recordOrphanBlob(key);
   }
@@ -375,7 +304,8 @@ export class KvMetadataStore implements MetadataStore {
   forgetOrphanBlob(key: string): Promise<void> {
     return this.repositories.orphanBlobs.forgetOrphanBlob(key);
   }
-  // -- usage --
+
+  // -- usage -----------------------------------------------------------------
   recordDownload(userId: string | null): Promise<void> {
     return this.repositories.usage.recordDownload(userId);
   }
@@ -388,13 +318,14 @@ export class KvMetadataStore implements MetadataStore {
   getSynthesisCounts(today?: string): Promise<SynthesisCounts> {
     return this.repositories.usage.getSynthesisCounts(today);
   }
-  getDailySynthesisCount(day: string): Promise<number> {
-    return this.repositories.usage.getDailySynthesisCount(day);
-  }
   getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
     return this.repositories.usage.getUserDailySynthesisCount(userId, day);
   }
-  // -- notifications --
+  getDailySynthesisCount(day: string): Promise<number> {
+    return this.repositories.usage.getDailySynthesisCount(day);
+  }
+
+  // -- notifications ---------------------------------------------------------
   queueNotification(notification: OutboxNotification): Promise<void> {
     return this.repositories.notifications.queueNotification(notification);
   }
@@ -404,14 +335,16 @@ export class KvMetadataStore implements MetadataStore {
   ackNotification(id: string): Promise<boolean> {
     return this.repositories.notifications.ackNotification(id);
   }
-  // -- runs --
+
+  // -- runs ------------------------------------------------------------------
   recordRun(record: RunRecord): Promise<void> {
     return this.repositories.runs.recordRun(record);
   }
-  listRuns(limit?: number, kind?: RunRecord["kind"]): Promise<RunRecord[]> {
+  listRuns(limit?: number, kind?: RunKind): Promise<RunRecord[]> {
     return this.repositories.runs.listRuns(limit, kind);
   }
-  // -- logs (audio-feed-wzv9) --
+
+  // -- logs ------------------------------------------------------------------
   appendLog(record: Omit<LogRecord, "seq">): Promise<LogRecord | null> {
     return this.repositories.logs.appendLog(record);
   }
@@ -434,7 +367,8 @@ export class KvMetadataStore implements MetadataStore {
   pruneLogs(before: Date): Promise<number> {
     return this.repositories.logs.pruneLogs(before);
   }
-  // -- auth --
+
+  // -- auth ------------------------------------------------------------------
   putSession(session: Session): Promise<void> {
     return this.repositories.auth.putSession(session);
   }
@@ -472,37 +406,63 @@ export class KvMetadataStore implements MetadataStore {
     return this.repositories.auth.consumeChallenge(challenge);
   }
 
+  // -- shared counters / rate limiters ---------------------------------------
   async atomicUpdate<T>(
     key: string,
     mutate: (current: T | null) => T | null,
     ttlMs?: number,
   ): Promise<AtomicWrite<T>> {
-    const kvKey: Deno.KvKey = ["atomic", key];
     for (let attempt = 0; attempt < 32; attempt++) {
-      const entry = await this.#kv.get<T>(kvKey);
-      const next = mutate(entry.value);
-      if (next === null) return { value: entry.value, committed: false };
-      const commit = ttlMs === undefined
-        ? await this.#kv.atomic().check(entry).set(kvKey, next).commit()
-        : await this.#kv.atomic().check(entry).set(kvKey, next, { expireIn: ttlMs }).commit();
-      if (commit.ok) return { value: next, committed: true };
-      // Jittered backoff, capped low: without it a burst of writers that all
-      // read the same versionstamp re-collides in lockstep until the retries
-      // run out, which is how this path got exercised in the first place.
+      const now = Date.now();
+      const row = await this.#core.db.prepare(
+        `SELECT value, version, expires_at FROM atomic_kv WHERE key = ?`,
+      ).bind(key).first<AtomicRow>();
+
+      const isExpired = row !== null && row.expires_at !== null && Number(row.expires_at) <= now;
+      const current = row && !isExpired ? (JSON.parse(row.value) as T) : null;
+      const next = mutate(current);
+      if (next === null) return { value: current, committed: false };
+
+      const expiresAt = ttlMs === undefined ? null : now + ttlMs;
+      const nextJson = JSON.stringify(next);
+
+      const res = !row || isExpired
+        ? await this.#core.db.prepare(
+          `INSERT INTO atomic_kv (key, value, version, expires_at)
+           VALUES (?, ?, 1, ?)
+           ON CONFLICT(key) DO UPDATE SET
+             value = excluded.value,
+             version = atomic_kv.version + 1,
+             expires_at = excluded.expires_at
+           WHERE atomic_kv.expires_at IS NOT NULL AND atomic_kv.expires_at <= ?`,
+        ).bind(key, nextJson, expiresAt, now).run()
+        : await this.#core.db.prepare(
+          `UPDATE atomic_kv
+           SET value = ?, version = ?, expires_at = ?
+           WHERE key = ? AND version = ?`,
+        ).bind(nextJson, row.version + 1, expiresAt, key, row.version).run();
+
+      if ((res.meta.changes ?? 0) === 1) {
+        return { value: next, committed: true };
+      }
+
       if (attempt >= 2) {
         await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 5)));
       }
     }
-    return { value: (await this.#kv.get<T>(kvKey)).value, committed: false };
+
+    const finalRow = await this.#core.db.prepare(
+      `SELECT value, expires_at FROM atomic_kv WHERE key = ?`,
+    ).bind(key).first<{ value: string; expires_at: number | null }>();
+    const expired = finalRow !== null && finalRow.expires_at !== null &&
+      Number(finalRow.expires_at) <= Date.now();
+    return {
+      value: finalRow && !expired ? (JSON.parse(finalRow.value) as T) : null,
+      committed: false,
+    };
   }
 
-  /**
-   * Read and delete in one compare-and-swap: of two concurrent consumers the
-   * second commit fails its check, so exactly one gets the value.
-   */
-
   close(): Promise<void> {
-    if (this.#ownsConnection) this.#kv.close();
     return Promise.resolve();
   }
 }

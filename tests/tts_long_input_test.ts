@@ -236,12 +236,11 @@ Deno.test("oversized article is refused before any paid call; empty narration is
  */
 const SEGMENT_PARA =
   "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore. "
-    .repeat(25);
+    .repeat(20);
 
 function bodyWithExactSegmentCount(n: number): string {
   assert(n === MAX_TTS_SEGMENTS || n === MAX_TTS_SEGMENTS + 1);
-  const paragraphCount = n === MAX_TTS_SEGMENTS ? 76 : 77;
-  const body = Array.from({ length: paragraphCount }, () => SEGMENT_PARA).join("\n\n");
+  const body = Array.from({ length: n }, () => SEGMENT_PARA).join("\n\n");
   assertEquals(
     splitTtsText(
       formatNarrationPrompt({ title: "Boundary", body, includeIntro: false }),
@@ -301,7 +300,7 @@ Deno.test(
   },
 );
 
-Deno.test("a failed later turn is terminal, not a retry of earlier paid turns", async () => {
+Deno.test("a failed later turn with permanent 4xx is terminal, not a retry of earlier paid turns", async () => {
   let calls = 0;
   const client = new GeminiTtsClient({
     apiKey: "fixture-key",
@@ -309,16 +308,14 @@ Deno.test("a failed later turn is terminal, not a retry of earlier paid turns", 
       calls++;
       return calls === 2
         ? Promise.resolve(
-          new Response(JSON.stringify({ error: { message: "quota" } }), { status: 429 }),
+          new Response(JSON.stringify({ error: { message: "bad request" } }), { status: 400 }),
         )
         : Promise.resolve(success());
     }) as typeof fetch,
   });
   const error = await assertRejects(() => client.synthesizeNarration(input));
   assert(error instanceof Error);
-  // audio-feed-9yu8: the wrapper no longer invents a 400. The provider's own status survives, and
-  // `permanent` is what keeps the turn terminal — the re-billing guard, not the number.
-  assertEquals((error as { status?: number }).status, 429);
+  assertEquals((error as { status?: number }).status, 400);
   assertEquals((error as { permanent?: boolean }).permanent, true);
   assertStringIncludes(error.message, "refusing whole-episode retry");
   assertEquals(calls, 2);

@@ -234,6 +234,14 @@ export interface Source {
   lastPolledAt?: string;
   /** Next feed index to examine when a bounded unseen scan could not finish. */
   feedScanOffset?: number;
+  /** HTTP ETag from the last successful feed fetch for conditional GET (`If-None-Match`). */
+  etag?: string;
+  /** HTTP Last-Modified header from the last successful feed fetch (`If-Modified-Since`). */
+  lastModified?: string;
+  /** Feed/channel artwork URL parsed from `<itunes:image>` or `<image><url>`. */
+  imageUrl?: string;
+  /** Cached R2 blob key for this source's raster show artwork (`art/<userId>/source/<sourceId>.png`). */
+  artworkKey?: string;
   lastPollError?: string;
 }
 
@@ -256,6 +264,10 @@ export interface Article {
   /** Clean, reader-mode text (markdown or plain) ready for TTS. */
   content: string;
   excerpt?: string;
+  /** Lead / OpenGraph image URL discovered during article extraction (public http/https only). */
+  imageUrl?: string;
+  /** Ordered section headings discovered during extraction, used for chapter boundaries. */
+  headings?: string[];
   ingestedAt: string;
   /** Number of chunks stored in KV when content exceeds ARTICLE_CHUNK_SIZE (audio-feed-cei). */
   chunkCount?: number;
@@ -266,6 +278,13 @@ export interface Article {
 // ---------------------------------------------------------------------------
 
 export type EpisodeStatus = "pending" | "synthesizing" | "ready" | "failed";
+
+export interface EpisodeChapter {
+  /** Start offset in seconds from the beginning of the audio file. */
+  startTime: number;
+  /** Human-readable chapter title. */
+  title: string;
+}
 
 export interface Episode {
   id: string;
@@ -369,6 +388,10 @@ export interface Episode {
    * with the exact same turn text, matching segment hashes for audio reuse.
    */
   scriptTurns?: Array<{ speaker: string; text: string }>;
+  /** Cached R2 blob key for this episode's raster cover art (`art/<userId>/episode/<episodeId>.png`). */
+  artworkKey?: string;
+  /** Chapter markers aligned to synthesized segment boundaries (Podcasting 2.0 JSON Chapters). */
+  chapters?: EpisodeChapter[];
   /**
    * Terminal audio upload retries recorded by the worker (audio-feed-lqd6).
    * Bounded by maxUploadRetries so budget-interrupted uploads do not churn forever.

@@ -711,7 +711,7 @@ Deno.test("audio-feed-vqu4: long synthesis completes across multiple bounded tic
   await stores.metadata.deleteEpisode("user-1", "episode-1");
 
   let scriptCalls = 0;
-  const textChunk = (id: number) => `Segment ${id} `.repeat(250);
+  const textChunk = (id: number) => `Segment ${id} `.repeat(150);
   const mockScriptGenerator = () => {
     scriptCalls++;
     return Promise.resolve({
@@ -2527,7 +2527,7 @@ Deno.test("audio-feed-jb99: (1) cached turns restore under low remaining budget 
   const { ctx, stores } = await setupEnv();
   await stores.metadata.deleteEpisode("user-1", "episode-1");
 
-  const textChunk = (id: number) => `Segment ${id} `.repeat(250);
+  const textChunk = (id: number) => `Segment ${id} `.repeat(150);
   const mockScriptGenerator = () =>
     Promise.resolve({
       turns: [

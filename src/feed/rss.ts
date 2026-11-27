@@ -197,6 +197,14 @@ function itemXml(episode: Episode, title: string): string {
       }</itunes:episodeType>`,
     );
   }
+  if (episode.imageUrl) {
+    lines.push(`      <itunes:image href="${escapeXml(episode.imageUrl)}"/>`);
+  }
+  if (episode.chaptersUrl) {
+    lines.push(
+      `      <podcast:chapters url="${escapeXml(episode.chaptersUrl)}" type="application/json+chapters"/>`,
+    );
+  }
 
   lines.push(
     `      <enclosure url="${escapeXml(episode.audioUrl)}" length="${

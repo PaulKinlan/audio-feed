@@ -241,6 +241,9 @@ export class MemoryMetadataStore implements MetadataStore {
   findArticleByUrl(userId: string, url: string): Promise<Article | null> {
     return this.repositories.articles.findArticleByUrl(userId, url);
   }
+  findExistingArticleUrls(userId: string, urls: string[]): Promise<Set<string>> {
+    return this.repositories.articles.findExistingArticleUrls(userId, urls);
+  }
   deleteArticle(userId: string, id: string): Promise<void> {
     return this.repositories.articles.deleteArticle(userId, id);
   }

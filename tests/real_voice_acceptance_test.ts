@@ -74,8 +74,8 @@ Deno.test("the worst case is the provider's own caps, ~$9.70 promotional (audio-
     "worst-case sum",
   );
   assert(
-    worst.totalUsd > 9 && worst.totalUsd < 10,
-    `worst case sits near $9.70, got ${worst.totalUsd}`,
+    worst.totalUsd > 14 && worst.totalUsd < 15,
+    `worst case sits near $14.55 at 96 segments, got ${worst.totalUsd}`,
   );
 });
 

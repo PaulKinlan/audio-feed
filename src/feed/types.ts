@@ -43,6 +43,10 @@ export interface Episode {
   byteLength?: number;
   mimeType?: string;
   durationSeconds?: number;
+  /** Per-episode cover art URL emitted as `<itunes:image>`. */
+  imageUrl?: string;
+  /** Podcasting 2.0 JSON Chapters URL emitted as `<podcast:chapters>`. */
+  chaptersUrl?: string;
   season?: number;
   episodeNumber?: number;
 }

@@ -20,7 +20,8 @@
 import { assert, assertEquals } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { MemoryBlobStore } from "../src/storage/memory.ts";
-import { KvMetadataStore } from "../src/storage/kv.ts";
+import { D1MetadataStore } from "../src/storage/d1.ts";
+import { createTestD1 } from "./sqlite_d1.ts";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
@@ -71,19 +72,20 @@ const ADAPTERS: { name: string; create: () => Promise<StoresUnderTest> }[] = [
     },
   },
   {
-    name: "KvMetadataStore",
-    create: async () => {
-      const kv = await Deno.openKv(":memory:");
-      return {
+    name: "D1MetadataStore",
+    create: () => {
+      const d1 = createTestD1();
+      return Promise.resolve({
         stores: {
-          metadata: new KvMetadataStore(kv, { ownsConnection: true }),
+          metadata: new D1MetadataStore(d1),
           blobs: new MemoryBlobStore(),
-          describe: "metadata=kv blobs=memory",
+          describe: "metadata=d1 blobs=memory",
         },
-        close: async () => {
-          await kv.close();
+        close: () => {
+          d1.close();
+          return Promise.resolve();
         },
-      };
+      });
     },
   },
 ];
@@ -228,17 +230,12 @@ row(
     const spendingThenFailingClient = {
       async synthesizeNarration(_input: NarrationInput, options: SynthesisOptions) {
         call++;
-        if (call % 2 === 1) {
-          // Attempt 1 of the claim: preflight passes, the paid turn IS initiated, then the
-          // provider burns 80s and fails transiently (500 → retryable, isPermanent false).
-          await options.resume?.prepare("segment-1", "voice-a");
-          await time.advance(80_000);
-          throw Object.assign(new Error("provider exploded"), { status: 500 });
-        }
-        // Attempt 2 of the claim: only 10s remain; the preflight refuses before turn 1 of
-        // this attempt — but the claim DID spend, so the refusal is not a pure refusal.
+        // Each tick: preflight passes, the paid turn IS initiated, then the provider burns
+        // 80s and fails transiently (500 -> retryable). The worker yields cleanly instead of
+        // burning a doomed same-tick retry, while counting the spending claim against attempts.
         await options.resume?.prepare("segment-1", "voice-a");
-        return fakeAudio();
+        await time.advance(80_000);
+        throw Object.assign(new Error("provider exploded"), { status: 500 });
       },
     };
     const synth = createGeminiSynthesizer(ctx, {
@@ -286,7 +283,7 @@ row(
     const spendSpendRefuseClient = {
       async synthesizeNarration(_input: NarrationInput, options: SynthesisOptions) {
         call++;
-        if (call <= 4) {
+        if (call <= 2) {
           await options.resume?.prepare("segment-1", "voice-a");
           await time.advance(80_000);
           throw Object.assign(new Error("provider exploded"), { status: 500 });

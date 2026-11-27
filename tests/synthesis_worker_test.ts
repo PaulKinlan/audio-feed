@@ -252,7 +252,7 @@ Deno.test("a status-less deadline failure is retried at the episode level (audio
   assertStringIncludes(episode?.error ?? "", "mode direct");
 });
 
-Deno.test("a provider verdict under the wrapper is never retried at the episode level (audio-feed-9yu8)", async () => {
+Deno.test("a permanent provider 4xx verdict under the wrapper is never retried at the episode level (audio-feed-9yu8)", async () => {
   const { ctx, stores } = await queued();
   let calls = 0;
   const client = new GeminiTtsClient({
@@ -260,7 +260,7 @@ Deno.test("a provider verdict under the wrapper is never retried at the episode 
     fetchFn: (() => {
       calls++;
       return Promise.resolve(
-        new Response(JSON.stringify({ error: { message: "quota" } }), { status: 500 }),
+        new Response(JSON.stringify({ error: { message: "invalid request" } }), { status: 400 }),
       );
     }) as typeof fetch,
     retryOn: "none",
@@ -273,11 +273,11 @@ Deno.test("a provider verdict under the wrapper is never retried at the episode 
   assertEquals(
     calls,
     1,
-    "the re-billing guard must still refuse an episode retry for a provider 500",
+    "the re-billing guard must still refuse an episode retry for a permanent provider 400",
   );
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "failed");
-  assertStringIncludes(episode?.error ?? "", "provider status 500");
+  assertStringIncludes(episode?.error ?? "", "provider status 400");
 });
 
 Deno.test("code blocks are stripped before the byte budget is measured (audio-feed-n19w)", async () => {

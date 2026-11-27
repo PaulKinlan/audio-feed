@@ -528,6 +528,8 @@ export async function enqueueInboxArticle(
     publishedAt: article.publishedAt ?? undefined,
     content: article.body,
     excerpt: article.lead,
+    ...(article.imageUrl ? { imageUrl: article.imageUrl } : {}),
+    ...(article.headings?.length ? { headings: article.headings } : {}),
     ingestedAt: now,
   };
   const episode: Episode = {
@@ -608,6 +610,16 @@ export async function enqueueInboxArticle(
       const screenedLogErr = screenErrorForLogging(logErr);
       console.warn(
         `[audio-feed] failed to record source_seed_failed log for episode ${episodeId}: ${screenedLogErr.message}`,
+      );
+    }
+  }
+  if (ctx.triggerSynthesis) {
+    try {
+      await ctx.triggerSynthesis(episodeId, user.id);
+    } catch (err) {
+      const screened = screenErrorForLogging(err);
+      console.warn(
+        `[audio-feed] workflow trigger failed for episode ${episodeId}: ${screened.message}`,
       );
     }
   }

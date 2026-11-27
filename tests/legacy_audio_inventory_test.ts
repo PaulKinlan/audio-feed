@@ -38,7 +38,8 @@ import {
   releaseMigrationLock,
   renewMigrationLock,
 } from "../src/storage/legacy_audio.ts";
-import { KvMetadataStore } from "../src/storage/kv.ts";
+import { D1MetadataStore } from "../src/storage/d1.ts";
+import { createTestD1 } from "./sqlite_d1.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { bootstrap } from "../src/server.ts";
 
@@ -1149,10 +1150,10 @@ Deno.test(
     // expiry path (untested by design, see the doc comment) would invalidate the cache
     // and this row would red - the bound that would be violated is the one this comment
     // names.
-    const kv = await Deno.openKv(":memory:");
+    const kv = createTestD1();
     try {
-      const handleA = new KvMetadataStore(kv, { ownsConnection: false });
-      const handleB = new KvMetadataStore(kv, { ownsConnection: false });
+      const handleA = new D1MetadataStore(kv);
+      const handleB = new D1MetadataStore(kv);
       await handleA.putUser(makeUser({ id: "alice", status: "approved" }));
       await handleA.putEpisode(
         makeEpisode({

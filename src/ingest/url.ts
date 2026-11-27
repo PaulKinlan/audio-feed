@@ -4,10 +4,10 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { LookupFunction } from "node:net";
 import { Readable } from "node:stream";
-import { Readability } from "npm:@mozilla/readability@0.6.0";
-import ipaddr from "npm:ipaddr.js@2.2.0";
-import { parseHTML } from "npm:linkedom@0.18.12";
-import pdfParse from "npm:pdf-parse@1.1.1";
+import { Readability } from "@mozilla/readability";
+import ipaddr from "ipaddr.js";
+import { parseHTML } from "linkedom";
+import { getDocumentProxy, getMeta } from "unpdf";
 import { type AudioMode, isAudioMode, isSynthesisAuthorized, type User } from "../types.ts";
 
 export interface ExtractedArticle {
@@ -17,6 +17,10 @@ export interface ExtractedArticle {
   publishedAt: string | null;
   lead: string;
   body: string;
+  /** Lead / OpenGraph image URL (public http/https only), when present. */
+  imageUrl?: string | null;
+  /** Ordered section headings (`h1`/`h2`/`h3`) extracted from article HTML for chaptering. */
+  headings?: string[];
 }
 
 export type IngestPayload =
@@ -108,8 +112,45 @@ export type Transport = (
   init?: { headers?: Record<string, string> },
 ) => Promise<Response>;
 
+function isCloudflareWorkers(): boolean {
+  return typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers";
+}
+
+/**
+ * Cloudflare Workers fetch transport: outbound Workers `fetch` blocks private/RFC1918/loopback
+ * addresses at the platform edge, and `fetchDocument` validates every redirect hop via `articleUrl`.
+ */
+export const requestPublicFetch: Transport = async (url, signal, init) => {
+  const res = await fetch(url.href, {
+    method: "GET",
+    redirect: "manual",
+    signal,
+    headers: {
+      "Accept": "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8",
+      "Accept-Encoding": "gzip, identity",
+      "User-Agent":
+        "AudioFeed/1.0 (podcast generator; +https://github.com/PaulKinlan/audio-feed)",
+      ...(init?.headers ?? {}),
+    },
+  });
+  const headers = new Headers();
+  for (const name of ["content-type", "content-length", "location"]) {
+    const value = res.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  // Workers fetch transparently decompresses gzip/deflate; do not re-decompress downstream.
+  if ([204, 205, 304].includes(res.status)) {
+    await res.body?.cancel();
+    return new Response(null, { status: res.status, headers });
+  }
+  return new Response(res.body, { status: res.status, headers });
+};
+
 /** Node's HTTP client exposes lookup; native Deno fetch would resolve again after validation. */
 export const requestPublic: Transport = (url, signal, init) => {
+  if (isCloudflareWorkers()) {
+    return requestPublicFetch(url, signal, init);
+  }
   return new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
       method: "GET",
@@ -315,7 +356,8 @@ export async function fetchArticle(
  * is XML, never HTML. HTML is refused deliberately — parsing a random web page as
  * a feed would turn "subscribe to this URL" into a content-scraping primitive.
  */
-const MAX_FEED_BYTES = 2 * 1024 * 1024;
+export const MAX_FEED_BYTES = 5 * 1024 * 1024;
+export const FEED_TIMEOUT_MS = 30_000;
 const FEED_CONTENT_TYPE =
   /^(application\/(rss|atom)\+xml|application\/xml|text\/xml|text\/rss|text\/plain|application\/octet-stream)(?:;|$)/i;
 
@@ -325,22 +367,32 @@ export async function fetchFeedDocument(
     transport?: Transport;
     signal?: AbortSignal;
     timeoutMs?: number;
+    etag?: string;
+    lastModified?: string;
   } = {},
-): Promise<{ xml: string; url: string }> {
+): Promise<{
+  xml: string;
+  url: string;
+  notModified?: boolean;
+  etag?: string;
+  lastModified?: string;
+}> {
   let url = articleUrl(input);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? FEED_TIMEOUT_MS);
   const signal = options.signal
     ? AbortSignal.any([controller.signal, options.signal])
     : controller.signal;
   try {
     for (let hop = 0; hop <= 5; hop++) {
-      const response = await (options.transport ?? requestPublic)(url, signal, {
-        headers: {
-          "Accept":
-            "application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain;q=0.8, */*;q=0.5",
-        },
-      });
+      const headers: Record<string, string> = {
+        "Accept":
+          "application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain;q=0.8, */*;q=0.5",
+      };
+      if (options.etag) headers["If-None-Match"] = options.etag;
+      if (options.lastModified) headers["If-Modified-Since"] = options.lastModified;
+
+      const response = await (options.transport ?? requestPublic)(url, signal, { headers });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         await response.body?.cancel();
         const location = response.headers.get("location");
@@ -350,6 +402,16 @@ export async function fetchFeedDocument(
         // Re-resolved through the public lookup, exactly as fetchArticle does.
         url = articleUrl(new URL(location, url).href);
         continue;
+      }
+      if (response.status === 304) {
+        await response.body?.cancel();
+        return {
+          xml: "",
+          url: url.href,
+          notModified: true,
+          etag: response.headers.get("etag") ?? options.etag,
+          lastModified: response.headers.get("last-modified") ?? options.lastModified,
+        };
       }
       if (!response.ok) {
         await response.body?.cancel();
@@ -363,7 +425,7 @@ export async function fetchFeedDocument(
       }
       if (Number(response.headers.get("content-length")) > MAX_FEED_BYTES) {
         await response.body?.cancel();
-        throw new IngestError(413, "Feed exceeds the 2 MiB size limit.");
+        throw new IngestError(413, "Feed exceeds the 5 MiB size limit.");
       }
 
       let decompressedBody: ReadableStream<Uint8Array> | null;
@@ -394,7 +456,13 @@ export async function fetchFeedDocument(
       ) {
         throw new IngestError(422, "That URL is not an uncompressed RSS or Atom feed.");
       }
-      return { xml, url: url.href };
+      return {
+        xml,
+        url: url.href,
+        notModified: false,
+        etag: response.headers.get("etag") ?? undefined,
+        lastModified: response.headers.get("last-modified") ?? undefined,
+      };
     }
     throw new IngestError(422, "Feed could not be fetched.");
   } catch (error) {
@@ -673,7 +741,9 @@ function withinFigcaption(node: Element): boolean {
 }
 
 /** The first paragraph substantial enough to be the article's opening line, if any. */
-function firstSubstantialParagraph(root: ParentNode): Element | null {
+function firstSubstantialParagraph(
+  root: { querySelectorAll(selectors: "p"): Iterable<Element> },
+): Element | null {
   for (const p of root.querySelectorAll("p")) {
     if (withinFigcaption(p)) continue;
     if (clean(p.textContent).length >= SUBSTANTIAL_PARAGRAPH_CHARS) return p;
@@ -730,6 +800,19 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
     throw new IngestError(413, "Article exceeds the 2 MiB size limit.");
   }
   const { document } = parseHTML(html);
+  // Extract lead artwork before Readability mutates the DOM.
+  let imageUrl: string | null = null;
+  const rawImg = document.querySelector(
+    'meta[property="og:image"], meta[name="twitter:image"], meta[property="twitter:image"]',
+  )?.getAttribute("content")?.trim();
+  if (rawImg && !url.startsWith("upload://")) {
+    try {
+      const resolved = new URL(rawImg, url).href;
+      imageUrl = articleUrl(resolved).href;
+    } catch {
+      imageUrl = null;
+    }
+  }
   const date = document.querySelector(
     'meta[property="article:published_time"], meta[name="date"], time[datetime]',
   );
@@ -765,6 +848,18 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
     }
   }
   stripNonNarration(content);
+  const headings: string[] = [];
+  const seenHeadings = new Set<string>();
+  for (const h of content.querySelectorAll("h1, h2, h3")) {
+    const text = clean(h.textContent);
+    if (text.length >= 3 && text.length <= 96) {
+      const k = text.toLowerCase();
+      if (!seenHeadings.has(k)) {
+        seenHeadings.add(k);
+        headings.push(text);
+      }
+    }
+  }
   const body = plainText(content).split("\n").map(clean).filter(Boolean).join("\n\n");
   // The lead is spoken in the intro (formatNarrationIntro); it must go through
   // plainText so a bare-URL anchor in the opening paragraph is not spelled out
@@ -798,6 +893,8 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
     publishedAt,
     lead,
     body,
+    ...(imageUrl ? { imageUrl } : {}),
+    ...(headings.length > 0 ? { headings } : {}),
   };
 }
 
@@ -866,7 +963,33 @@ async function parsePdfBounded(
 
   let parseStarted = false;
   try {
-    const parsePromise = pdfParse(bytes);
+    const parsePromise = (async () => {
+      const doc = await getDocumentProxy(new Uint8Array(bytes));
+      const meta = await getMeta(doc).catch(() => ({ info: undefined }));
+      const pages: string[] = [];
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
+        const textContent = await page.getTextContent();
+        let lastY: number | undefined;
+        let pageText = "";
+        for (const item of textContent.items) {
+          if (!("str" in item)) continue;
+          const y = Array.isArray(item.transform) ? item.transform[5] : undefined;
+          if (lastY === undefined || y === lastY) {
+            pageText += item.str;
+          } else {
+            pageText += "\n" + item.str;
+          }
+          lastY = y;
+        }
+        pages.push(pageText);
+      }
+      return {
+        text: pages.join("\n\n"),
+        numpages: doc.numPages,
+        info: meta?.info as Record<string, unknown> | undefined,
+      };
+    })();
     parseStarted = true;
     // The slot belongs to the PARSE, not to this request: a 504 leaves the parse running, so a
     // slot returned here would let the next request start another one behind it (audio-feed-ppikk).

@@ -25,7 +25,7 @@
  * - `lastPolledAt` is written even when items fail, so one broken article cannot
  *   make the poller retry the same feed forever.
  */
-import { DOMParser, parseHTML } from "npm:linkedom@0.18.12";
+import { DOMParser, parseHTML } from "linkedom";
 import {
   clean,
   type ExtractedArticle,
@@ -183,7 +183,11 @@ export class SubscriptionLimitError extends IngestError {
 
 export interface PollDependencies {
   /** Test seam: injected transport for the feed document itself. */
-  transport?: (url: URL, signal: AbortSignal) => Promise<Response>;
+  transport?: (
+    url: URL,
+    signal: AbortSignal,
+    init?: { headers?: Record<string, string> },
+  ) => Promise<Response>;
   /** Test seam: how an article body is obtained. Defaults to the real fetcher. */
   fetchArticle?: (url: string, signal?: AbortSignal) => Promise<ExtractedArticle>;
   signal?: AbortSignal;
@@ -201,14 +205,20 @@ export interface PollResult {
   skipped: number;
   deferred: number;
   failed: number;
+  notModified?: boolean;
   errors: string[];
 }
 
 export const DEFAULT_MAX_ITEMS = 10;
 /** Ten windows of the default ten selected items: at most 100 URL lookups per source per poll. */
 export const MAX_FEED_ITEMS_EXAMINED = 100;
+/**
+ * Head window always scanned first when `feedScanOffset > 0` (P3), so brand-new posts at the top
+ * of a long feed are never starved while older items are being backfilled.
+ */
+export const HEAD_SCAN_WINDOW = 25;
 
-/** Select new URLs in order, looking beyond already-seen items but never scanning indefinitely. */
+/** Select new URLs in order using batched URL-index queries and head-first scanning. */
 async function selectUnseenItems(
   ctx: AppContext,
   source: Source,
@@ -220,13 +230,50 @@ async function selectUnseenItems(
 > {
   const start = Number.isSafeInteger(offset) && offset >= 0 && offset < all.length ? offset : 0;
   const items: FeedItem[] = [];
+  const selectedUrls = new Set<string>();
   let skipped = 0;
-  let index = start;
-  while (index < all.length && index - start < MAX_FEED_ITEMS_EXAMINED && items.length < maxItems) {
-    const item = all[index++]!;
-    if (await ctx.stores.metadata.findArticleByUrl(source.userId, item.link)) skipped++;
-    else items.push(item);
+
+  // 1. Head-first scan: whenever backfilling past index 0, always inspect the newest
+  //    `HEAD_SCAN_WINDOW` items first so new posts are never starved behind `feedScanOffset`.
+  if (start > 0) {
+    const headEnd = Math.min(HEAD_SCAN_WINDOW, start);
+    const headSlice = all.slice(0, headEnd);
+    const headExisting = await ctx.stores.metadata.findExistingArticleUrls(
+      source.userId,
+      headSlice.map((it) => it.link),
+    );
+    for (const item of headSlice) {
+      if (items.length >= maxItems) break;
+      if (headExisting.has(item.link) || selectedUrls.has(item.link)) {
+        skipped++;
+      } else {
+        selectedUrls.add(item.link);
+        items.push(item);
+      }
+    }
   }
+
+  // 2. Backfill / primary window from `start`, using ONE batched URL existence lookup.
+  const windowEnd = Math.min(all.length, start + MAX_FEED_ITEMS_EXAMINED);
+  const windowSlice = all.slice(start, windowEnd);
+  let index = start;
+  if (items.length < maxItems && windowSlice.length > 0) {
+    const windowExisting = await ctx.stores.metadata.findExistingArticleUrls(
+      source.userId,
+      windowSlice.map((it) => it.link),
+    );
+    for (const item of windowSlice) {
+      if (items.length >= maxItems) break;
+      index++;
+      if (windowExisting.has(item.link) || selectedUrls.has(item.link)) {
+        skipped++;
+      } else {
+        selectedUrls.add(item.link);
+        items.push(item);
+      }
+    }
+  }
+
   const examined = index - start;
   return {
     items,
@@ -262,11 +309,19 @@ export async function pollFeedSource(
     return result;
   }
 
-  // Bounded by maxItems (DEFAULT_MAX_ITEMS = 10) per source; the shared creation
-  // allowance defers (never refuses or marks seen) items beyond the subscriber's budget.
-  let allItems: FeedItem[];
+  const saved = await ctx.stores.metadata.getSource(source.userId, source.id);
+  const scanOffset = saved?.feedScanOffset ?? source.feedScanOffset ?? 0;
+  const currentEtag = saved?.etag ?? source.etag;
+  const currentLastModified = saved?.lastModified ?? source.lastModified;
+
+  // Only send conditional GET validators when `scanOffset === 0`: if a previous poll
+  // left unbackfilled items past `scanOffset`, we still need the XML to finish scanning.
+  let loaded: LoadedFeed;
   try {
-    allItems = await loadFeedItems(source.feedUrl, deps);
+    loaded = await loadFeedDocument(source.feedUrl, deps, {
+      etag: scanOffset === 0 ? currentEtag : undefined,
+      lastModified: scanOffset === 0 ? currentLastModified : undefined,
+    });
   } catch (error) {
     const errorMsg = String((error as Error)?.message ?? error);
     console.error(
@@ -294,16 +349,30 @@ export async function pollFeedSource(
     // every tick forever.
     await ctx.stores.metadata.putSource({
       ...source,
+      etag: currentEtag,
+      lastModified: currentLastModified,
       lastPolledAt: new Date().toISOString(),
       lastPollError: errorMsg,
     });
     return result;
   }
 
+  if (loaded.notModified) {
+    result.notModified = true;
+    await ctx.stores.metadata.putSource({
+      ...source,
+      feedScanOffset: scanOffset,
+      etag: loaded.etag ?? currentEtag,
+      lastModified: loaded.lastModified ?? currentLastModified,
+      lastPolledAt: new Date().toISOString(),
+      lastPollError: undefined,
+    });
+    return result;
+  }
+
+  const allItems = loaded.items;
   const user = await ctx.stores.metadata.getUser(source.userId);
   if (!user) throw new Error(`Feed poll subscriber ${source.userId} no longer exists`);
-  const saved = await ctx.stores.metadata.getSource(source.userId, source.id);
-  const scanOffset = saved?.feedScanOffset ?? source.feedScanOffset ?? 0;
   const selection = await selectUnseenItems(
     ctx,
     source,
@@ -358,10 +427,49 @@ export async function pollFeedSource(
     ...source,
     // A deferred URL cannot be passed by the cursor: retry this same window later.
     feedScanOffset: result.deferred > 0 ? scanOffset : selection.nextOffset,
+    etag: loaded.etag ?? currentEtag,
+    lastModified: loaded.lastModified ?? currentLastModified,
     lastPolledAt: new Date().toISOString(),
     lastPollError: pollError,
   });
   return result;
+}
+
+interface LoadedFeed {
+  items: FeedItem[];
+  notModified: boolean;
+  etag?: string;
+  lastModified?: string;
+}
+
+/**
+ * Fetch and parse a feed with optional conditional GET validators (`ETag`/`Last-Modified`).
+ */
+async function loadFeedDocument(
+  feedUrl: string,
+  deps: PollDependencies,
+  validators: { etag?: string; lastModified?: string } = {},
+): Promise<LoadedFeed> {
+  const document = await fetchFeedDocument(feedUrl, {
+    transport: deps.transport,
+    signal: deps.signal,
+    etag: validators.etag,
+    lastModified: validators.lastModified,
+  });
+  if (document.notModified) {
+    return {
+      items: [],
+      notModified: true,
+      etag: document.etag,
+      lastModified: document.lastModified,
+    };
+  }
+  return {
+    items: parseFeedItems(document.xml, document.url),
+    notModified: false,
+    etag: document.etag,
+    lastModified: document.lastModified,
+  };
 }
 
 /**
@@ -370,11 +478,7 @@ export async function pollFeedSource(
  * existing one treats the same failure as a recorded poll error.
  */
 async function loadFeedItems(feedUrl: string, deps: PollDependencies): Promise<FeedItem[]> {
-  const document = await fetchFeedDocument(feedUrl, {
-    transport: deps.transport,
-    signal: deps.signal,
-  });
-  return parseFeedItems(document.xml, document.url);
+  return (await loadFeedDocument(feedUrl, deps)).items;
 }
 
 /**
@@ -449,11 +553,15 @@ async function queueItems(
   limiter?: ReturnType<typeof ingestCreationLimiter>,
 ): Promise<void> {
   result.items = items.length;
+  if (items.length === 0) return;
   const mode: AudioMode = source.modes[0] ?? "direct";
+  const initiallyExisting = await ctx.stores.metadata.findExistingArticleUrls(
+    source.userId,
+    items.map((it) => it.link),
+  );
 
   const queueOne = async (item: FeedItem): Promise<void> => {
-    const existing = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
-    if (existing) {
+    if (initiallyExisting.has(item.link)) {
       result.skipped++;
       return;
     }
@@ -519,10 +627,10 @@ async function queueItems(
       }
     }
 
-    // audio-feed-562: re-check after article extraction to avoid inserting duplicates
-    // if another concurrent poll or manual trigger completed while fetching.
-    const raced = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
-    if (raced) {
+    // audio-feed-562: re-check after article extraction using lightweight URL index lookup
+    // to avoid inserting duplicates without hydrating full article bodies.
+    const raced = await ctx.stores.metadata.findExistingArticleUrls(source.userId, [item.link]);
+    if (raced.has(item.link)) {
       result.skipped++;
       return;
     }
@@ -553,6 +661,8 @@ async function queueItems(
       publishedAt: item.publishedAt ?? extracted.publishedAt ?? undefined,
       content: extracted.body,
       excerpt: extracted.lead || item.summary,
+      ...(extracted.imageUrl ? { imageUrl: extracted.imageUrl } : {}),
+      ...(extracted.headings?.length ? { headings: extracted.headings } : {}),
       ingestedAt: now,
     };
     // audio-feed-33m: atomic insert-if-absent CAS pattern closes the race between
@@ -592,6 +702,16 @@ async function queueItems(
       return;
     }
     result.queued++;
+    if (ctx.triggerSynthesis) {
+      try {
+        await ctx.triggerSynthesis(episode.id, source.userId);
+      } catch (err) {
+        console.warn(
+          `[audio-feed] workflow trigger failed for feed episode ${episode.id}:`,
+          err,
+        );
+      }
+    }
   };
 
   // Bounded concurrency (audio-feed-8ce2): this used to be a serial `for` loop, so a
@@ -775,13 +895,17 @@ export interface FeedPollBatchResult {
   errors?: string[];
 }
 
-export async function runFeedPollBatch(
+/**
+ * Discover all due active feed sources across users (bounded by `limit`, default 500).
+ * Used both by `runFeedPollBatch` and by the Cloudflare Queue fan-out cron producer.
+ */
+export async function listDueFeedSources(
   ctx: AppContext,
-  deps: PollDependencies & FeedPollOptions = {},
-): Promise<FeedPollBatchResult> {
-  const minInterval = deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
-  const batchSize = deps.batchSize ?? 5;
-  const userConcurrency = Math.max(1, deps.userScanConcurrency ?? USER_SCAN_CONCURRENCY);
+  opts: { minIntervalMs?: number; limit?: number; userScanConcurrency?: number } = {},
+): Promise<Source[]> {
+  const minInterval = opts.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+  const limit = opts.limit ?? 500;
+  const userConcurrency = Math.max(1, opts.userScanConcurrency ?? USER_SCAN_CONCURRENCY);
   const cutoff = Date.now() - minInterval;
 
   const users = await ctx.stores.metadata.listUsers();
@@ -800,7 +924,7 @@ export async function runFeedPollBatch(
         if (!source.feedUrl) continue;
         const last = source.lastPolledAt ? Date.parse(source.lastPolledAt) : 0;
         if (!Number.isFinite(last) || last <= cutoff) due.push(source);
-        if (due.length >= batchSize) {
+        if (due.length >= limit) {
           stop = true;
           return;
         }
@@ -811,8 +935,8 @@ export async function runFeedPollBatch(
 
   const startWorker = async () => {
     while (true) {
-      if (stop || due.length >= batchSize || next >= users.length) return;
-      if (inFlight + due.length >= batchSize) return;
+      if (stop || due.length >= limit || next >= users.length) return;
+      if (inFlight + due.length >= limit) return;
       const idx = next++;
       inFlight++;
       try {
@@ -828,16 +952,28 @@ export async function runFeedPollBatch(
     }
   };
 
-  const poolLimit = Math.min(userConcurrency, Math.max(1, batchSize - due.length));
+  const poolLimit = Math.min(userConcurrency, Math.max(1, limit - due.length));
   const workers: Promise<void>[] = [];
   for (let w = 0; w < poolLimit; w++) {
     if (w > 0) {
       await new Promise((r) => setTimeout(r, 0));
     }
-    if (stop || due.length >= batchSize) break;
+    if (stop || due.length >= limit) break;
     workers.push(startWorker());
   }
   await Promise.all(workers);
+  return due;
+}
+
+export async function runFeedPollBatch(
+  ctx: AppContext,
+  deps: PollDependencies & FeedPollOptions = {},
+): Promise<FeedPollBatchResult> {
+  const due = await listDueFeedSources(ctx, {
+    minIntervalMs: deps.minIntervalMs,
+    limit: deps.batchSize ?? 5,
+    userScanConcurrency: deps.userScanConcurrency,
+  });
 
   let queued = 0;
   let failed = 0;

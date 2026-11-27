@@ -325,6 +325,7 @@ export async function regenerateUserEpisodes(
   userId: string,
   scope: "outdated" | "all" | "failed",
   filter: { sourceId?: string; mode?: AudioMode } = {},
+  onQueued?: (episodeId: string) => Promise<void>,
 ): Promise<number> {
   // Collect first, then requeue/retry: state changes move an episode out of the
   // scan being paged, which would shift the scan under its own cursor.
@@ -337,7 +338,16 @@ export async function regenerateUserEpisodes(
       for (const e of batch) if (scope === "all" || isOutdated(e)) readyIds.push(e.id);
     }
     for (const id of readyIds) {
-      if (await metadata.requeueEpisode(userId, id)) queued++;
+      if (await metadata.requeueEpisode(userId, id)) {
+        queued++;
+        if (onQueued) {
+          try {
+            await onQueued(id);
+          } catch {
+            // best-effort workflow trigger
+          }
+        }
+      }
     }
   }
 
@@ -348,7 +358,16 @@ export async function regenerateUserEpisodes(
       for (const e of batch) failedIds.push(e.id);
     }
     for (const id of failedIds) {
-      if (await metadata.retryEpisode(userId, id)) queued++;
+      if (await metadata.retryEpisode(userId, id)) {
+        queued++;
+        if (onQueued) {
+          try {
+            await onQueued(id);
+          } catch {
+            // best-effort workflow trigger
+          }
+        }
+      }
     }
   }
 

@@ -126,6 +126,7 @@ import { MAX_OFFLINE_BYTES, MAX_OFFLINE_EPISODES, OFFLINE_CACHE } from "./pwa.ts
 import {
   type AudioMode,
   type Episode,
+  type EpisodeChapter,
   isPublishable,
   isSynthesisAuthorized,
   type Source,
@@ -172,6 +173,10 @@ export interface ListenEpisode {
   byteLength?: number;
   /** The source article, so a listener can read along (audio-feed-585). http(s) only. */
   articleUrl?: string;
+  /** Same-origin raster cover art URL (`/feed/:token/art/episode-:id.png`). */
+  artworkUrl?: string;
+  /** Chapter markers aligned to synthesized segment durations. */
+  chapters?: EpisodeChapter[];
   /** Stable, non-expiring enclosure URL served by GET /audio/:key. */
   audioUrl: string;
 }
@@ -214,6 +219,13 @@ const ICON_SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
     <symbol id="i-voice-one" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M12 4.8v14.4"/><path d="M7.4 8.6v6.8"/><path d="M16.6 8.6v6.8"/></g></symbol>
     <symbol id="i-voice-two" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M8.6 4.8v14.4"/><path d="M15.4 4.8v14.4"/><path d="M4.4 9.4v5.2"/><path d="M19.6 9.4v5.2"/></g></symbol>
     <symbol id="i-share" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></g></symbol>
+    <symbol id="i-queue" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><line x1="4" y1="6" x2="16" y2="6"/><line x1="4" y1="11" x2="16" y2="11"/><line x1="4" y1="16" x2="11" y2="16"/><line x1="17" y1="13" x2="17" y2="20"/><line x1="13.5" y1="16.5" x2="20.5" y2="16.5"/></g></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round"/></symbol>
+    <symbol id="i-prev" viewBox="0 0 24 24"><path d="M6 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18 6.5v11a.7.7 0 0 1-1.08.59l-8.4-5.5a.7.7 0 0 1 0-1.18l8.4-5.5A.7.7 0 0 1 18 6.5Z" fill="currentColor"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="M18 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M6 6.5v11a.7.7 0 0 0 1.08.59l8.4-5.5a.7.7 0 0 0 0-1.18l-8.4-5.5A.7.7 0 0 0 6 6.5Z" fill="currentColor"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10Z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chapters" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><line x1="9" y1="6.5" x2="19.5" y2="6.5"/><line x1="9" y1="12" x2="19.5" y2="12"/><line x1="9" y1="17.5" x2="19.5" y2="17.5"/><circle cx="5" cy="6.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="5" cy="17.5" r="1.2" fill="currentColor" stroke="none"/></g></symbol>
   </defs>
 </svg>`;
 
@@ -247,7 +259,8 @@ export function renderListenPage(
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#0a0a0c">
 <link rel="manifest" href="/manifest.json">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" type="image/png" href="/icon.png">
 <link rel="icon" href="/icon.svg">
 <link rel="alternate" type="application/rss+xml" title="${esc(title)}" href="${esc(feedUrl)}">
 <link rel="stylesheet" href="${assetUrl("listen.css")}">
@@ -279,6 +292,7 @@ ${ICON_SPRITE}
         <svg class="icon" aria-hidden="true"><use href="#i-rss"/></svg>
         RSS
       </a>
+      <a class="chip" id="accountLink" href="/account">Manage</a>
     </div>
   </div>
 </header>
@@ -298,8 +312,22 @@ ${ICON_SPRITE}
     <ul class="activity-list" id="activityList"></ul>
   </section>
 
-  <!-- audio-feed-3h1: filter episodes by source and by text -->
+  <!-- Continue listening shelf: populated for partially played episodes -->
+  <section class="continue hidden" id="continueSection" aria-labelledby="continueHeading">
+    <div class="list-head">
+      <h2 id="continueHeading">Continue listening</h2>
+    </div>
+    <div class="continue-rail" id="continueRail"></div>
+  </section>
+
+  <!-- audio-feed-3h1: filter episodes by source, listening state, and text -->
   <section class="filters hidden" id="filterSection" aria-label="Filter episodes" role="search">
+    <div class="filter-pills" role="group" aria-label="Listening status">
+      <button type="button" class="filter-pill" data-listen-filter="all" aria-pressed="true">All</button>
+      <button type="button" class="filter-pill" data-listen-filter="unplayed" aria-pressed="false">Unplayed</button>
+      <button type="button" class="filter-pill" data-listen-filter="inprogress" aria-pressed="false">In progress</button>
+      <button type="button" class="filter-pill" data-listen-filter="downloaded" aria-pressed="false">Downloaded</button>
+    </div>
     <div class="filter-controls">
       <div class="filter-field filter-search">
         <label for="filterText" class="sr-only">Filter episodes by title or author</label>
@@ -352,25 +380,41 @@ ${ICON_SPRITE}
 <section class="dock" aria-label="Player">
   <div class="dock-inner">
     <div class="now">
-      <div class="now-text">
-        <span class="now-title" id="nowTitle">Nothing playing</span>
-        <span class="now-sub" id="nowSub">Pick an episode to start</span>
+      <button type="button" class="now-trigger" id="expandPlayerBtn" aria-label="Open full player, chapters, queue, and read along">
+        <img class="now-art" id="nowArt" src="/icon.png" alt="" width="44" height="44">
+        <span class="now-text">
+          <span class="now-title" id="nowTitle">Nothing playing</span>
+          <span class="now-sub" id="nowSub">Pick an episode to start</span>
+          <span class="now-chapter hidden" id="nowChapter"></span>
+        </span>
+      </button>
+      <div class="now-tools">
+        <a class="now-read hidden" id="nowRead" target="_blank" rel="noopener noreferrer">Read along</a>
+        <span class="now-badge hidden" id="nowOffline">
+          <svg class="icon" aria-hidden="true"><use href="#i-saved"/></svg>
+          Offline
+        </span>
+        <button type="button" class="now-expand-btn" id="openQueueBtn" aria-label="Open Now Playing and Up Next queue" data-tooltip="Now Playing &amp; Queue">
+          <svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg>
+          <span class="queue-badge hidden" id="queueCountBadge"></span>
+        </button>
       </div>
-      <a class="now-read hidden" id="nowRead" target="_blank" rel="noopener noreferrer">Read along</a>
-      <span class="now-badge hidden" id="nowOffline">
-        <svg class="icon" aria-hidden="true"><use href="#i-saved"/></svg>
-        Offline
-      </span>
     </div>
 
     <div class="scrub">
       <span class="t" id="nowTime">0:00</span>
-      <input type="range" id="seek" min="0" max="0" step="1" value="0" aria-label="Seek" disabled>
+      <div class="scrub-track">
+        <input type="range" id="seek" min="0" max="0" step="1" value="0" aria-label="Seek" disabled>
+        <div class="chapter-ticks" id="chapterTicks" aria-hidden="true"></div>
+      </div>
       <span class="t" id="nowDuration">0:00</span>
     </div>
 
     <div class="transport">
-      <span class="t-spacer" aria-hidden="true"></span>
+      <button type="button" class="sleep-pill" id="sleepBtn" aria-label="Sleep timer" data-tooltip="Sleep timer">
+        <svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg>
+        <span id="sleepLabel"></span>
+      </button>
       <button type="button" class="t-btn" id="back" aria-label="Skip back 15 seconds" data-tooltip="Skip back 15s">
         <svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>
       </button>
@@ -383,15 +427,106 @@ ${ICON_SPRITE}
       <select class="rate" id="rate" aria-label="Playback speed">
         <option value="0.75">0.75&times;</option>
         <option value="1" selected>1&times;</option>
+        <option value="1.1">1.1&times;</option>
         <option value="1.25">1.25&times;</option>
         <option value="1.5">1.5&times;</option>
+        <option value="1.75">1.75&times;</option>
         <option value="2">2&times;</option>
+        <option value="2.5">2.5&times;</option>
       </select>
     </div>
 
     <p class="notice" id="playerNotice" role="status" aria-live="polite"></p>
   </div>
 </section>
+
+  <!-- Full-screen / expandable Now Playing podcast player sheet -->
+  <dialog id="nowPlayingDialog" class="np-sheet" closedby="any" aria-labelledby="npTitle">
+    <div class="np-inner">
+      <header class="np-header">
+        <span class="np-source" id="npSource">Audio Feed</span>
+        <div class="np-header-actions">
+          <select class="np-sleep-select" id="npSleepSelect" aria-label="Sleep timer">
+            <option value="0">Sleep: Off</option>
+            <option value="10">Sleep: 10 min</option>
+            <option value="15">Sleep: 15 min</option>
+            <option value="30">Sleep: 30 min</option>
+            <option value="45">Sleep: 45 min</option>
+            <option value="60">Sleep: 60 min</option>
+            <option value="episode">Sleep: End of episode</option>
+          </select>
+          <button type="button" class="np-close" id="npCloseBtn" aria-label="Close Now Playing">
+            <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="np-hero">
+        <img class="np-art" id="npArt" src="/icon.png" alt="" width="240" height="240">
+        <div class="np-meta">
+          <h2 class="np-title" id="npTitle">Nothing playing</h2>
+          <p class="np-sub" id="npSub">Pick an episode to start</p>
+          <p class="np-chapter hidden" id="npChapter"></p>
+        </div>
+      </div>
+
+      <div class="np-controls">
+        <div class="scrub">
+          <span class="t" id="npTime">0:00</span>
+          <div class="scrub-track">
+            <input type="range" id="npSeek" min="0" max="0" step="1" value="0" aria-label="Seek episode" disabled>
+            <div class="chapter-ticks" id="npChapterTicks" aria-hidden="true"></div>
+          </div>
+          <span class="t" id="npDuration">0:00</span>
+        </div>
+
+        <div class="np-transport">
+          <button type="button" class="t-btn" id="npPrevBtn" aria-label="Previous episode">
+            <svg class="icon" aria-hidden="true"><use href="#i-prev"/></svg>
+          </button>
+          <button type="button" class="t-btn" id="npBackBtn" aria-label="Skip back 15 seconds">
+            <svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>
+          </button>
+          <button type="button" class="t-btn t-main" id="npPlayPauseBtn" aria-label="Play" aria-pressed="false">
+            <svg class="icon" id="npPlayIcon" aria-hidden="true"><use href="#i-play"/></svg>
+          </button>
+          <button type="button" class="t-btn" id="npFwdBtn" aria-label="Skip forward 30 seconds">
+            <svg class="icon" aria-hidden="true"><use href="#i-fwd"/></svg>
+          </button>
+          <button type="button" class="t-btn" id="npNextBtn" aria-label="Next episode">
+            <svg class="icon" aria-hidden="true"><use href="#i-next"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="np-tabs" role="tablist" aria-label="Episode details">
+        <button type="button" class="np-tab" role="tab" id="npTabChapters" aria-controls="npPanelChapters" aria-selected="true" data-np-tab="chapters">Chapters</button>
+        <button type="button" class="np-tab" role="tab" id="npTabQueue" aria-controls="npPanelQueue" aria-selected="false" data-np-tab="queue">Up Next <span id="npQueueCount"></span></button>
+        <button type="button" class="np-tab" role="tab" id="npTabRead" aria-controls="npPanelRead" aria-selected="false" data-np-tab="read">Read Along</button>
+      </div>
+
+      <div class="np-drawer">
+        <div class="np-panel" id="npPanelChapters" role="tabpanel" aria-labelledby="npTabChapters">
+          <ul class="np-chapters-list" id="npChaptersList"></ul>
+          <p class="np-empty hidden" id="npChaptersEmpty">No chapter markers for this episode yet.</p>
+        </div>
+        <div class="np-panel hidden" id="npPanelQueue" role="tabpanel" aria-labelledby="npTabQueue">
+          <div class="np-panel-head">
+            <span class="np-panel-hint">Plays automatically when the current episode ends.</span>
+            <button type="button" class="chip hidden" id="npClearQueueBtn">Clear</button>
+          </div>
+          <ul class="np-queue-list" id="npQueueList"></ul>
+          <p class="np-empty hidden" id="npQueueEmpty">Your Up Next queue is empty. Tap the queue icon on any episode to add it.</p>
+        </div>
+        <div class="np-panel hidden" id="npPanelRead" role="tabpanel" aria-labelledby="npTabRead">
+          <div class="np-read-head">
+            <a class="chip hidden" id="npExternalLink" target="_blank" rel="noopener noreferrer">Open original article</a>
+          </div>
+          <div class="np-read-body" id="npReadBody"></div>
+        </div>
+      </div>
+    </div>
+  </dialog>
 
   <!-- audio-feed-e21x: native accessible modal dialog with closedby="any" for declarative light-dismiss -->
   <dialog id="shareDialog" class="confirm-dialog share-dialog" closedby="any" aria-labelledby="shareTitle" aria-describedby="shareMessage">
@@ -800,6 +935,7 @@ export async function handleListen(
     if (art) articleUrlMap.set(failedArticleIds[i]!, art.url);
   }
 
+  const encodedToken = encodeURIComponent(token);
   const rows: ListenEpisode[] = publishable.map((episode, index) => {
     const article = articles[index] ?? null;
     return {
@@ -812,6 +948,8 @@ export async function handleListen(
       durationSeconds: episode.durationSeconds,
       byteLength: episode.byteLength,
       audioUrl: enclosureUrl(origin.baseUrl, episode),
+      artworkUrl: `/feed/${encodedToken}/art/episode-${encodeURIComponent(episode.id)}.png`,
+      ...(episode.chapters?.length ? { chapters: episode.chapters } : {}),
       // A linkback only when the stored URL is a real web address: the value comes from a feed the
       // user subscribed to, and a link is not a place to trust it further than ingest did.
       articleUrl: /^https?:[/]{2}/i.test(article?.url ?? "") ? article?.url : undefined,
@@ -1119,6 +1257,13 @@ export async function handleListenRetry(
 
   const queued = await ctx.stores.metadata.retryEpisode(user.id, episodeId);
   if (!queued) return notFound("Unknown episode");
+  if (ctx.triggerSynthesis) {
+    try {
+      await ctx.triggerSynthesis(queued.id, user.id, { fresh: true });
+    } catch (err) {
+      console.warn(`[audio-feed] workflow retry trigger failed for episode ${queued.id}:`, err);
+    }
+  }
   return new Response(JSON.stringify({ queued: true, episodeId: queued.id }), {
     status: 202,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },

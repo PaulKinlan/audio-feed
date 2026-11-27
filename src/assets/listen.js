@@ -20,6 +20,12 @@
 /// <reference lib="dom" />
 
 /**
+ * @typedef {object} PlayerChapter
+ * @property {number} startTime
+ * @property {string} title
+ */
+
+/**
  * The row shape the server builds in handleListen / renderListenPage. Declared here rather than
  * imported because the browser cannot import the server's types; the server's own ListenEpisode
  * interface is the authority this must match.
@@ -33,6 +39,8 @@
  * @property {number} [durationSeconds]
  * @property {number} [byteLength]
  * @property {string} [articleUrl]
+ * @property {string} [artworkUrl]
+ * @property {PlayerChapter[]} [chapters]
  * @property {string} audioUrl
  */
 
@@ -163,6 +171,59 @@ try {
 } catch { /* private mode */ }
 
 const POSITIONS_KEY = scopedKey("positions");
+const RATE_KEY = scopedKey("rate");
+const QUEUE_KEY = scopedKey("queue");
+
+/** @returns {number} */
+function loadSavedRate() {
+  try {
+    const raw = localStorage.getItem(RATE_KEY);
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) && n >= 0.5 && n <= 3 ? n : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** @param {number} value */
+function saveRate(value) {
+  try {
+    localStorage.setItem(RATE_KEY, String(value));
+  } catch { /* private mode */ }
+}
+
+/** @returns {string[]} */
+function loadQueue() {
+  try {
+    const raw = localStorage.getItem(QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** @param {string[]} ids */
+function saveQueue(ids) {
+  try {
+    if (ids.length === 0) localStorage.removeItem(QUEUE_KEY);
+    else localStorage.setItem(QUEUE_KEY, JSON.stringify(ids));
+  } catch { /* private mode */ }
+}
+
+/** @type {string[]} */
+let upNextIds = loadQueue().filter((id) => EPISODES.some((e) => e.id === id));
+/** @type {"all"|"unplayed"|"inprogress"|"downloaded"} */
+let listenFilterState = "all";
+/** @type {number | "episode" | null} */
+let sleepTimerTarget = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let sleepInterval = null;
+/** @type {Map<string, { title?: string; author?: string; source?: string; url?: string; mode?: string; paragraphs?: string[] }>} */
+const articleCache = new Map();
+/** @type {string} */
+let activeNpTab = "chapters";
 
 // audio-feed-n07: PWA App Badging API for unread / ready episodes.
 // Per Modern Web Guidance:
@@ -838,7 +899,23 @@ function row(episode) {
   play.className = "ep-play";
   play.dataset.action = "play";
   play.setAttribute("aria-label", "Play " + episode.title);
-  play.appendChild(icon("play"));
+  if (episode.artworkUrl) {
+    const img = document.createElement("img");
+    img.className = "ep-art";
+    img.src = episode.artworkUrl;
+    img.alt = "";
+    img.width = 48;
+    img.height = 48;
+    img.loading = "lazy";
+    img.decoding = "async";
+    play.appendChild(img);
+    const overlay = document.createElement("span");
+    overlay.className = "ep-play-overlay";
+    overlay.appendChild(icon("play"));
+    play.appendChild(overlay);
+  } else {
+    play.appendChild(icon("play"));
+  }
   play.addEventListener("click", () => {
     const pos = getPosition(episode.id);
     const dur = episode.durationSeconds || 0;
@@ -863,6 +940,9 @@ function row(episode) {
   const dateText = when(episode.date);
   if (dateText) parts.push(span(dateText));
   if (episode.durationSeconds) parts.push(span(fmt(episode.durationSeconds), "ep-duration"));
+  if (episode.chapters && episode.chapters.length > 0) {
+    parts.push(span(episode.chapters.length + " chapters", "ep-chapters-pill"));
+  }
   if (episode.mode) {
     const mode = document.createElement("span");
     mode.className = "ep-mode";
@@ -880,6 +960,32 @@ function row(episode) {
 
   const actions = document.createElement("div");
   actions.className = "ep-actions";
+
+  const queueBtn = document.createElement("button");
+  queueBtn.type = "button";
+  queueBtn.className = "ep-queue";
+  queueBtn.dataset.action = "queue";
+  const inQueue = upNextIds.includes(episode.id);
+  queueBtn.dataset.queued = String(inQueue);
+  queueBtn.setAttribute(
+    "aria-label",
+    (inQueue ? "Remove from Up Next: " : "Add to Up Next: ") + episode.title,
+  );
+  queueBtn.setAttribute("data-tooltip", inQueue ? "In Up Next" : "Add to Up Next");
+  queueBtn.appendChild(icon(inQueue ? "saved" : "queue"));
+  queueBtn.addEventListener("click", () => {
+    toggleQueueEpisode(episode.id);
+    const nowQueued = upNextIds.includes(episode.id);
+    queueBtn.dataset.queued = String(nowQueued);
+    queueBtn.setAttribute(
+      "aria-label",
+      (nowQueued ? "Remove from Up Next: " : "Add to Up Next: ") + episode.title,
+    );
+    queueBtn.setAttribute("data-tooltip", nowQueued ? "In Up Next" : "Add to Up Next");
+    setIcon(queueBtn, nowQueued ? "saved" : "queue");
+    say(nowQueued ? "Added to Up Next." : "Removed from Up Next.", "ok");
+  });
+  actions.appendChild(queueBtn);
   const download = document.createElement("button");
   download.type = "button";
   download.className = "ep-download";
@@ -1359,14 +1465,92 @@ function populateSourceFilter() {
   }
 }
 
+function renderContinueListening() {
+  const section = document.getElementById("continueSection");
+  const rail = document.getElementById("continueRail");
+  if (!section || !rail) return;
+  const played = loadPlayed();
+  const positions = loadPositions();
+  /** @type {Array<{ episode: PlayerEpisode; pos: number; updatedAt: number }>} */
+  const inProgress = [];
+  for (const ep of EPISODES) {
+    if (played.has(ep.id)) continue;
+    const saved = positions[ep.id];
+    if (!saved || saved.position <= 5) continue;
+    const dur = ep.durationSeconds || 0;
+    if (dur > 0 && saved.position >= dur - 5) continue;
+    inProgress.push({ episode: ep, pos: saved.position, updatedAt: saved.updatedAt || 0 });
+  }
+  inProgress.sort((a, b) => b.updatedAt - a.updatedAt);
+  const top = inProgress.slice(0, 6);
+  if (top.length === 0) {
+    section.classList.add("hidden");
+    rail.replaceChildren();
+    return;
+  }
+  section.classList.remove("hidden");
+  const cards = top.map(({ episode, pos }) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "continue-card";
+    btn.addEventListener("click", () => void select(episode, true, pos));
+
+    const img = document.createElement("img");
+    img.className = "continue-art";
+    img.src = episode.artworkUrl || "/icon.png";
+    img.alt = "";
+    img.width = 56;
+    img.height = 56;
+    img.loading = "lazy";
+    btn.appendChild(img);
+
+    const info = document.createElement("span");
+    info.className = "continue-info";
+
+    const title = document.createElement("span");
+    title.className = "continue-title";
+    title.textContent = episode.title;
+    info.appendChild(title);
+
+    const dur = episode.durationSeconds || 0;
+    const remaining = dur > 0 ? fmt(Math.max(0, dur - pos)) + " left" : fmt(pos) + " played";
+    const sub = document.createElement("span");
+    sub.className = "continue-sub";
+    sub.textContent = (episode.source ? episode.source + " · " : "") + remaining;
+    info.appendChild(sub);
+
+    const bar = document.createElement("span");
+    bar.className = "continue-bar";
+    const fill = document.createElement("span");
+    fill.className = "continue-bar-fill";
+    const pct = dur > 0 ? Math.min(100, Math.round((pos / dur) * 100)) : 20;
+    fill.style.setProperty("--pct", pct + "%");
+    bar.appendChild(fill);
+    info.appendChild(bar);
+
+    btn.appendChild(info);
+    return btn;
+  });
+  rail.replaceChildren(...cards);
+}
+
 function render() {
   populateSourceFilter();
+  renderContinueListening();
   const selectedSource = filterSource.value.trim().toLowerCase();
   const searchText = filterText.value.trim().toLowerCase();
-  const isFiltered = Boolean(selectedSource || searchText);
+  const isFiltered = Boolean(selectedSource || searchText || listenFilterState !== "all");
+  const playedSet = loadPlayed();
 
   /** @param {PlayerEpisode} ep */
   const matchesEpisode = (ep) => {
+    if (listenFilterState === "unplayed" && playedSet.has(ep.id)) return false;
+    if (listenFilterState === "inprogress") {
+      const pos = getPosition(ep.id);
+      const dur = ep.durationSeconds || 0;
+      if (playedSet.has(ep.id) || pos <= 5 || (dur > 0 && pos >= dur - 5)) return false;
+    }
+    if (listenFilterState === "downloaded" && !downloaded.has(ep.id)) return false;
     if (selectedSource && (ep.source || "").toLowerCase() !== selectedSource) return false;
     if (searchText) {
       const titleMatch = (ep.title || "").toLowerCase().includes(searchText);
@@ -1418,6 +1602,7 @@ function render() {
     ) {
       filterEmpty.classList.remove("hidden");
       const terms = [];
+      if (listenFilterState !== "all") terms.push(listenFilterState);
       if (filterSource.value) terms.push(`source "${filterSource.value}"`);
       if (filterText.value.trim()) terms.push(`search "${filterText.value.trim()}"`);
       filterEmptyMessage.textContent = "No episodes match " + terms.join(" and ") + ".";
@@ -1448,6 +1633,381 @@ function updateCounts() {
 
 // ---- selection and transport --------------------------------------------
 
+const nowArt = /** @type {HTMLImageElement | null} */ (document.getElementById("nowArt"));
+const nowChapter = document.getElementById("nowChapter");
+const chapterTicks = document.getElementById("chapterTicks");
+const sleepBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById("sleepBtn"));
+const sleepLabel = document.getElementById("sleepLabel");
+const expandPlayerBtn = document.getElementById("expandPlayerBtn");
+const openQueueBtn = document.getElementById("openQueueBtn");
+const queueCountBadge = document.getElementById("queueCountBadge");
+
+// Now Playing expanded sheet elements
+const npDialog = /** @type {HTMLDialogElement | null} */ (
+  document.getElementById("nowPlayingDialog")
+);
+const npCloseBtn = document.getElementById("npCloseBtn");
+const npSource = document.getElementById("npSource");
+const npArt = /** @type {HTMLImageElement | null} */ (document.getElementById("npArt"));
+const npTitle = document.getElementById("npTitle");
+const npSub = document.getElementById("npSub");
+const npChapter = document.getElementById("npChapter");
+const npSeek = /** @type {HTMLInputElement | null} */ (document.getElementById("npSeek"));
+const npChapterTicks = document.getElementById("npChapterTicks");
+const npTime = document.getElementById("npTime");
+const npDuration = document.getElementById("npDuration");
+const npPrevBtn = document.getElementById("npPrevBtn");
+const npBackBtn = document.getElementById("npBackBtn");
+const npPlayPauseBtn = document.getElementById("npPlayPauseBtn");
+const npPlayIcon = document.getElementById("npPlayIcon");
+const npFwdBtn = document.getElementById("npFwdBtn");
+const npNextBtn = document.getElementById("npNextBtn");
+const npSleepSelect = /** @type {HTMLSelectElement | null} */ (
+  document.getElementById("npSleepSelect")
+);
+const npChaptersList = document.getElementById("npChaptersList");
+const npChaptersEmpty = document.getElementById("npChaptersEmpty");
+const npQueueList = document.getElementById("npQueueList");
+const npQueueEmpty = document.getElementById("npQueueEmpty");
+const npQueueCount = document.getElementById("npQueueCount");
+const npClearQueueBtn = document.getElementById("npClearQueueBtn");
+const npReadBody = document.getElementById("npReadBody");
+const npExternalLink = /** @type {HTMLAnchorElement | null} */ (
+  document.getElementById("npExternalLink")
+);
+
+/** @param {string} id */
+function toggleQueueEpisode(id) {
+  const idx = upNextIds.indexOf(id);
+  if (idx >= 0) upNextIds.splice(idx, 1);
+  else upNextIds.push(id);
+  saveQueue(upNextIds);
+  renderQueueUI();
+}
+
+function renderQueueUI() {
+  const count = upNextIds.length;
+  if (queueCountBadge) {
+    queueCountBadge.textContent = count > 0 ? String(count) : "";
+    queueCountBadge.classList.toggle("hidden", count === 0);
+  }
+  if (npQueueCount) {
+    npQueueCount.textContent = count > 0 ? `(${count})` : "";
+  }
+  if (npClearQueueBtn) {
+    npClearQueueBtn.classList.toggle("hidden", count === 0);
+  }
+  if (!npQueueList || !npQueueEmpty) return;
+  if (count === 0) {
+    npQueueList.replaceChildren();
+    npQueueEmpty.classList.remove("hidden");
+    return;
+  }
+  npQueueEmpty.classList.add("hidden");
+  const byId = new Map(EPISODES.map((e) => [e.id, e]));
+  const items = [];
+  for (let i = 0; i < upNextIds.length; i++) {
+    const id = upNextIds[i];
+    const ep = byId.get(id);
+    if (!ep) continue;
+    const li = document.createElement("li");
+    li.className = "np-queue-item";
+
+    const img = document.createElement("img");
+    img.className = "np-queue-art";
+    img.src = ep.artworkUrl || "/icon.png";
+    img.alt = "";
+    img.width = 40;
+    img.height = 40;
+    li.appendChild(img);
+
+    const playBtn = document.createElement("button");
+    playBtn.type = "button";
+    playBtn.className = "np-queue-play";
+    const t = document.createElement("span");
+    t.className = "np-queue-title";
+    t.textContent = ep.title;
+    const s = document.createElement("span");
+    s.className = "np-queue-sub";
+    s.textContent = [ep.source, ep.durationSeconds ? fmt(ep.durationSeconds) : ""].filter(Boolean)
+      .join(" · ");
+    playBtn.appendChild(t);
+    playBtn.appendChild(s);
+    playBtn.addEventListener("click", () => {
+      upNextIds = upNextIds.filter((q) => q !== ep.id);
+      saveQueue(upNextIds);
+      renderQueueUI();
+      void select(ep, true, getPosition(ep.id));
+    });
+    li.appendChild(playBtn);
+
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "np-queue-rm";
+    rm.setAttribute("aria-label", "Remove " + ep.title + " from Up Next");
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      upNextIds = upNextIds.filter((q) => q !== ep.id);
+      saveQueue(upNextIds);
+      renderQueueUI();
+      render();
+    });
+    li.appendChild(rm);
+    items.push(li);
+  }
+  npQueueList.replaceChildren(...items);
+}
+
+/** @param {PlayerEpisode | null} episode @param {number} duration */
+function renderChaptersUI(episode, duration) {
+  const chapters = episode?.chapters ?? [];
+  const total = duration > 0 ? duration : (episode?.durationSeconds || 0);
+
+  for (const container of [chapterTicks, npChapterTicks]) {
+    if (!container) continue;
+    container.replaceChildren();
+    if (total > 0 && chapters.length > 1) {
+      for (const ch of chapters) {
+        if (ch.startTime <= 0 || ch.startTime >= total) continue;
+        const tick = document.createElement("span");
+        tick.className = "chapter-tick";
+        tick.style.setProperty("--pos", ((ch.startTime / total) * 100).toFixed(3) + "%");
+        container.appendChild(tick);
+      }
+    }
+  }
+
+  if (!npChaptersList || !npChaptersEmpty) return;
+  if (chapters.length === 0) {
+    npChaptersList.replaceChildren();
+    npChaptersEmpty.classList.remove("hidden");
+    return;
+  }
+  npChaptersEmpty.classList.add("hidden");
+  const rows = chapters.map((ch, idx) => {
+    const li = document.createElement("li");
+    li.className = "np-chapter-item";
+    li.dataset.chapterIndex = String(idx);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "np-chapter-btn";
+    const timeEl = document.createElement("span");
+    timeEl.className = "np-chapter-time";
+    timeEl.textContent = fmt(ch.startTime);
+    const titleEl = document.createElement("span");
+    titleEl.className = "np-chapter-title";
+    titleEl.textContent = ch.title;
+    btn.appendChild(timeEl);
+    btn.appendChild(titleEl);
+    btn.addEventListener("click", () => {
+      if (Number.isFinite(audio.duration) || audio.readyState >= 1) {
+        audio.currentTime = Math.min(ch.startTime, audio.duration || ch.startTime);
+        if (audio.paused) void audio.play().catch(() => {});
+      } else if (current) {
+        void select(current, true, ch.startTime);
+      }
+    });
+    li.appendChild(btn);
+    return li;
+  });
+  npChaptersList.replaceChildren(...rows);
+}
+
+/** @param {number} currentTime */
+function updateActiveChapter(currentTime) {
+  const chapters = current?.chapters ?? [];
+  let activeIdx = -1;
+  for (let i = 0; i < chapters.length; i++) {
+    if (currentTime >= chapters[i].startTime - 0.5) activeIdx = i;
+    else break;
+  }
+  const active = activeIdx >= 0 ? chapters[activeIdx] : null;
+  if (nowChapter) {
+    nowChapter.textContent = active ? active.title : "";
+    nowChapter.classList.toggle("hidden", !active);
+  }
+  if (npChapter) {
+    npChapter.textContent = active ? `Chapter: ${active.title}` : "";
+    npChapter.classList.toggle("hidden", !active);
+  }
+  if (npChaptersList) {
+    for (const li of npChaptersList.querySelectorAll("li.np-chapter-item")) {
+      const rowEl = /** @type {HTMLLIElement} */ (li);
+      rowEl.dataset.active = String(Number(rowEl.dataset.chapterIndex) === activeIdx);
+    }
+  }
+}
+
+/** @param {PlayerEpisode | null} episode */
+async function loadReadAlong(episode) {
+  if (!npReadBody) return;
+  if (!episode) {
+    npReadBody.replaceChildren();
+    return;
+  }
+  if (npExternalLink) {
+    if (episode.articleUrl) {
+      npExternalLink.href = episode.articleUrl;
+      npExternalLink.classList.remove("hidden");
+    } else {
+      npExternalLink.removeAttribute("href");
+      npExternalLink.classList.add("hidden");
+    }
+  }
+  let cached = articleCache.get(episode.id);
+  if (!cached) {
+    const loading = document.createElement("p");
+    loading.className = "np-empty";
+    loading.textContent = "Loading article text…";
+    npReadBody.replaceChildren(loading);
+    try {
+      const res = await fetch(
+        ORIGIN + "/listen/" + encodeURIComponent(TOKEN) + "/episodes/" +
+          encodeURIComponent(episode.id) + "/article",
+        { headers: { accept: "application/json" } },
+      );
+      if (res.ok) {
+        cached = await res.json();
+        if (cached) articleCache.set(episode.id, cached);
+      }
+    } catch { /* offline */ }
+  }
+  if (current?.id !== episode.id) return;
+  const paragraphs = cached?.paragraphs ?? [];
+  if (paragraphs.length === 0) {
+    const emptyMsg = document.createElement("p");
+    emptyMsg.className = "np-empty";
+    emptyMsg.textContent = "Article text is unavailable offline.";
+    npReadBody.replaceChildren(emptyMsg);
+    return;
+  }
+  const nodes = paragraphs.map((text) => {
+    const p = document.createElement("p");
+    p.className = "np-read-para";
+    p.textContent = text;
+    return p;
+  });
+  npReadBody.replaceChildren(...nodes);
+}
+
+/** @param {string} tabName */
+function activateNpTab(tabName) {
+  activeNpTab = tabName;
+  const map = [
+    ["chapters", "npTabChapters", "npPanelChapters"],
+    ["queue", "npTabQueue", "npPanelQueue"],
+    ["read", "npTabRead", "npPanelRead"],
+  ];
+  for (const [name, tabId, panelId] of map) {
+    const tab = document.getElementById(tabId);
+    const panel = document.getElementById(panelId);
+    const selected = name === tabName;
+    if (tab) tab.setAttribute("aria-selected", selected ? "true" : "false");
+    if (panel) panel.classList.toggle("hidden", !selected);
+  }
+  if (tabName === "read" && current) {
+    void loadReadAlong(current);
+  }
+}
+
+/** @param {string} [initialTab] */
+function openNowPlaying(initialTab) {
+  if (!npDialog || typeof npDialog.showModal !== "function") return;
+  if (initialTab) activateNpTab(initialTab);
+  else if (activeNpTab === "read" && current) void loadReadAlong(current);
+  renderQueueUI();
+  if (!npDialog.open) npDialog.showModal();
+}
+
+function updateSleepUI() {
+  if (!sleepBtn || !sleepLabel) return;
+  if (sleepTimerTarget === null) {
+    sleepLabel.textContent = "";
+    sleepBtn.dataset.active = "false";
+    if (npSleepSelect) npSleepSelect.value = "0";
+    return;
+  }
+  sleepBtn.dataset.active = "true";
+  if (sleepTimerTarget === "episode") {
+    sleepLabel.textContent = "End";
+    if (npSleepSelect) npSleepSelect.value = "episode";
+    return;
+  }
+  const remSec = Math.max(0, Math.ceil((sleepTimerTarget - Date.now()) / 1000));
+  if (remSec <= 0) {
+    audio.pause();
+    clearSleepTimer();
+    say("Sleep timer paused playback.", "ok");
+    return;
+  }
+  sleepLabel.textContent = fmt(remSec);
+}
+
+function clearSleepTimer() {
+  sleepTimerTarget = null;
+  if (sleepInterval !== null) {
+    clearInterval(sleepInterval);
+    sleepInterval = null;
+  }
+  updateSleepUI();
+}
+
+/** @param {string} mode */
+function setSleepTimer(mode) {
+  clearSleepTimer();
+  if (mode === "episode") {
+    sleepTimerTarget = "episode";
+    updateSleepUI();
+    say("Sleep timer set for end of episode.", "ok");
+    return;
+  }
+  const minutes = Number(mode);
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    say("Sleep timer off.");
+    return;
+  }
+  sleepTimerTarget = Date.now() + minutes * 60_000;
+  sleepInterval = setInterval(updateSleepUI, 1000);
+  updateSleepUI();
+  say(`Sleep timer set for ${minutes} min.`, "ok");
+}
+
+function playNextEpisode() {
+  while (upNextIds.length > 0) {
+    const nextId = upNextIds.shift();
+    saveQueue(upNextIds);
+    const nextEp = EPISODES.find((e) => e.id === nextId);
+    if (nextEp) {
+      renderQueueUI();
+      render();
+      void select(nextEp, true, getPosition(nextEp.id));
+      return true;
+    }
+  }
+  if (!current || EPISODES.length < 2) return false;
+  const idx = EPISODES.findIndex((e) => e.id === current?.id);
+  const nextEp = idx >= 0 && idx + 1 < EPISODES.length ? EPISODES[idx + 1] : null;
+  if (nextEp) {
+    void select(nextEp, true, getPosition(nextEp.id));
+    return true;
+  }
+  return false;
+}
+
+function playPreviousEpisode() {
+  if (audio.currentTime > 5) {
+    audio.currentTime = 0;
+    setProgress();
+    return;
+  }
+  if (!current || EPISODES.length < 2) return;
+  const idx = EPISODES.findIndex((e) => e.id === current?.id);
+  const prevEp = idx > 0 ? EPISODES[idx - 1] : null;
+  if (prevEp) {
+    void select(prevEp, true, 0);
+  }
+}
+
 /** @param {PlayerEpisode} episode @param {boolean} autoplay @param {number} [startPos] */
 async function select(episode, autoplay, startPos) {
   current = episode;
@@ -1455,11 +2015,23 @@ async function select(episode, autoplay, startPos) {
   if (!isSameSrc) {
     audio.src = episode.audioUrl;
   }
+  const savedRate = Number(rate.value) || loadSavedRate();
+  audio.playbackRate = savedRate;
+
+  const artSrc = episode.artworkUrl || "/icon.png";
+  if (nowArt) nowArt.src = artSrc;
+  if (npArt) npArt.src = artSrc;
+  if (npSource) npSource.textContent = episode.source || "Audio Feed";
+  if (npTitle) npTitle.textContent = episode.title;
+
   nowTitle.textContent = episode.title;
   const sub = [];
   if (episode.source) sub.push(episode.source);
   if (episode.author) sub.push(episode.author);
-  nowSub.textContent = sub.join(" — ") || "Audio Feed";
+  const subText = sub.join(" — ") || "Audio Feed";
+  nowSub.textContent = subText;
+  if (npSub) npSub.textContent = subText;
+
   // Read-along linkback (audio-feed-585): the dock is where he listens, so the way back to the
   // article lives here too, not only in the list row.
   if (nowRead) {
@@ -1473,6 +2045,12 @@ async function select(episode, autoplay, startPos) {
     }
   }
   seek.disabled = false;
+  if (npSeek) npSeek.disabled = false;
+
+  renderChaptersUI(episode, Number.isFinite(audio.duration) ? audio.duration : (episode.durationSeconds || 0));
+  if (activeNpTab === "read" && npDialog?.open) {
+    void loadReadAlong(episode);
+  }
 
   for (const li of list.querySelectorAll("li.episode")) {
     // querySelectorAll hands back Element; these are the <li> rows row() builds, and dataset is
@@ -1487,13 +2065,16 @@ async function select(episode, autoplay, startPos) {
     if (audio.readyState >= 1) {
       audio.currentTime = seekTarget;
       setProgress();
+      updateActiveChapter(seekTarget);
     } else {
       /** @type {() => void} */
       const onLoaded = () => {
         audio.removeEventListener("loadedmetadata", onLoaded);
         if (current?.id === episode.id) {
           audio.currentTime = seekTarget;
+          audio.playbackRate = Number(rate.value) || loadSavedRate();
           setProgress();
+          updateActiveChapter(seekTarget);
           if ("mediaSession" in navigator && audio.duration) {
             try {
               navigator.mediaSession.setPositionState({
@@ -1510,15 +2091,38 @@ async function select(episode, autoplay, startPos) {
   } else {
     audio.currentTime = 0;
     setProgress();
+    updateActiveChapter(0);
   }
 
   if ("mediaSession" in navigator) {
-    navigator.mediaSession.metadata = new MediaMetadata({
+    const artAbs = artSrc.startsWith("http") ? artSrc : ORIGIN + artSrc;
+    const iconPngAbs = ORIGIN + "/icon.png";
+    /** @type {MediaMetadataInit & { chapterInfo?: Array<{ title: string; startTime: number }> }} */
+    const metaInit = {
       title: episode.title,
       artist: episode.author || "Audio Feed",
       album: episode.source || "Audio Feed",
-      artwork: [{ src: ORIGIN + "/icon.svg", sizes: "any", type: "image/svg+xml" }],
-    });
+      artwork: [
+        { src: artAbs, sizes: "512x512", type: "image/png" },
+        { src: iconPngAbs, sizes: "512x512", type: "image/png" },
+      ],
+    };
+    if (episode.chapters && episode.chapters.length > 0) {
+      metaInit.chapterInfo = episode.chapters.map((c) => ({
+        title: c.title,
+        startTime: c.startTime,
+      }));
+    }
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata(metaInit);
+    } catch {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: episode.title,
+        artist: episode.author || "Audio Feed",
+        album: episode.source || "Audio Feed",
+        artwork: [{ src: iconPngAbs, sizes: "512x512", type: "image/png" }],
+      });
+    }
   }
   if (autoplay) {
     try {
@@ -1549,6 +2153,7 @@ function setProgress() {
   const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
   const ratio = duration > 0 ? audio.currentTime / duration : 0;
   seek.style.setProperty("--progress", String(ratio));
+  if (npSeek) npSeek.style.setProperty("--progress", String(ratio));
 }
 
 playPause.addEventListener("click", toggle);
@@ -1558,9 +2163,11 @@ backBtn.addEventListener("click", () => {
 fwdBtn.addEventListener("click", () => {
   audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30);
 });
-seek.addEventListener("input", () => {
+
+/** @param {number} value */
+function handleSeekInput(value) {
   if (Number.isFinite(audio.duration)) {
-    audio.currentTime = Number(seek.value);
+    audio.currentTime = value;
     if (current) {
       if (audio.currentTime <= 2) {
         clearPosition(current.id);
@@ -1571,27 +2178,92 @@ seek.addEventListener("input", () => {
         `li[data-episode-id="${current.id}"]`,
       ));
       if (rowEl) updateRowResumeUI(rowEl, current);
+      updateActiveChapter(audio.currentTime);
     }
   }
   setProgress();
-});
+}
+
+seek.addEventListener("input", () => handleSeekInput(Number(seek.value)));
+if (npSeek) npSeek.addEventListener("input", () => handleSeekInput(Number(npSeek.value)));
 rate.addEventListener("change", () => {
-  audio.playbackRate = Number(rate.value);
+  const next = Number(rate.value);
+  audio.playbackRate = next;
+  saveRate(next);
 });
+
+if (expandPlayerBtn) expandPlayerBtn.addEventListener("click", () => openNowPlaying());
+if (openQueueBtn) openQueueBtn.addEventListener("click", () => openNowPlaying("queue"));
+if (npCloseBtn) npCloseBtn.addEventListener("click", () => npDialog?.close("close"));
+if (npPlayPauseBtn) npPlayPauseBtn.addEventListener("click", toggle);
+if (npBackBtn) {
+  npBackBtn.addEventListener("click", () => {
+    audio.currentTime = Math.max(0, audio.currentTime - 15);
+  });
+}
+if (npFwdBtn) {
+  npFwdBtn.addEventListener("click", () => {
+    audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30);
+  });
+}
+if (npPrevBtn) npPrevBtn.addEventListener("click", playPreviousEpisode);
+if (npNextBtn) npNextBtn.addEventListener("click", () => void playNextEpisode());
+if (npSleepSelect) {
+  npSleepSelect.addEventListener("change", () => setSleepTimer(npSleepSelect.value));
+}
+if (sleepBtn) {
+  const presets = ["15", "30", "episode", "0"];
+  sleepBtn.addEventListener("click", () => {
+    const curVal = sleepTimerTarget === null
+      ? "0"
+      : sleepTimerTarget === "episode"
+      ? "episode"
+      : "15";
+    const idx = presets.indexOf(curVal);
+    setSleepTimer(presets[(idx + 1) % presets.length]);
+  });
+}
+if (npClearQueueBtn) {
+  npClearQueueBtn.addEventListener("click", () => {
+    upNextIds = [];
+    saveQueue(upNextIds);
+    renderQueueUI();
+    render();
+    say("Cleared Up Next queue.");
+  });
+}
+for (const tabBtn of document.querySelectorAll("[data-np-tab]")) {
+  tabBtn.addEventListener("click", () => {
+    const name = /** @type {HTMLElement} */ (tabBtn).dataset.npTab;
+    if (name) activateNpTab(name);
+  });
+}
 
 let lastSavedTime = 0;
 let lastSavedRealTime = 0;
 
 audio.addEventListener("play", () => {
+  const savedRate = Number(rate.value) || loadSavedRate();
+  if (audio.playbackRate !== savedRate) audio.playbackRate = savedRate;
   setIcon(playIcon, "pause");
   playPause.setAttribute("aria-label", "Pause");
   playPause.setAttribute("aria-pressed", "true");
+  if (npPlayIcon) setIcon(npPlayIcon, "pause");
+  if (npPlayPauseBtn) {
+    npPlayPauseBtn.setAttribute("aria-label", "Pause");
+    npPlayPauseBtn.setAttribute("aria-pressed", "true");
+  }
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
 });
 audio.addEventListener("pause", () => {
   setIcon(playIcon, "play");
   playPause.setAttribute("aria-label", "Play");
   playPause.setAttribute("aria-pressed", "false");
+  if (npPlayIcon) setIcon(npPlayIcon, "play");
+  if (npPlayPauseBtn) {
+    npPlayPauseBtn.setAttribute("aria-label", "Play");
+    npPlayPauseBtn.setAttribute("aria-pressed", "false");
+  }
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   if (current && audio.currentTime > 2) {
     savePosition(current.id, audio.currentTime);
@@ -1599,6 +2271,7 @@ audio.addEventListener("pause", () => {
       `li[data-episode-id="${current.id}"]`,
     ));
     if (rowEl) updateRowResumeUI(rowEl, current);
+    renderContinueListening();
   }
 });
 audio.addEventListener("ended", () => {
@@ -1612,17 +2285,40 @@ audio.addEventListener("ended", () => {
       `li[data-episode-id="${current.id}"]`,
     ));
     if (rowEl) updateRowResumeUI(rowEl, current);
+    renderContinueListening();
+  }
+  if (sleepTimerTarget === "episode") {
+    clearSleepTimer();
+    say("Sleep timer stopped playback at end of episode.", "ok");
+    return;
+  }
+  if (upNextIds.length > 0) {
+    void playNextEpisode();
   }
 });
 audio.addEventListener("loadedmetadata", () => {
-  seek.max = String(audio.duration || 0);
-  nowDuration.textContent = fmt(audio.duration);
-  nowTime.textContent = fmt(audio.currentTime);
+  const durStr = String(audio.duration || 0);
+  seek.max = durStr;
+  if (npSeek) npSeek.max = durStr;
+  const durFmt = fmt(audio.duration);
+  nowDuration.textContent = durFmt;
+  if (npDuration) npDuration.textContent = durFmt;
+  const curFmt = fmt(audio.currentTime);
+  nowTime.textContent = curFmt;
+  if (npTime) npTime.textContent = curFmt;
+  audio.playbackRate = Number(rate.value) || loadSavedRate();
+  renderChaptersUI(current, audio.duration || 0);
+  updateActiveChapter(audio.currentTime);
   setProgress();
 });
 audio.addEventListener("timeupdate", () => {
-  seek.value = String(audio.currentTime);
-  nowTime.textContent = fmt(audio.currentTime);
+  const curStr = String(audio.currentTime);
+  seek.value = curStr;
+  if (npSeek) npSeek.value = curStr;
+  const curFmt = fmt(audio.currentTime);
+  nowTime.textContent = curFmt;
+  if (npTime) npTime.textContent = curFmt;
+  updateActiveChapter(audio.currentTime);
   setProgress();
   if ("mediaSession" in navigator && audio.duration) {
     try {
@@ -1697,6 +2393,8 @@ if ("mediaSession" in navigator) {
         audio.currentTime = Math.min(details.seekTime, audio.duration);
       }
     },
+    previoustrack: () => playPreviousEpisode(),
+    nexttrack: () => void playNextEpisode(),
   };
   for (const [action, handler] of Object.entries(handlers)) {
     try {
@@ -1928,9 +2626,31 @@ filterSource.addEventListener("change", () => {
   saveFilterState(filterSource.value, filterText.value);
   render();
 });
+for (const pill of document.querySelectorAll("[data-listen-filter]")) {
+  pill.addEventListener("click", () => {
+    const next = /** @type {HTMLElement} */ (pill).dataset.listenFilter;
+    if (
+      next === "all" || next === "unplayed" || next === "inprogress" || next === "downloaded"
+    ) {
+      listenFilterState = next;
+      for (const p of document.querySelectorAll("[data-listen-filter]")) {
+        p.setAttribute("aria-pressed", p === pill ? "true" : "false");
+      }
+      render();
+    }
+  });
+}
+
 clearFilterBtn.addEventListener("click", () => {
   filterText.value = "";
   filterSource.value = "";
+  listenFilterState = "all";
+  for (const p of document.querySelectorAll("[data-listen-filter]")) {
+    p.setAttribute(
+      "aria-pressed",
+      /** @type {HTMLElement} */ (p).dataset.listenFilter === "all" ? "true" : "false",
+    );
+  }
   saveFilterState("", "");
   render();
 });
@@ -1939,12 +2659,20 @@ clearFilterBtn.addEventListener("click", () => {
 async function boot() {
   await refreshDownloaded();
 
+  // Restore persisted playback speed across reloads
+  const savedRate = loadSavedRate();
+  if ([...rate.options].some((o) => Number(o.value) === savedRate)) {
+    rate.value = String(savedRate);
+  }
+  audio.playbackRate = savedRate;
+
   // Restore persisted filter state for this token (audio-feed-3h1)
   const savedFilter = loadFilterState();
   populateSourceFilter();
   if (savedFilter.source) filterSource.value = savedFilter.source;
   if (savedFilter.text) filterText.value = savedFilter.text;
 
+  renderQueueUI();
   render();
   if (EPISODES.length > 0) {
     // Preselect so the dock shows something playable, without starting audio.

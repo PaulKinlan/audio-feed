@@ -1,91 +1,38 @@
 /**
- * The Deno Deploy entrypoint pin, checked where a typo can still be fixed cheaply (audio-feed-w55i).
- *
- * WHY THIS EXISTS. The live project failed a build with
- *
- *   Entrypoint at '/tmp/build/src/src/server.ts' not found
- *
- * because the entrypoint existed only in the Deno Deploy dashboard, where it drifted out of sight
- * of the repo. `deno.json` now carries the runtime configuration (`deploy.runtime`), and Deno Deploy
- * reads it from source — the docs are explicit that source configuration takes precedence over the
- * dashboard, and that after a build succeeds from source config those fields stop being editable in
- * the dashboard.
- *
- * The failure mode this test kills is the one that just cost a build: an entrypoint PATH that names
- * nothing. Deploy's builder reports it as a failed build, minutes later, on a platform we cannot
- * inspect from here. A stat() in the repo's own gate reports it in milliseconds, in the change that
- * introduced it.
- *
- * WHAT IT DOES NOT CLAIM. It cannot prove Deno Deploy honours the block for THIS project: the
- * dashboard's "app directory" (which determines the source root the entrypoint is resolved
- * against) is not settable from source and is not visible from here. If that directory is
- * configured as `src/` rather than the repository root, the entrypoint resolves inside `src/` and
- * this block — read from the ROOT deno.json, which is also looked up relative to that directory —
- * would not be applied at all. So the test pins the repo-side truth: the block exists, the type is
- * dynamic, and the file it names really is there. The build is the only proof of the rest.
+ * Verifies the Cloudflare Workers deployment config (`wrangler.jsonc`) stays pinned
+ * to the real entrypoint, custom domain, D1 database, R2 bucket, and cron triggers.
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { stripJsonComments } from "./jsonc.ts";
 
-const ROOT = new URL("../", import.meta.url);
+Deno.test("wrangler.jsonc pins entrypoint, audiofeed.app custom domain, D1, R2, and cron triggers", async () => {
+  const raw = await Deno.readTextFile(new URL("../wrangler.jsonc", import.meta.url));
+  const config = JSON.parse(raw);
 
-/**
- * `deno.json` is JSONC — this file's sibling config carries comments explaining why each block
- * exists — and the project deliberately takes no dependency just to read its own config. The reader
- * is shared (tests/jsonc.ts) so that the comment forms Deno accepts cannot make one suite parse
- * differently from another (audio-feed-elnk).
- */
-
-async function deployConfig(): Promise<Record<string, unknown>> {
-  const raw = await Deno.readTextFile(new URL("deno.json", ROOT));
-  const parsed = JSON.parse(stripJsonComments(raw)) as {
-    deploy?: { runtime?: { type?: unknown; entrypoint?: unknown } };
-  };
-  return (parsed.deploy?.runtime ?? {}) as Record<string, unknown>;
-}
-
-Deno.test("audio-feed-w55i: deno.json pins a dynamic Deno Deploy runtime", async () => {
-  const runtime = await deployConfig();
-  // Removing the block is a regression, not a tidy-up: it is the only repo-side record of the
-  // entrypoint, and its absence is what let the dashboard's value drift into "src/src/server.ts".
-  assertEquals(runtime.type, "dynamic", "the deploy runtime must be dynamic, not a static site");
+  assertEquals(config.name, "audio-feed");
+  assertEquals(config.main, "src/worker_entry.ts");
   assert(
-    typeof runtime.entrypoint === "string" && runtime.entrypoint.trim().length > 0,
-    `deploy.runtime.entrypoint must name a file; got ${JSON.stringify(runtime.entrypoint)}`,
+    Array.isArray(config.routes) &&
+      config.routes.some((r: { pattern?: string; custom_domain?: boolean }) =>
+        r.pattern === "audiofeed.app" && r.custom_domain === true
+      ),
+    "wrangler.jsonc must route custom domain audiofeed.app",
   );
-});
-
-Deno.test("audio-feed-w55i: the pinned entrypoint file exists in the repo", async () => {
-  const runtime = await deployConfig();
-  const entrypoint = String(runtime.entrypoint);
-  // A path escaping the repo, or an absolute one, is a build failure waiting to happen. Reject it
-  // here as configuration rather than resolving it and testing whatever path it happens to name.
-  assert(!entrypoint.startsWith("/"), `entrypoint must be repo-relative; got ${entrypoint}`);
-  assert(!entrypoint.split(/[\\/]/).includes(".."), `entrypoint must not escape the repo`);
-
-  const file = new URL(entrypoint, ROOT);
-  const stat = await Deno.stat(file).catch(() => null);
+  assertEquals(config.vars?.PUBLIC_BASE_URL, "https://audiofeed.app");
+  assertEquals(config.vars?.WEBAUTHN_RP_ID, "audiofeed.app");
   assert(
-    stat?.isFile,
-    `deploy.runtime.entrypoint names ${entrypoint}, which does not exist — Deno Deploy would fail ` +
-      `the build with "Entrypoint at /tmp/build/... not found" (the failure this pin exists to stop)`,
+    Array.isArray(config.d1_databases) &&
+      config.d1_databases.some((d: { binding?: string; database_name?: string }) =>
+        d.binding === "DB" && d.database_name === "audio-feed"
+      ),
+    "wrangler.jsonc must bind D1 database audio-feed as DB",
   );
-  // Non-empty, so an empty placeholder file is not mistaken for a working entrypoint.
-  const body = await Deno.readTextFile(file);
-  assert(body.trim().length > 0, `${entrypoint} is empty`);
-});
-
-Deno.test("audio-feed-w55i: the pinned entrypoint is the server module, not a second app", async () => {
-  // main.ts is a deno-serve style entrypoint: it re-exports src/server.ts's default fetch handler.
-  // If a future edit changes the entrypoint to some other file that does NOT export the server, the
-  // build can succeed and the deployment still cannot serve a request. Assert the relationship
-  // rather than the exact text, so either `export ... from` form keeps working.
-  const runtime = await deployConfig();
-  const body = await Deno.readTextFile(new URL(String(runtime.entrypoint), ROOT));
   assert(
-    /export\s*\{[^}]*default[^}]*\}\s*from\s*["']\.\/src\/server\.ts["']/.test(body) ||
-      /import\s*["']\.\/src\/server\.ts["']/.test(body),
-    "the entrypoint must import or re-export ./src/server.ts",
+    Array.isArray(config.r2_buckets) &&
+      config.r2_buckets.some((b: { binding?: string; bucket_name?: string }) =>
+        b.binding === "AUDIO_BUCKET" && b.bucket_name === "audio-feed"
+      ),
+    "wrangler.jsonc must bind R2 bucket audio-feed as AUDIO_BUCKET",
   );
+  assertEquals(config.triggers?.crons, ["*/15 * * * *", "*/2 * * * *", "17 4 * * *"]);
 });

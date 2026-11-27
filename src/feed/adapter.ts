@@ -39,6 +39,8 @@ import type { Episode as FeedEpisode, FeedSource } from "./types.ts";
 export interface FeedProjectionContext {
   /** Absolute site origin, e.g. https://audio.example.com */
   publicBaseUrl: string;
+  /** Per-user capability token used to construct token-gated artwork & chapters URLs. */
+  feedToken?: string;
   /**
    * Size to publish when the stored record has none (or has `0`, which is the
    * same "unknown" state). The caller fills this from the blob store, because
@@ -96,6 +98,9 @@ export function toFeedEpisode(
   if (!isPublishable(episode)) return null;
 
   const recorded = episode.byteLength && episode.byteLength > 0 ? episode.byteLength : undefined;
+  const base = context.publicBaseUrl.replace(/\/+$/, "");
+  const encodedToken = context.feedToken ? encodeURIComponent(context.feedToken) : undefined;
+  const encodedId = encodeURIComponent(episode.id);
   return {
     guid: episode.id,
     title: episode.title,
@@ -108,6 +113,12 @@ export function toFeedEpisode(
     byteLength: recorded ?? context.byteLength,
     mimeType: episode.contentType,
     durationSeconds: episode.durationSeconds,
+    ...(encodedToken
+      ? { imageUrl: `${base}/feed/${encodedToken}/art/episode-${encodedId}.png` }
+      : {}),
+    ...(encodedToken && episode.chapters && episode.chapters.length > 0
+      ? { chaptersUrl: `${base}/feed/${encodedToken}/chapters/${encodedId}.json` }
+      : {}),
   };
 }
 

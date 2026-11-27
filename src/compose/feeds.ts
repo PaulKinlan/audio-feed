@@ -145,7 +145,7 @@ async function publishableEpisodes(
   // rather than read from config. Enclosure URLs built from a stale guess are
   // audio a podcast client cannot fetch.
   baseUrl: string,
-  filter: { sourceId?: string; mode?: AudioMode } = {},
+  filter: { sourceId?: string; mode?: AudioMode; feedToken?: string } = {},
 ): Promise<FeedEpisode[]> {
   // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found or the page cap is reached.
   // audio-feed-oxyp1 bounds the work per request:
@@ -200,6 +200,7 @@ async function publishableEpisodes(
       }
       const mapped = toFeedEpisode(episode, {
         publicBaseUrl: baseUrl,
+        feedToken: filter.feedToken,
         byteLength,
       });
       if (mapped) publishable.push(mapped);
@@ -277,7 +278,7 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
     // localhost enclosures that no podcast client could fetch (audio-feed-0k3).
     const { baseUrl } = resolveOrigin(ctx.config, req);
 
-    const episodes = await publishableEpisodes(ctx, user.id, baseUrl);
+    const episodes = await publishableEpisodes(ctx, user.id, baseUrl, { feedToken: token });
     const sources = await ctx.stores.metadata.listSources(user.id);
     const titles = new Map(sources.map((source) => [source.id, source.title]));
 
@@ -289,6 +290,7 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
       selfUrl: baseUrl + masterFeedUrl(token),
       link: baseUrl,
       description: "All subscribed audio-feed episodes: direct reads and deep dives.",
+      imageUrl: `${baseUrl}/feed/${encodeURIComponent(token)}/art/master.png`,
       author: user.displayName,
       // No `ownerEmail`, deliberately (audio-feed-zlu04). This document is a
       // capability handed to third-party podcast clients and directories, so an
@@ -328,13 +330,20 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
 
     const { baseUrl } = resolveOrigin(ctx.config, req);
 
-    const episodes = await publishableEpisodes(ctx, user.id, baseUrl, { sourceId, mode });
+    const episodes = await publishableEpisodes(ctx, user.id, baseUrl, {
+      sourceId,
+      mode,
+      feedToken: token,
+    });
     const modeLabel = mode === "deepdive" ? "Deep Dive" : "Direct Read";
     const channel: ChannelMeta = {
       title: `${source.title} — ${modeLabel}`,
       selfUrl: baseUrl + sourceFeedUrl(token, sourceId, mode),
       link: source.siteUrl ?? baseUrl,
       description: `${modeLabel} audio of ${source.title} articles.`,
+      imageUrl: `${baseUrl}/feed/${encodeURIComponent(token)}/art/source-${
+        encodeURIComponent(sourceId)
+      }.png`,
       author: source.title,
       // No `ownerEmail` here either — see the master feed above (audio-feed-zlu04).
       language: "en",

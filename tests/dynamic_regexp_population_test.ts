@@ -93,9 +93,9 @@ export function scanSourceForDynamicRegExp(relPath: string, source: string): str
   return calls;
 }
 
-/** Derives the runtime population of dynamic RegExp sites across `src/` and `main.ts`. */
+/** Derives the runtime population of dynamic RegExp sites across `src/`. */
 export async function deriveDynamicRegExpPopulation(): Promise<string[]> {
-  const allFiles = [...(await getSourceFiles("src")).sort(), "main.ts"];
+  const allFiles = (await getSourceFiles("src")).sort();
   const population: string[] = [];
   for (const file of allFiles) {
     const content = await Deno.readTextFile(file);

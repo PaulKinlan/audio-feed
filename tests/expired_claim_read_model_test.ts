@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { claimAttemptsFrom, isClaimStartRecord } from "../src/observability/admin_report.ts";
-import { KvMetadataStore } from "../src/storage/kv.ts";
+import { D1MetadataStore } from "../src/storage/d1.ts";
+import { createTestD1 } from "./sqlite_d1.ts";
 import { MemoryMetadataStore } from "../src/storage/memory.ts";
 import type { LogRecord, MetadataStore } from "../src/storage/mod.ts";
 import { makeEpisode, makeUser } from "./fixtures.ts";
@@ -39,9 +40,16 @@ function expiredEvents(records: LogRecord[]): LogRecord[] {
 const adapters: { name: string; create: () => Promise<MetadataStore> | MetadataStore }[] = [
   { name: "memory", create: () => new MemoryMetadataStore() },
   {
-    name: "KV",
-    create: async () =>
-      new KvMetadataStore(await Deno.openKv(":memory:"), { ownsConnection: true }),
+    name: "D1",
+    create: () => {
+      const d1 = createTestD1();
+      const store = new D1MetadataStore(d1);
+      store.close = () => {
+        d1.close();
+        return Promise.resolve();
+      };
+      return store;
+    },
   },
 ];
 

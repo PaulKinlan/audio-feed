@@ -80,6 +80,7 @@ export const MANIFEST = {
   theme_color: "#18181b",
   background_color: "#09090b",
   icons: [
+    { src: "/icon.png", sizes: "512x512", type: "image/png", purpose: "any" },
     { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
     { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "maskable" },
   ],

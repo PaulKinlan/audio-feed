@@ -462,7 +462,7 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
     throw new GroundedScriptError("createGroundedScriptGenerator requires an API key");
   }
   return async (input, options) => {
-    const fetchFn = deps.fetchFn ?? fetch;
+    const fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
     // The API key must never travel in the query string: request URLs are retained by proxies,
     // platform logs and error traces. Send it in the x-goog-api-key header, like src/tts/gemini.ts.
     const url = `${GEMINI_GENERATE_ENDPOINT}/${model}:generateContent`;

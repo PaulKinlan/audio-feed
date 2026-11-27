@@ -765,7 +765,9 @@ Deno.test("synthesis: the stage can be switched off explicitly", async () => {
 // The mock cases above prove the contract; this one proves the contract is not a fiction about
 // the API. It is opt-in because it costs money and a network round trip, and it is skipped
 // loudly rather than silently so a green run never implies it ran.
-const LIVE_API_KEY = Deno.env.get("GEMINI_API_KEY");
+const LIVE_API_KEY = Deno.env.get("RUN_LIVE_GEMINI_TESTS") === "1"
+  ? Deno.env.get("GEMINI_API_KEY")
+  : undefined;
 
 Deno.test("live: a real grounded call returns dialogue and real search sources", async () => {
   if (!LIVE_API_KEY) {

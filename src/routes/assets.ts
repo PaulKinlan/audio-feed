@@ -15,27 +15,20 @@
  * the bytes do. A content-addressed name means a stale client keeps the old file (correct) and a new
  * deploy gets a new URL, with no cache purge step to forget.
  */
-import listenCss from "../assets/listen.css" with { type: "text" };
-import listenJs from "../assets/listen.js" with { type: "text" };
-import listenLandingCss from "../assets/listen-landing.css" with { type: "text" };
-import listenLandingJs from "../assets/listen-landing.js" with { type: "text" };
-import adminCss from "../assets/admin.css" with { type: "text" };
-import adminJs from "../assets/admin.js" with { type: "text" };
-// The same-origin path guard (audio-feed-fg18i): the console's `api(path, options)` forwards its
-// caller's path into fetch(), and THREAT_MODEL.md register row 6 requires that path to be an
-// absolute single-slash same-origin route. Composed first, like the confirm client below, because
-// the console module binds to it through globalThis; shell.ts embeds the same bytes inline on the
-// login and account pages.
-import sameOriginPathJs from "../assets/same-origin-path.js" with { type: "text" };
-// The admin console module is COMPOSED (audio-feed-3xq part 4c): the canonical confirm client
-// ships in front of the console code as one served module, the same way listen.css below
-// composes the design tokens in front of the page stylesheet. One source, many surfaces:
-// shell.ts embeds this file's marked region inline on the classic-script pages.
-import confirmSharedJs from "../assets/confirm-shared.js" with { type: "text" };
-import homeCss from "../assets/home.css" with { type: "text" };
-import homeJs from "../assets/home.js" with { type: "text" };
+import { ASSETS_RAW } from "../assets/bundle.ts";
 import { DESIGN_TOKENS } from "./tokens.ts";
 import type { RouteContext } from "../router.ts";
+
+const listenCss = ASSETS_RAW["listen.css"];
+const listenJs = ASSETS_RAW["listen.js"];
+const listenLandingCss = ASSETS_RAW["listen-landing.css"];
+const listenLandingJs = ASSETS_RAW["listen-landing.js"];
+const adminCss = ASSETS_RAW["admin.css"];
+const adminJs = ASSETS_RAW["admin.js"];
+const sameOriginPathJs = ASSETS_RAW["same-origin-path.js"];
+const confirmSharedJs = ASSETS_RAW["confirm-shared.js"];
+const homeCss = ASSETS_RAW["home.css"];
+const homeJs = ASSETS_RAW["home.js"];
 
 /**
  * FNV-1a, 32-bit, hex. Chosen over SHA-256 because it is synchronous — a hash computed at module

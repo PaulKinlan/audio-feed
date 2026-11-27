@@ -1,0 +1,79 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "audio-feed",
+  "main": "src/worker_entry.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "audiofeed.app",
+      "custom_domain": true
+    }
+  ],
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "audio-feed",
+      "database_id": "dec55b22-1022-46e4-b634-22e1318c48cc",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AUDIO_BUCKET",
+      "bucket_name": "audio-feed"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "episode-synthesis",
+      "binding": "EPISODE_WORKFLOW",
+      "class_name": "EpisodeSynthesisWorkflow"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "FEED_POLL_QUEUE",
+        "queue": "audio-feed-poll"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "audio-feed-poll",
+        "max_batch_size": 2,
+        "max_retries": 3,
+        "dead_letter_queue": "audio-feed-poll-dlq"
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "*/15 * * * *",
+      "*/2 * * * *",
+      "17 4 * * *"
+    ]
+  },
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "vars": {
+    "PUBLIC_BASE_URL": "https://audiofeed.app",
+    "WEBAUTHN_RP_ID": "audiofeed.app",
+    "STORAGE_REGION": "auto",
+    "DEFAULT_DAILY_EPISODE_BUDGET": "50",
+    "GLOBAL_DAILY_EPISODE_BUDGET": "500",
+    "LOG_RETENTION_DAYS": "7",
+    "MAX_INVOCATION_DURATION_MS": "240000"
+  },
+  "build": {
+    "command": "node scripts/generate-assets.mjs"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -17,6 +17,7 @@ import { resolveOrigin } from "../origin.ts";
 import { base64url, sessionUser } from "../auth/sessions.ts";
 import { relyingParty } from "../auth/passkeys.ts";
 import { GEMINI_TTS_VOICES, VOICE_PROFILES } from "../tts/gemini.ts";
+import { isOutdated } from "../tts/prompt_version.ts";
 import { INBOX_SOURCE_ID, isClaimExpired } from "../types.ts";
 import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
@@ -57,21 +58,51 @@ export interface AccountPageData {
   failedCount: number;
   /** Optional prefill from query params or bookmarklet (audio-feed-ep1). */
   prefill?: PrefillData | null;
+  /** Initial active workspace tab ("episodes" | "add" | "feeds" | "settings"). */
+  initialTab?: "episodes" | "add" | "feeds" | "settings";
   /** CSP nonce for this response (audio-feed-syhu); stamped on the shell's inline tags. */
   nonce: string;
 }
 
 const CSS = `
-  .account-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 0.5rem 1rem; margin-block-end: 1.25rem; }
+  .account-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 0.5rem 1rem; margin-block-end: 1rem; }
   .account-head h1 { margin: 0; }
   .account-head .meta { margin: 0.25rem 0 0; }
+  .account-tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-block-end: 1.25rem; padding: 0.3rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+  .account-tab { appearance: none; border: 1px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 0.9rem; font-weight: 600; padding: 0.5rem 0.9rem; border-radius: calc(var(--radius) - 3px); cursor: pointer; display: inline-flex; align-items: center; gap: 0.45rem; transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease; }
+  .account-tab:hover { color: var(--text); }
+  .account-tab[aria-selected="true"] { background: var(--surface); color: var(--text); border-color: var(--border); box-shadow: 0 1px 2px color-mix(in srgb, #000 18%, transparent); }
+  .account-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tab-pill { font-size: 0.72rem; font-weight: 700; padding: 0.08rem 0.45rem; border-radius: 999px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+  .tab-pill[data-tone="danger"] { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+  .tab-panel[hidden] { display: none; }
+  .ep-filters { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: center; margin-block: 0.75rem 1rem; padding-block-end: 0.75rem; border-bottom: 1px solid var(--border); }
+  .ep-filter-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .ep-chip { appearance: none; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); font: inherit; font-size: 0.8rem; font-weight: 600; padding: 0.3rem 0.65rem; border-radius: 999px; cursor: pointer; }
+  .ep-chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink, #0a0a0c); border-color: var(--accent); }
+  .ep-filter-inputs { display: flex; flex-wrap: wrap; gap: 0.5rem; flex: 1 1 16rem; justify-content: flex-end; }
+  .ep-filter-inputs input, .ep-filter-inputs select { min-width: 9rem; padding: 0.38rem 0.6rem; font-size: 0.86rem; }
+  .ep-row-layout { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 0.75rem; align-items: start; }
+  .ep-thumb { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; background: var(--surface-2); border: 1px solid var(--border); display: block; flex-shrink: 0; }
+  .ep-row-body { min-width: 0; }
+  .error-disclosure { margin-block-start: 0.4rem; }
+  .error-disclosure > summary { cursor: pointer; font-size: 0.82rem; color: var(--danger); list-style-position: inside; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .error-disclosure[open] > summary { white-space: normal; }
+  .source-feeds { margin-block-start: 0.5rem; }
+  .source-feeds > summary { cursor: pointer; font-size: 0.82rem; color: var(--muted); font-weight: 600; }
   .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
   .feed-paths { display: grid; gap: 0.4rem; margin-block-start: 0.5rem; }
   .ep-status { font-size: 0.78rem; font-weight: 600; color: var(--muted); }
   .ep-status[data-status="ready"] { color: var(--ok); }
   .ep-status[data-status="failed"] { color: var(--danger); }
+  .ep-status[data-status="pending"], .ep-status[data-status="synthesizing"] { color: var(--accent); }
   .ep-audio { width: 100%; height: 2.25rem; margin-block: 0.35rem 0.15rem; }
+  .btn[aria-disabled="true"] { opacity: 0.55; cursor: default; }
+  .row-feedback { font-size: 0.82rem; color: var(--muted); }
+  .row-feedback[data-tone="ok"] { color: var(--ok); }
+  .row-feedback[data-tone="error"] { color: var(--danger); }
   .episodes-pagination { display: flex; gap: 0.5rem; margin-block-start: 1rem; align-items: center; }
+  .ep-filter-empty[hidden] { display: none; }
   .send-row { display: grid; gap: 0.75rem; }
   @media (min-width: 40rem) { .send-row { grid-template-columns: 1fr auto; align-items: end; } }
   .send .choices { margin-block-start: 0.75rem; }
@@ -148,26 +179,51 @@ export function renderAccountPage(d: AccountPageData): string {
       <div class="meta">${s.feedUrl ? esc(s.feedUrl) : "Articles you send"} · last polled ${
       when(s.lastPolledAt)
     }</div>
-      <div class="feed-paths">${paths}</div></li>`;
+      <details class="source-feeds"><summary>Feed URLs (${s.modes.length})</summary><div class="feed-paths">${paths}</div></details></li>`;
   }).join("");
 
+  const episodeSources = [...new Set(d.episodes.map((e) => e.sourceTitle ?? e.sourceId))]
+    .sort((a, b) => a.localeCompare(b));
+  const episodeSourceOptions = episodeSources
+    .map((s) => `<option value="${esc(s)}">${esc(s)}</option>`)
+    .join("");
   const episodeItems = d.episodes.map((e) => {
     const audioUrl = e.status === "ready" && e.audioKey
       ? `/audio/${e.audioKey.replace(/^\/+/, "")}`
       : null;
+    const artUrl = `/feed/${encodeURIComponent(user.feedToken)}/art/episode-${encodeURIComponent(e.id)}.png`;
     const isStaleSynthesizing = e.status === "synthesizing" && (
       isClaimExpired(e, Date.now()) ||
       (Date.now() - Date.parse(e.lastHeartbeat ?? e.claimedAt ?? "") >= 2 * 60_000)
     );
-    return `<li><div class="row-head"><span class="row-title">${esc(e.title)}</span>
+    const outdated = isOutdated(e);
+    const sourceLabel = e.sourceTitle ?? e.sourceId;
+    const errorSummary = e.error
+      ? (e.error.length > 96 ? `${e.error.slice(0, 93)}…` : e.error)
+      : "";
+    return `<li data-episode-id="${esc(e.id)}" data-episode-status="${esc(e.status)}" data-episode-regenerating="${
+      e.regenerating ? "1" : "0"
+    }" data-episode-outdated="${outdated ? "1" : "0"}" data-episode-title="${
+      esc(e.title)
+    }" data-episode-source="${esc(sourceLabel)}"><div class="ep-row-layout"><img class="ep-thumb" src="${
+      esc(artUrl)
+    }" alt="" width="48" height="48" loading="lazy" decoding="async"><div class="ep-row-body"><div class="row-head"><span class="row-title">${
+      esc(e.title)
+    }</span>
       <span class="ep-status" data-status="${esc(e.status)}">${esc(e.status)}</span></div>
       <div class="meta">${e.mode === "direct" ? "Read aloud" : "Deep dive"} · ${
-      esc(e.sourceTitle ?? e.sourceId)
-    } · ${when(e.createdAt)}${
+      esc(sourceLabel)
+    } · ${when(e.createdAt)}<span class="ep-phase">${
       e.status === "synthesizing" && e.phase ? ` · synthesizing (${esc(e.phase)})` : ""
-    }</div>
+    }</span></div>
 ${audioUrl ? `<audio controls preload="none" class="ep-audio" src="${esc(audioUrl)}"></audio>` : ""}
-${e.status === "failed" && e.error ? `<div class="error-detail">${esc(e.error)}</div>` : ""}
+${
+      e.status === "failed" && e.error
+        ? `<details class="error-disclosure"><summary>${esc(errorSummary)}</summary><div class="error-detail">${
+          esc(e.error)
+        }</div></details>`
+        : ""
+    }
 ${
       approved && e.status === "ready" && !e.regenerating
         ? `
@@ -182,7 +238,7 @@ ${
           esc(e.id)
         }" data-title="${esc(e.title)}" data-tooltip="Retry ${esc(e.title)}">Retry</button></div>`
         : ""
-    }
+    }</div></div>
     </li>`;
   }).join("");
 
@@ -343,6 +399,9 @@ ${
     </div>
   </section>`;
 
+  const activeTab = d.initialTab ?? (prefill ? "add" : "episodes");
+  const isTab = (name: "episodes" | "add" | "feeds" | "settings") => activeTab === name;
+
   const main = `<div class="wrap">
   <div class="account-head">
     <div>
@@ -355,12 +414,100 @@ ${
     <a class="btn quiet" href="/listen/${esc(user.feedToken)}">Open the player</a>
   </div>
   ${pending}
+
+  <div class="account-tabs" role="tablist" aria-label="Account sections">
+    <button class="account-tab" type="button" role="tab" id="tab-episodes" aria-controls="panel-episodes" aria-selected="${
+    isTab("episodes") ? "true" : "false"
+  }" tabindex="${isTab("episodes") ? "0" : "-1"}" data-tab="episodes">Episodes${
+    d.failedCount > 0
+      ? ` <span class="tab-pill" id="tabFailedPill" data-tone="danger">${d.failedCount} failed</span>`
+      : ` <span class="tab-pill" id="tabFailedPill" hidden></span>`
+  }</button>
+    <button class="account-tab" type="button" role="tab" id="tab-add" aria-controls="panel-add" aria-selected="${
+    isTab("add") ? "true" : "false"
+  }" tabindex="${isTab("add") ? "0" : "-1"}" data-tab="add">Add</button>
+    <button class="account-tab" type="button" role="tab" id="tab-feeds" aria-controls="panel-feeds" aria-selected="${
+    isTab("feeds") ? "true" : "false"
+  }" tabindex="${isTab("feeds") ? "0" : "-1"}" data-tab="feeds">Feeds <span class="tab-pill">${
+    d.sources.length
+  }</span></button>
+    <button class="account-tab" type="button" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="${
+    isTab("settings") ? "true" : "false"
+  }" tabindex="${isTab("settings") ? "0" : "-1"}" data-tab="settings">Settings</button>
+  </div>
+
+  <div class="tab-panel" id="panel-episodes" role="tabpanel" aria-labelledby="tab-episodes"${
+    isTab("episodes") ? "" : " hidden"
+  }>
+  <section class="panel" aria-labelledby="episodes-h">
+    <div class="section-title"><h2 id="episodes-h">Recent episodes</h2>${
+    approved
+      ? `<div class="row u-gap-2"><button class="btn quiet small" type="button" id="regenOutdated" data-count="${d.outdatedCount}"${
+        d.outdatedCount ? "" : " disabled"
+      }>Regenerate outdated (${d.outdatedCount})</button>
+      <button class="btn quiet small" type="button" id="retryFailed" data-count="${d.failedCount}"${
+        d.failedCount ? "" : " disabled"
+      }>Retry failed (${d.failedCount})</button></div>`
+      : ""
+  }</div>
+    <p class="sub">Regenerate re-narrates with the current prompts. The old audio stays in your feed until the new one is ready.</p>
+    ${
+    d.episodes.length
+      ? `<div class="ep-filters" role="search" aria-label="Filter episodes">
+      <div class="ep-filter-chips" role="group" aria-label="Filter by status">
+        <button class="ep-chip" type="button" data-filter-status="all" aria-pressed="true">All</button>
+        <button class="ep-chip" type="button" data-filter-status="ready" aria-pressed="false">Ready</button>
+        <button class="ep-chip" type="button" data-filter-status="active" aria-pressed="false">In progress</button>
+        <button class="ep-chip" type="button" data-filter-status="failed" aria-pressed="false">Failed</button>
+      </div>
+      <div class="ep-filter-inputs">
+        <label class="sr-only" for="epFilterSource">Filter by source</label>
+        <select id="epFilterSource" aria-label="Filter by source">
+          <option value="">All sources</option>
+          ${episodeSourceOptions}
+        </select>
+        <label class="sr-only" for="epFilterQuery">Search episodes</label>
+        <input id="epFilterQuery" type="search" placeholder="Search episodes…" autocomplete="off" spellcheck="false">
+      </div>
+    </div>`
+      : ""
+  }
+    ${
+    episodeItems
+      ? `<ul class="rows" id="episodesList">${episodeItems}</ul>`
+      : `<p class="empty">Nothing yet. Switch to the Add tab to send an article or subscribe a feed.</p>`
+  }
+    <p class="empty ep-filter-empty" id="epFilterEmpty" hidden>No episodes match this filter. <button class="btn quiet small" type="button" id="epClearFilters">Clear filters</button></p>
+    ${
+    d.hasMoreEpisodes || (d.currentLimit && d.currentLimit > 10)
+      ? `<div class="episodes-pagination">
+          ${
+        d.hasMoreEpisodes
+          ? `<a class="btn quiet small" id="loadMoreEpisodes" href="/account?limit=${d.nextEpisodesLimit}#episodes-h">Show more episodes</a>`
+          : ""
+      }
+          ${
+        d.currentLimit && d.currentLimit > 10
+          ? `<a class="btn quiet small" id="showFewerEpisodes" href="/account#episodes-h">Show fewer</a>`
+          : ""
+      }
+        </div>`
+      : ""
+  }
+    <p class="feedback" id="regenFeedback" role="status" aria-live="polite"></p>
+  </section>
+  </div>
+
+  <div class="tab-panel" id="panel-add" role="tabpanel" aria-labelledby="tab-add"${
+    isTab("add") ? "" : " hidden"
+  }>
   ${unifiedCard}
+  ${sendSection}
+  </div>
 
-${sendSection}
-
-
-
+  <div class="tab-panel" id="panel-feeds" role="tabpanel" aria-labelledby="tab-feeds"${
+    isTab("feeds") ? "" : " hidden"
+  }>
   <section class="panel" aria-labelledby="feeds-h">
     <div class="section-title"><h2 id="feeds-h">Your feeds</h2></div>
     <p class="sub">Paste into Pocket Casts, Apple Podcasts, Overcast or any app that takes an RSS URL. The URL is your password for listening: keep it to yourself.</p>
@@ -392,7 +539,11 @@ ${sendSection}
       </form>
     </details>
   </section>
+  </div>
 
+  <div class="tab-panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings"${
+    isTab("settings") ? "" : " hidden"
+  }>
   <div class="grid two">
     <section class="panel" aria-labelledby="profile-h">
       <h2 id="profile-h">Profile</h2>
@@ -425,48 +576,13 @@ ${sendSection}
     </section>
   </div>
 
-  <section class="panel" aria-labelledby="episodes-h">
-    <div class="section-title"><h2 id="episodes-h">Recent episodes</h2>${
-    approved
-      ? `<div class="row u-gap-2"><button class="btn quiet small" type="button" id="regenOutdated" data-count="${d.outdatedCount}"${
-        d.outdatedCount ? "" : " disabled"
-      }>Regenerate outdated (${d.outdatedCount})</button>
-      <button class="btn quiet small" type="button" id="retryFailed" data-count="${d.failedCount}"${
-        d.failedCount ? "" : " disabled"
-      }>Retry failed (${d.failedCount})</button></div>`
-      : ""
-  }</div>
-    <p class="sub">Regenerate re-narrates with the current prompts. The old audio stays in your feed until the new one is ready.</p>
-    ${
-    episodeItems
-      ? `<ul class="rows">${episodeItems}</ul>`
-      : `<p class="empty">Nothing yet. Send an article above and it appears here.</p>`
-  }
-    ${
-    d.hasMoreEpisodes || (d.currentLimit && d.currentLimit > 10)
-      ? `<div class="episodes-pagination">
-          ${
-        d.hasMoreEpisodes
-          ? `<a class="btn quiet small" id="loadMoreEpisodes" href="/account?limit=${d.nextEpisodesLimit}#episodes-h">Show more episodes</a>`
-          : ""
-      }
-          ${
-        d.currentLimit && d.currentLimit > 10
-          ? `<a class="btn quiet small" id="showFewerEpisodes" href="/account#episodes-h">Show fewer</a>`
-          : ""
-      }
-        </div>`
-      : ""
-  }
-    <p class="feedback" id="regenFeedback" role="status" aria-live="polite"></p>
-  </section>
-
   <section class="panel danger-zone" aria-labelledby="rotate-h">
     <h2 id="rotate-h">Leaked your feed URL?</h2>
     <p class="sub">Rotating makes a new feed URL and stops the old one at once. Every podcast app you subscribed needs the new one. Previously fetched audio links remain accessible until account suspension.</p>
     <div class="actions"><button class="btn danger" type="button" id="rotateToken">Rotate feed URL</button></div>
     <p class="feedback" id="rotateFeedback" role="status" aria-live="polite"></p>
   </section>
+  </div>
 </div>`;
 
   const script = `(() => {
@@ -771,47 +887,449 @@ ${CONFIRM_DIALOG_CLIENT}
     });
   }
 
-  // Regenerating is paid synthesis: every press confirms what it will spend.
-  for (const button of document.querySelectorAll("[data-regenerate-episode]")) {
-    button.addEventListener("click", async () => {
-      const ok = await askConfirm("Regenerate " + button.dataset.title + "? This narrates it again (1 episode of synthesis).", {
-        title: "Regenerate Episode",
-        confirmText: "Regenerate",
-      });
-      if (!ok) return;
-      button.disabled = true;
-      try {
-        const res = await send("POST", "/api/account/episodes/" + encodeURIComponent(button.dataset.regenerateEpisode) + "/regenerate", {});
-        say($("regenFeedback"), "ok", res.queued ? "Queued for regeneration." : "Already queued.");
-        // Reload so the outdated count, and the spend its confirm states, stay true.
-        setTimeout(() => location.reload(), 700);
-      } catch (error) {
-        say($("regenFeedback"), "error", String(error.message || error));
-        button.disabled = false;
-      }
-    });
-  }
-
-  for (const button of document.querySelectorAll("[data-retry-episode]")) {
-    button.addEventListener("click", async () => {
-      const ok = await askConfirm("Retry episode " + button.dataset.title + "? This will re-queue it for synthesis.", {
-        title: "Retry Episode",
-        confirmText: "Retry",
-      });
-      if (!ok) return;
-      button.disabled = true;
-      try {
-        const res = await send("POST", "/api/account/episodes/" + encodeURIComponent(button.dataset.retryEpisode) + "/retry", {});
-        say($("regenFeedback"), "ok", res.queued ? "Queued for retry." : "Already queued.");
-        setTimeout(() => location.reload(), 700);
-      } catch (error) {
-        say($("regenFeedback"), "error", String(error.message || error));
-        button.disabled = false;
-      }
-    });
-  }
-
+  const episodesList = $("episodesList");
   const retryFailed = $("retryFailed");
+  const regenOutdated = $("regenOutdated");
+  const tabFailedPill = $("tabFailedPill");
+
+  // ── Accessible 4-tab workspace controller (URL hash + keyboard arrows) ──
+  const tabs = [...document.querySelectorAll('.account-tab[role="tab"]')];
+  const panels = new Map(
+    tabs.map((t) => [t.dataset.tab, document.getElementById(t.getAttribute("aria-controls"))]),
+  );
+
+  function activateTab(tabName, opts) {
+    const target = panels.has(tabName) ? tabName : "episodes";
+    for (const tab of tabs) {
+      const selected = tab.dataset.tab === target;
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
+      const panel = panels.get(tab.dataset.tab);
+      if (panel) panel.hidden = !selected;
+    }
+    if (!opts || opts.updateHash !== false) {
+      try {
+        history.replaceState(null, "", location.pathname + location.search + "#" + target);
+      } catch { /* ignore */ }
+    }
+    if (opts && opts.focus) {
+      const activeBtn = tabs.find((t) => t.dataset.tab === target);
+      if (activeBtn) activeBtn.focus();
+    }
+  }
+
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => activateTab(tab.dataset.tab));
+    tab.addEventListener("keydown", (e) => {
+      const idx = tabs.indexOf(tab);
+      let next = -1;
+      if (e.key === "ArrowRight") next = (idx + 1) % tabs.length;
+      else if (e.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = tabs.length - 1;
+      if (next >= 0) {
+        e.preventDefault();
+        activateTab(tabs[next].dataset.tab, { focus: true });
+      }
+    });
+  }
+
+  function syncTabFromHash() {
+    const raw = (location.hash || "").replace(/^#/, "").toLowerCase();
+    if (raw === "episodes" || raw === "episodes-h") activateTab("episodes", { updateHash: false });
+    else if (raw === "add" || raw === "send-h") activateTab("add", { updateHash: false });
+    else if (raw === "feeds" || raw === "feeds-h") activateTab("feeds", { updateHash: false });
+    else if (raw === "settings" || raw === "profile-h" || raw === "passkeys-h") {
+      activateTab("settings", { updateHash: false });
+    }
+  }
+  if (location.hash) syncTabFromHash();
+  window.addEventListener("hashchange", syncTabFromHash);
+
+  // ── Episode status, source, and text filtering ──────────────────────────
+  let activeStatusFilter = "all";
+  const epFilterSource = $("epFilterSource");
+  const epFilterQuery = $("epFilterQuery");
+  const epFilterEmpty = $("epFilterEmpty");
+  const epClearFilters = $("epClearFilters");
+  const statusChips = [...document.querySelectorAll("[data-filter-status]")];
+
+  function applyEpisodeFilters() {
+    if (!episodesList) return;
+    const sourceVal = epFilterSource ? epFilterSource.value : "";
+    const queryVal = epFilterQuery ? epFilterQuery.value.trim().toLowerCase() : "";
+    let visible = 0;
+    const rows = episodesList.querySelectorAll("li[data-episode-id]");
+    for (const li of rows) {
+      const st = li.dataset.episodeStatus || "";
+      const regen = li.dataset.episodeRegenerating === "1";
+      let statusMatch = true;
+      if (activeStatusFilter === "ready") statusMatch = st === "ready" && !regen;
+      else if (activeStatusFilter === "active") {
+        statusMatch = st === "pending" || st === "synthesizing" || regen;
+      } else if (activeStatusFilter === "failed") statusMatch = st === "failed";
+
+      const src = li.dataset.episodeSource || "";
+      const sourceMatch = !sourceVal || src === sourceVal;
+      const hay = ((li.dataset.episodeTitle || "") + " " + src).toLowerCase();
+      const queryMatch = !queryVal || hay.includes(queryVal);
+      const show = statusMatch && sourceMatch && queryMatch;
+      li.hidden = !show;
+      if (show) visible++;
+    }
+    if (epFilterEmpty) {
+      epFilterEmpty.hidden = rows.length === 0 || visible > 0;
+    }
+  }
+
+  for (const chip of statusChips) {
+    chip.addEventListener("click", () => {
+      activeStatusFilter = chip.dataset.filterStatus || "all";
+      for (const c of statusChips) {
+        c.setAttribute("aria-pressed", c === chip ? "true" : "false");
+      }
+      applyEpisodeFilters();
+    });
+  }
+  if (epFilterSource) epFilterSource.addEventListener("change", applyEpisodeFilters);
+  if (epFilterQuery) epFilterQuery.addEventListener("input", applyEpisodeFilters);
+  if (epClearFilters) {
+    epClearFilters.addEventListener("click", () => {
+      activeStatusFilter = "all";
+      for (const c of statusChips) {
+        c.setAttribute("aria-pressed", c.dataset.filterStatus === "all" ? "true" : "false");
+      }
+      if (epFilterSource) epFilterSource.value = "";
+      if (epFilterQuery) epFilterQuery.value = "";
+      applyEpisodeFilters();
+    });
+  }
+
+  function syncFailedPill(count) {
+    if (!tabFailedPill) return;
+    const n = Math.max(0, Number(count) || 0);
+    if (n > 0) {
+      tabFailedPill.hidden = false;
+      tabFailedPill.dataset.tone = "danger";
+      tabFailedPill.textContent = n + " failed";
+    } else {
+      tabFailedPill.hidden = true;
+      tabFailedPill.textContent = "";
+    }
+  }
+
+  function setCounterButton(btn, labelPrefix, nextCount) {
+    if (!btn) return;
+    const count = Math.max(0, Number(nextCount) || 0);
+    btn.dataset.count = String(count);
+    btn.textContent = labelPrefix + " (" + count + ")";
+    btn.disabled = count === 0;
+    if (btn === retryFailed) syncFailedPill(count);
+  }
+
+  function rowBodyOf(li) {
+    return (li && li.querySelector(".ep-row-body")) || li;
+  }
+
+  function setRowFeedback(li, tone, text) {
+    if (!li) return;
+    const container = rowBodyOf(li);
+    let actions = container.querySelector(".actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "actions";
+      container.appendChild(actions);
+    }
+    let note = actions.querySelector(".row-feedback");
+    if (!note) {
+      note = document.createElement("span");
+      note.className = "row-feedback";
+      note.setAttribute("role", "status");
+      note.setAttribute("aria-live", "polite");
+      actions.appendChild(note);
+    }
+    note.dataset.tone = tone;
+    note.textContent = text;
+  }
+
+  function setRowStatus(li, status, phaseText) {
+    if (!li) return;
+    li.dataset.episodeStatus = status;
+    const badge = li.querySelector(".ep-status");
+    if (badge) {
+      badge.dataset.status = status;
+      badge.textContent = status;
+    }
+    const phaseEl = li.querySelector(".ep-phase");
+    if (phaseEl) {
+      phaseEl.textContent = phaseText || "";
+    }
+    if (status !== "failed") {
+      const disc = li.querySelector(".error-disclosure");
+      if (disc) disc.remove();
+      const errEl = li.querySelector(".error-detail");
+      if (errEl) errEl.remove();
+    }
+  }
+
+  function hasActiveEpisodes() {
+    if (!episodesList) return false;
+    for (const li of episodesList.querySelectorAll("li[data-episode-id]")) {
+      const st = li.dataset.episodeStatus;
+      if (st === "pending" || st === "synthesizing" || li.dataset.episodeRegenerating === "1") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  let pollTimer = null;
+  let pollInFlight = false;
+
+  function syncEpisodeRowFromServer(currentLi, freshLi) {
+    const freshStatus = freshLi.dataset.episodeStatus || "";
+    const freshRegen = freshLi.dataset.episodeRegenerating || "0";
+    const freshOutdated = freshLi.dataset.episodeOutdated || "0";
+    const freshPhaseEl = freshLi.querySelector(".ep-phase");
+    const freshPhase = freshPhaseEl ? freshPhaseEl.textContent || "" : "";
+    const prevStatus = currentLi.dataset.episodeStatus || "";
+    const prevRegen = currentLi.dataset.episodeRegenerating || "0";
+    const body = rowBodyOf(currentLi);
+
+    currentLi.dataset.episodeRegenerating = freshRegen;
+    currentLi.dataset.episodeOutdated = freshOutdated;
+    setRowStatus(currentLi, freshStatus, freshPhase);
+
+    const freshErr = freshLi.querySelector(".error-detail");
+    const freshSummary = freshLi.querySelector(".error-disclosure > summary");
+    const existingDisc = currentLi.querySelector(".error-disclosure");
+    if (freshErr) {
+      const summaryText = freshSummary ? freshSummary.textContent : freshErr.textContent;
+      if (existingDisc) {
+        const s = existingDisc.querySelector("summary");
+        const d = existingDisc.querySelector(".error-detail");
+        if (s) s.textContent = summaryText;
+        if (d) d.textContent = freshErr.textContent;
+      } else {
+        const details = document.createElement("details");
+        details.className = "error-disclosure";
+        const summary = document.createElement("summary");
+        summary.textContent = summaryText;
+        const div = document.createElement("div");
+        div.className = "error-detail";
+        div.textContent = freshErr.textContent;
+        details.appendChild(summary);
+        details.appendChild(div);
+        const actions = body.querySelector(".actions");
+        if (actions) body.insertBefore(details, actions);
+        else body.appendChild(details);
+      }
+    } else if (existingDisc) {
+      existingDisc.remove();
+    }
+
+    const freshAudio = freshLi.querySelector("audio.ep-audio");
+    const existingAudio = currentLi.querySelector("audio.ep-audio");
+    if (freshAudio) {
+      const src = freshAudio.getAttribute("src") || "";
+      if (src) {
+        const safeSrc = assertSameOriginPath(src);
+        if (!existingAudio) {
+          const audio = document.createElement("audio");
+          audio.controls = true;
+          audio.preload = "none";
+          audio.className = "ep-audio";
+          audio.src = safeSrc;
+          const meta = body.querySelector(".meta");
+          if (meta && meta.nextSibling) body.insertBefore(audio, meta.nextSibling);
+          else body.appendChild(audio);
+        } else if (existingAudio.getAttribute("src") !== safeSrc && existingAudio.paused) {
+          existingAudio.src = safeSrc;
+        }
+      }
+    }
+
+    // Update the action button only when the row crosses into a terminal or retryable state,
+    // so we never clobber an in-flight button or steal focus while the user scrolls.
+    if (prevStatus !== freshStatus || prevRegen !== freshRegen) {
+      const freshBtn = freshLi.querySelector(".actions button");
+      const actions = body.querySelector(".actions");
+      const hadFocus = actions && actions.contains(document.activeElement);
+      if (freshBtn) {
+        const nextActions = actions || document.createElement("div");
+        nextActions.className = "actions";
+        const newBtn = document.createElement("button");
+        newBtn.type = "button";
+        newBtn.className = freshBtn.className;
+        newBtn.textContent = freshBtn.textContent;
+        for (const attr of freshBtn.attributes) {
+          if (attr.name.startsWith("data-")) {
+            newBtn.setAttribute(attr.name, attr.value);
+          }
+        }
+        nextActions.replaceChildren(newBtn);
+        if (!actions) body.appendChild(nextActions);
+        if (hadFocus) newBtn.focus();
+      } else if (actions && (freshStatus === "pending" || freshStatus === "synthesizing")) {
+        const existingBtn = actions.querySelector("button");
+        if (existingBtn) {
+          existingBtn.setAttribute("aria-disabled", "true");
+          existingBtn.textContent = freshStatus === "synthesizing" ? "Synthesizing…" : "Queued";
+        }
+      } else if (actions) {
+        actions.remove();
+      }
+    }
+    applyEpisodeFilters();
+  }
+
+  async function pollEpisodeStatuses() {
+    if (pollInFlight || document.hidden || !episodesList) return;
+    if (!hasActiveEpisodes()) {
+      stopEpisodePoll();
+      return;
+    }
+    pollInFlight = true;
+    try {
+      const res = await fetch(assertSameOriginPath("/account" + (location.search || "")), {
+        headers: { accept: "text/html" },
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const freshRows = new Map();
+      for (const li of doc.querySelectorAll("#episodesList li[data-episode-id]")) {
+        freshRows.set(li.dataset.episodeId, li);
+      }
+      for (const currentLi of episodesList.querySelectorAll("li[data-episode-id]")) {
+        const freshLi = freshRows.get(currentLi.dataset.episodeId);
+        if (freshLi) syncEpisodeRowFromServer(currentLi, freshLi);
+      }
+      const freshRetry = doc.getElementById("retryFailed");
+      if (freshRetry && retryFailed) {
+        setCounterButton(retryFailed, "Retry failed", freshRetry.dataset.count);
+      }
+      const freshOutdated = doc.getElementById("regenOutdated");
+      if (freshOutdated && regenOutdated) {
+        setCounterButton(regenOutdated, "Regenerate outdated", freshOutdated.dataset.count);
+      }
+    } catch {
+      // Transient poll failure: try again on the next interval.
+    } finally {
+      pollInFlight = false;
+      if (!hasActiveEpisodes()) stopEpisodePoll();
+    }
+  }
+
+  function stopEpisodePoll() {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function scheduleEpisodePoll() {
+    if (!episodesList || !hasActiveEpisodes() || pollTimer !== null) return;
+    pollTimer = setInterval(() => {
+      void pollEpisodeStatuses();
+    }, 6000);
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && hasActiveEpisodes()) {
+      void pollEpisodeStatuses();
+      scheduleEpisodePoll();
+    }
+  });
+
+  // Event delegation keeps scroll position & focus intact on Retry/Regenerate without reloading,
+  // and continues working on rows whose actions change after live status polling.
+  if (episodesList) {
+    episodesList.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+
+      const regenBtn = target.closest("[data-regenerate-episode]");
+      if (regenBtn instanceof HTMLButtonElement) {
+        if (regenBtn.getAttribute("aria-disabled") === "true" || regenBtn.disabled) return;
+        const ok = await askConfirm(
+          "Regenerate " + regenBtn.dataset.title + "? This narrates it again (1 episode of synthesis).",
+          { title: "Regenerate Episode", confirmText: "Regenerate" },
+        );
+        if (!ok) return;
+        const li = regenBtn.closest("li[data-episode-id]");
+        const wasOutdated = li && li.dataset.episodeOutdated === "1";
+        regenBtn.setAttribute("aria-disabled", "true");
+        regenBtn.textContent = "Queuing…";
+        try {
+          const res = await send(
+            "POST",
+            "/api/account/episodes/" + encodeURIComponent(regenBtn.dataset.regenerateEpisode) + "/regenerate",
+            {},
+          );
+          const msg = res.queued ? "Queued for regeneration." : "Already queued.";
+          regenBtn.textContent = "Queued";
+          if (li) {
+            li.dataset.episodeRegenerating = "1";
+            li.dataset.episodeOutdated = "0";
+            setRowFeedback(li, "ok", msg);
+          }
+          if (wasOutdated && res.queued && regenOutdated) {
+            setCounterButton(regenOutdated, "Regenerate outdated", Number(regenOutdated.dataset.count) - 1);
+          }
+          say($("regenFeedback"), "ok", msg);
+          scheduleEpisodePoll();
+        } catch (error) {
+          const errMsg = String(error.message || error);
+          regenBtn.removeAttribute("aria-disabled");
+          regenBtn.textContent = "Regenerate";
+          if (li) setRowFeedback(li, "error", errMsg);
+          say($("regenFeedback"), "error", errMsg);
+        }
+        return;
+      }
+
+      const retryBtn = target.closest("[data-retry-episode]");
+      if (retryBtn instanceof HTMLButtonElement) {
+        if (retryBtn.getAttribute("aria-disabled") === "true" || retryBtn.disabled) return;
+        const ok = await askConfirm(
+          "Retry episode " + retryBtn.dataset.title + "? This will re-queue it for synthesis.",
+          { title: "Retry Episode", confirmText: "Retry" },
+        );
+        if (!ok) return;
+        const li = retryBtn.closest("li[data-episode-id]");
+        const wasFailed = li && li.dataset.episodeStatus === "failed";
+        retryBtn.setAttribute("aria-disabled", "true");
+        retryBtn.textContent = "Queuing…";
+        try {
+          const res = await send(
+            "POST",
+            "/api/account/episodes/" + encodeURIComponent(retryBtn.dataset.retryEpisode) + "/retry",
+            {},
+          );
+          const msg = res.queued ? "Queued for retry." : "Already queued.";
+          retryBtn.textContent = "Queued";
+          if (li) {
+            setRowStatus(li, "pending", "");
+            setRowFeedback(li, "ok", msg);
+          }
+          if (wasFailed && retryFailed) {
+            setCounterButton(retryFailed, "Retry failed", Number(retryFailed.dataset.count) - 1);
+          }
+          say($("regenFeedback"), "ok", msg);
+          scheduleEpisodePoll();
+        } catch (error) {
+          const errMsg = String(error.message || error);
+          retryBtn.removeAttribute("aria-disabled");
+          retryBtn.textContent = "Retry";
+          if (li) setRowFeedback(li, "error", errMsg);
+          say($("regenFeedback"), "error", errMsg);
+        }
+      }
+    });
+  }
+
   if (retryFailed) {
     retryFailed.addEventListener("click", async () => {
       const count = Number(retryFailed.dataset.count);
@@ -823,15 +1341,25 @@ ${CONFIRM_DIALOG_CLIENT}
       retryFailed.disabled = true;
       try {
         const res = await send("POST", "/api/account/regenerate", { scope: "failed" });
+        if (episodesList) {
+          for (const li of episodesList.querySelectorAll('li[data-episode-status="failed"]')) {
+            setRowStatus(li, "pending", "");
+            const btn = li.querySelector("[data-retry-episode]");
+            if (btn) {
+              btn.setAttribute("aria-disabled", "true");
+              btn.textContent = "Queued";
+            }
+          }
+        }
+        setCounterButton(retryFailed, "Retry failed", Math.max(0, count - (Number(res.queued) || 0)));
         say($("regenFeedback"), "ok", res.queued + " episode(s) queued for retry.");
-        setTimeout(() => location.reload(), 700);
+        scheduleEpisodePoll();
       } catch (error) {
         say($("regenFeedback"), "error", String(error.message || error));
         retryFailed.disabled = false;
       }
     });
   }
-  const regenOutdated = $("regenOutdated");
   if (regenOutdated) {
     regenOutdated.addEventListener("click", async () => {
       const count = Number(regenOutdated.dataset.count);
@@ -843,13 +1371,29 @@ ${CONFIRM_DIALOG_CLIENT}
       regenOutdated.disabled = true;
       try {
         const res = await send("POST", "/api/account/regenerate", {});
+        if (episodesList) {
+          for (const li of episodesList.querySelectorAll('li[data-episode-outdated="1"]')) {
+            li.dataset.episodeRegenerating = "1";
+            li.dataset.episodeOutdated = "0";
+            const btn = li.querySelector("[data-regenerate-episode]");
+            if (btn) {
+              btn.setAttribute("aria-disabled", "true");
+              btn.textContent = "Queued";
+            }
+          }
+        }
+        setCounterButton(regenOutdated, "Regenerate outdated", Math.max(0, count - (Number(res.queued) || 0)));
         say($("regenFeedback"), "ok", res.queued + " episode(s) queued for regeneration.");
+        scheduleEpisodePoll();
       } catch (error) {
         say($("regenFeedback"), "error", String(error.message || error));
         regenOutdated.disabled = false;
       }
     });
   }
+
+  // If episodes are already pending or synthesizing on load, track them live in-place.
+  scheduleEpisodePoll();
 
   $("rotateToken").addEventListener("click", async () => {
     const ok = await askConfirm("Make a new feed URL? The current one stops working in every podcast app straight away. Previously fetched audio links remain accessible until account suspension.", {
@@ -972,6 +1516,14 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     }
     : null;
 
+  const rawTab = reqUrl.searchParams.get("tab");
+  const initialTab: "episodes" | "add" | "feeds" | "settings" =
+    rawTab === "episodes" || rawTab === "add" || rawTab === "feeds" || rawTab === "settings"
+      ? rawTab
+      : prefill
+      ? "add"
+      : "episodes";
+
   const html = renderAccountPage({
     user,
     baseUrl,
@@ -985,6 +1537,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     outdatedCount,
     failedCount: failedEpisodes.length,
     prefill,
+    initialTab,
     nonce,
   });
   // This page renders per-episode `<audio src="/audio/...">`. That load is no-cors, so it

@@ -41,6 +41,12 @@ import { handleAdminTelemetry } from "./routes/admin_telemetry.ts";
 import { handleLogin } from "./routes/login.ts";
 import { handleAccount } from "./routes/account.ts";
 import {
+  handleAppIconPng,
+  handleEpisodeChapters,
+  handleFeedArtwork,
+  handleListenArticle,
+} from "./routes/artwork.ts";
+import {
   handleListen,
   handleListenRetry,
   handleListenStatus,
@@ -66,6 +72,16 @@ export interface AppContext {
    * module would see.
    */
   env?: { get(key: string): string | undefined };
+  /**
+   * Optional immediate synthesis trigger (Cloudflare Workflows `EPISODE_WORKFLOW` in prod).
+   * Called best-effort whenever an episode is queued, retried, or regenerated so synthesis
+   * starts immediately without waiting for the 2-minute cron safety net.
+   */
+  triggerSynthesis?: (
+    episodeId: string,
+    userId: string,
+    opts?: { fresh?: boolean },
+  ) => Promise<void>;
 }
 
 /**
@@ -130,13 +146,20 @@ export interface AppHandlers {
 /** The admin observability route pattern, named once so the route table and its two consumers agree. */
 export const ADMIN_OBSERVABILITY_ROUTE = "/admin/observability";
 
+function defaultEnvReader(): { get(key: string): string | undefined } {
+  if (typeof Deno !== "undefined" && typeof Deno.env?.get === "function") {
+    return Deno.env;
+  }
+  return { get: () => undefined };
+}
+
 export function createRouter(
   handlers: AppHandlers = {},
   // Registration-time env reads (the AUDIO_FEED_TEST_THROW trap door,
   // audio-feed-sw1r) go through this reader: Deno.env by default, injectable
   // so a test passes a fake instead of mutating process-global env
   // (audio-feed-lnnjd).
-  env: { get(key: string): string | undefined } = Deno.env,
+  env: { get(key: string): string | undefined } = defaultEnvReader(),
 ): Router<AppContext> {
   const router = new Router<AppContext>();
 
@@ -231,12 +254,14 @@ export function createRouter(
   // behind that weaker credential, so it is same-origin walled, rate-limited per
   // (token, address) and per token, and ceilinged per episode for life (audio-feed-8jzgl).
   router.get("/listen/:token/status", handleListenStatus);
+  router.get("/listen/:token/episodes/:episodeId/article", handleListenArticle);
   router.post("/listen/:token/episodes/:episodeId/retry", handleListenRetry);
   // PWA surface, served as routes because this app has no static file pipeline.
   router.get("/sw.js", handleServiceWorker);
   router.get("/manifest.json", handleManifest);
   router.get("/robots.txt", handleRobots);
   router.get("/icon.svg", handleIcon);
+  router.get("/icon.png", handleAppIconPng);
   // WebAuthn Related Origin Requests (audio-feed-1o2)
   router.get("/.well-known/webauthn", handleWebAuthnRelatedOrigins);
   // Not /audio/:key+ — that route is an episode enclosure with Range semantics,
@@ -270,6 +295,8 @@ export function createRouter(
     "/feed/:token/master.xml",
     handlers.masterFeed ?? (() => notImplemented("Master feed")),
   );
+  router.get("/feed/:token/art/:target", handleFeedArtwork);
+  router.get("/feed/:token/chapters/:episodeId", handleEpisodeChapters);
   router.get(
     "/feed/:token/:sourceId/:mode.xml",
     handlers.sourceFeed ?? (() => notImplemented("Per-source feed")),
@@ -442,10 +469,10 @@ export const DEPLOY_COMMIT_ENV_VARS = Object.freeze(
 export type DeployCommitEnvVar = (typeof DEPLOY_COMMIT_ENV_VARS)[number];
 
 export function deployFingerprint(
-  env: (name: string) => string | undefined = (name) => Deno.env.get(name),
+  env: (name: string) => string | undefined = (name) => defaultEnvReader().get(name),
 ): {
   id: string;
-  source: "DENO_DEPLOYMENT_ID" | DeployCommitEnvVar | "dev";
+  source: "CF_VERSION_ID" | "DENO_DEPLOYMENT_ID" | DeployCommitEnvVar | "dev";
   commit: string | null;
 } {
   const pick = <T extends readonly string[]>(
@@ -457,9 +484,17 @@ export function deployFingerprint(
     }
     return undefined;
   };
+  const cfVersion = pick("CF_VERSION_ID");
   const deployment = pick("DENO_DEPLOYMENT_ID");
   const commit = pick(...DEPLOY_COMMIT_ENV_VARS);
 
+  if (cfVersion) {
+    return {
+      id: cfVersion.value,
+      source: "CF_VERSION_ID",
+      commit: commit?.value ?? null,
+    };
+  }
   if (deployment) {
     return {
       id: deployment.value,

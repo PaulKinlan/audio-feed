@@ -4,6 +4,16 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+.beads.gate.lock
 
 # Local runtime data and verification artifacts
 var/
+
+# Node / Cloudflare Wrangler / build outputs
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+coverage/
+*.backup.json
+
