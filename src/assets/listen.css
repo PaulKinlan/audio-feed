@@ -962,8 +962,14 @@ input[type="range"][disabled] {
   block-size: 1.6rem;
 }
 
-.rate {
+.rate-wrap {
   margin-inline-start: auto;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+}
+.rate {
   min-inline-size: 3.6rem;
   min-block-size: 2.75rem;
   padding: 0.45rem 0.5rem;
@@ -981,6 +987,18 @@ input[type="range"][disabled] {
 .rate:hover {
   border-color: var(--accent-dim);
   color: var(--text);
+}
+.rate[data-source-default="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.rate-show-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--accent-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 /* The spacer balances the speed pill so the transport stays optically centred
    rather than drifting left by the pill's width. */

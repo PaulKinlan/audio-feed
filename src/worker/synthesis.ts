@@ -43,6 +43,8 @@ import {
   DEFAULT_TIMEOUT_MS,
   formatCodeForTts,
   formatDialoguePrompt,
+  GEMINI_TTS_VOICES,
+  type GeminiTtsVoice,
   GeminiTtsClient,
   GeminiTtsError,
   GeminiTtsTruncatedError,
@@ -82,7 +84,7 @@ import {
   unsynthesized,
   utcDayKey,
 } from "../types.ts";
-import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
+import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord, User } from "../types.ts";
 import {
   type BlobInfo,
   type BlobStore,
@@ -796,6 +798,46 @@ export function synthesisMadeProgress(
   return final.segments > initial.segments || final.scriptTurns > initial.scriptTurns;
 }
 
+/**
+ * Validate and normalize a candidate Gemini TTS narrator voice name.
+ * Returns `undefined` when unset, blank, or not in `GEMINI_TTS_VOICES` so
+ * callers fall back safely down the precedence chain.
+ */
+export function normalizeNarratorVoice(name: unknown): GeminiTtsVoice | undefined {
+  if (typeof name !== "string") return undefined;
+  const trimmed = name.trim();
+  return (GEMINI_TTS_VOICES as readonly string[]).includes(trimmed)
+    ? (trimmed as GeminiTtsVoice)
+    : undefined;
+}
+
+/**
+ * Resolve the narrator voice configured on a source, preferring `source.voice`
+ * (Issue #53) over the legacy `source.voices.direct` field.
+ */
+export function resolveSourceNarratorVoice(
+  source: Pick<Source, "voice" | "voices"> | null | undefined,
+): GeminiTtsVoice | undefined {
+  return normalizeNarratorVoice(source?.voice) ?? normalizeNarratorVoice(source?.voices?.direct);
+}
+
+/**
+ * Resolve the single-narrator voice for direct-mode synthesis:
+ * `source.voice` -> `source.voices.direct` -> `user.voice` -> `defaultVoice` -> `DEFAULT_NARRATION_VOICE`.
+ */
+export function resolveNarratorVoice(opts: {
+  source?: Pick<Source, "voice" | "voices"> | null;
+  user?: Pick<User, "voice"> | null;
+  defaultVoice?: string;
+}): GeminiTtsVoice {
+  return (
+    resolveSourceNarratorVoice(opts.source) ??
+    normalizeNarratorVoice(opts.user?.voice) ??
+    normalizeNarratorVoice(opts.defaultVoice) ??
+    DEFAULT_NARRATION_VOICE
+  );
+}
+
 export function createGeminiSynthesizer(
   ctx: AppContext,
   /** Injectable so a test can drive the real request path with a capturing fetchFn
@@ -1201,16 +1243,14 @@ export function createGeminiSynthesizer(
     }
 
     // Only read the user record when nothing above it decided, so the common case
-    // (a source with an explicit voice) costs no extra store read.
-    const sourceVoice = source?.voices.direct;
+    // (a source with an explicit valid voice) costs no extra store read.
+    const sourceVoice = resolveSourceNarratorVoice(source);
     const user = sourceVoice ? null : await ctx.stores.metadata.getUser(episode.userId);
-    // First NON-EMPTY wins, not first non-nullish: an empty `direct` string is what
-    // "cleared but never set" looks like in stored data, and `??` would hand it to
-    // the API as a voice name — the client's own `||` fallback would then silently
-    // pick Charon and skip both the user preference and DEFAULT_VOICE.
-    const voice = [sourceVoice, user?.voice, ctx.config.defaultVoice, DEFAULT_NARRATION_VOICE]
-      .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
-      DEFAULT_NARRATION_VOICE;
+    const voice = resolveNarratorVoice({
+      source,
+      user,
+      defaultVoice: ctx.config.defaultVoice,
+    });
 
     if (claimedBy) {
       await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {

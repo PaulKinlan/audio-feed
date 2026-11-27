@@ -417,6 +417,7 @@ export function createRouter(
   router.post("/api/account/profile", account("profile"));
   router.post("/api/account/rotate-token", account("rotateToken"));
   router.post("/api/account/sources", account("addSource"));
+  router.post("/api/account/sources/:sourceId/preferences", account("updateSourcePreferences"));
   router.get("/api/account/sources/opml", account("exportOpml"));
   router.post("/api/account/sources/opml", account("importOpml"));
   router.post("/api/account/discover-feed", account("discoverFeed"));

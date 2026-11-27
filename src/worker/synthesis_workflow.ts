@@ -48,7 +48,6 @@ import {
   buildDialogueRequest,
   buildSingleVoiceRequest,
   DEFAULT_NARRATION_STYLE,
-  DEFAULT_NARRATION_VOICE,
   type DecodedAudioResult,
   type DialogueSpeaker,
   type DialogueTurn,
@@ -81,7 +80,12 @@ import {
   utcDayKey,
 } from "../types.ts";
 import { createGroundedScriptGenerator, type ScriptGenerator } from "./script.ts";
-import { dailyEpisodeBudgetFor, globalDailyEpisodeBudgetFor } from "./synthesis.ts";
+import {
+  dailyEpisodeBudgetFor,
+  globalDailyEpisodeBudgetFor,
+  resolveNarratorVoice,
+  resolveSourceNarratorVoice,
+} from "./synthesis.ts";
 
 export interface EpisodeSynthesisParams {
   episodeId: string;
@@ -587,11 +591,13 @@ export async function runEpisodeSynthesisWorkflow(
         }
 
         // Direct narration mode
-        const sourceVoice = source?.voices.direct;
+        const sourceVoice = resolveSourceNarratorVoice(source);
         const user = sourceVoice ? null : await metadata.getUser(userId);
-        const voice = [sourceVoice, user?.voice, config.defaultVoice, DEFAULT_NARRATION_VOICE]
-          .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
-          DEFAULT_NARRATION_VOICE;
+        const voice = resolveNarratorVoice({
+          source,
+          user,
+          defaultVoice: config.defaultVoice,
+        });
         const prompt = formatNarrationPrompt({
           title: article.title,
           author: article.author,

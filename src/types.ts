@@ -228,6 +228,17 @@ export interface Source {
   /** Which feeds this source publishes. */
   modes: AudioMode[];
   voices: VoiceConfig;
+  /**
+   * Optional narrator voice override for this source (Issue #53).
+   * Validated against `GEMINI_TTS_VOICES`. Takes precedence over `voices.direct`,
+   * `User.voice`, and deployment `DEFAULT_VOICE`.
+   */
+  voice?: string;
+  /**
+   * Optional default playback speed for episodes from this source (Issue #53).
+   * Validated within `[PLAYBACK_MIN_RATE, PLAYBACK_MAX_RATE]` (`0.5`–`3.0`).
+   */
+  playbackRate?: number;
   /** How to handle code blocks in TTS generation (audio-feed-bdo). Defaults to "skip". */
   codeHandling?: CodeHandling;
   createdAt: string;

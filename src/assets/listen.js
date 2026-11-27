@@ -35,6 +35,7 @@
  * @property {string} [author]
  * @property {string} [date]
  * @property {string} [source]
+ * @property {string} [sourceId]
  * @property {string} [mode]
  * @property {number} [durationSeconds]
  * @property {number} [byteLength]
@@ -71,6 +72,7 @@
  * @property {number} [maxOfflineBytes]
  * @property {number} [maxOfflineEpisodes]
  * @property {PlayerEpisode[]} [episodes]
+ * @property {Record<string, number>} [sourcePlaybackRates]
  * @property {PlayerActivity} [activity]
  * @property {boolean} [offlineEnabled]
  * @property {boolean} [audioProcessingAvailable]
@@ -122,6 +124,11 @@ const OFFLINE_CACHE = DATA.offlineCache ?? "audio-feed-offline-v1";
 const MAX_OFFLINE_BYTES = DATA.maxOfflineBytes ?? 640 * 1024 * 1024;
 const MAX_OFFLINE_EPISODES = DATA.maxOfflineEpisodes ?? 20;
 const EPISODES = DATA.episodes ?? [];
+/** @type {Record<string, number>} */
+const SOURCE_PLAYBACK_RATES = DATA.sourcePlaybackRates &&
+    typeof DATA.sourcePlaybackRates === "object"
+  ? DATA.sourcePlaybackRates
+  : {};
 const ACTIVITY = DATA.activity ?? { inProgress: [], failed: [], playable: EPISODES.length };
 const OFFLINE_ENABLED = DATA.offlineEnabled ?? true;
 const AUDIO_PROCESSING_AVAILABLE = DATA.audioProcessingAvailable === true;
@@ -254,8 +261,12 @@ function saveQueue(ids) {
 
 /** @type {string[]} */
 let upNextIds = loadQueue().filter((id) => EPISODES.some((e) => e.id === id));
-/** @type {number} */
-let basePlaybackRate = loadSavedRate();
+/** Subscriber's global playback speed (persisted locally and synced via D1). @type {number} */
+let globalPlaybackRate = loadSavedRate();
+/** Effective baseline playback speed for the currently loaded episode (show default or global). @type {number} */
+let basePlaybackRate = globalPlaybackRate;
+/** Per-show manual speed overrides chosen during this playback session (never clobbers show config). @type {Map<string, number>} */
+const sessionShowRateOverrides = new Map();
 /** @type {boolean} */
 let voiceBoostEnabled = loadBoolPref(VOICE_BOOST_KEY);
 /** @type {boolean} */
@@ -446,6 +457,7 @@ const playPause = $("playPause");
 const playIcon = $("playIcon");
 const seek = /** @type {HTMLInputElement} */ (/** @type {unknown} */ ($("seek")));
 const rate = /** @type {HTMLSelectElement} */ (/** @type {unknown} */ ($("rate")));
+const rateShowBadge = document.getElementById("rateShowBadge");
 const backBtn = $("back");
 const fwdBtn = $("fwd");
 const nowTitle = $("nowTitle");
@@ -1818,7 +1830,7 @@ function buildPlaybackStatePayload() {
   }
   if (prefsTs > 0) {
     payload.prefsUpdatedAt = prefsTs;
-    payload.playbackRate = basePlaybackRate;
+    payload.playbackRate = globalPlaybackRate;
     payload.voiceBoost = voiceBoostEnabled;
     payload.trimSilence = trimSilenceEnabled;
   }
@@ -1951,12 +1963,9 @@ function applyRemotePlaybackState(remoteRaw) {
       remote.playbackRate >= 0.5 &&
       remote.playbackRate <= 3
     ) {
-      basePlaybackRate = remote.playbackRate;
-      saveRate(basePlaybackRate);
-      if ([...rate.options].some((o) => Number(o.value) === basePlaybackRate)) {
-        rate.value = String(basePlaybackRate);
-      }
-      if (!trimSilenceBoosting) audio.playbackRate = basePlaybackRate;
+      globalPlaybackRate = Math.round(remote.playbackRate * 100) / 100;
+      saveRate(globalPlaybackRate);
+      applyPlaybackRateForCurrentEpisode();
       changed = true;
     }
     if (typeof remote.voiceBoost === "boolean") {
@@ -2205,6 +2214,109 @@ function restoreBasePlaybackRate() {
   if (Math.abs(audio.playbackRate - basePlaybackRate) > 0.001) {
     audio.playbackRate = basePlaybackRate;
   }
+}
+
+// ── Per-show default playback speed helpers (Issue #53) ───────────────────
+
+/**
+ * Format a playback speed cleanly for UI display (e.g. 1.4 -> "1.4", 1 -> "1").
+ * @param {number} value
+ * @returns {string}
+ */
+function formatPlaybackRate(value) {
+  return String(Math.round(value * 100) / 100);
+}
+
+/**
+ * Resolve the effective playback speed for an episode without mutating global synced speed.
+ * Precedence:
+ *   1. Manual session override for this show (`sessionOverrides.get(sourceId)`).
+ *   2. Per-show default (`sourceRates[sourceId]`) within [0.5, 3.0].
+ *   3. Subscriber's global speed (`globalRate`).
+ *
+ * @param {string | undefined} sourceId
+ * @param {Record<string, number>} sourceRates
+ * @param {Map<string, number>} sessionOverrides
+ * @param {number} globalRate
+ * @returns {{ rate: number; isShowDefault: boolean }}
+ */
+function resolveEpisodePlaybackRate(sourceId, sourceRates, sessionOverrides, globalRate) {
+  if (sourceId && sessionOverrides.has(sourceId)) {
+    const overridden = sessionOverrides.get(sourceId);
+    if (
+      typeof overridden === "number" &&
+      Number.isFinite(overridden) &&
+      overridden >= 0.5 &&
+      overridden <= 3
+    ) {
+      return { rate: Math.round(overridden * 100) / 100, isShowDefault: false };
+    }
+  }
+  if (sourceId && Object.prototype.hasOwnProperty.call(sourceRates, sourceId)) {
+    const showRate = sourceRates[sourceId];
+    if (
+      typeof showRate === "number" &&
+      Number.isFinite(showRate) &&
+      showRate >= 0.5 &&
+      showRate <= 3
+    ) {
+      return { rate: Math.round(showRate * 100) / 100, isShowDefault: true };
+    }
+  }
+  return { rate: globalRate, isShowDefault: false };
+}
+
+/** @param {number} value */
+function ensureRateOption(value) {
+  const formatted = formatPlaybackRate(value);
+  const existing = [...rate.options].find((o) => Math.abs(Number(o.value) - value) < 0.001);
+  if (existing) {
+    rate.value = existing.value;
+    return;
+  }
+  const opt = document.createElement("option");
+  opt.value = formatted;
+  opt.textContent = formatted + "×";
+  opt.dataset.customRate = "1";
+  const nextOpt = [...rate.options].find((o) => Number(o.value) > value);
+  if (nextOpt) rate.insertBefore(opt, nextOpt);
+  else rate.appendChild(opt);
+  rate.value = opt.value;
+}
+
+/** @param {number} targetRate @param {boolean} isShowDefault */
+function applyEffectivePlaybackRate(targetRate, isShowDefault) {
+  basePlaybackRate = targetRate;
+  ensureRateOption(targetRate);
+  if (isShowDefault) {
+    const label = formatPlaybackRate(targetRate) + "× (show)";
+    rate.dataset.sourceDefault = "true";
+    rate.setAttribute("aria-label", "Playback speed: " + label);
+    if (rateShowBadge) {
+      rateShowBadge.textContent = label;
+      rateShowBadge.classList.remove("hidden");
+    }
+  } else {
+    delete rate.dataset.sourceDefault;
+    rate.setAttribute("aria-label", "Playback speed");
+    if (rateShowBadge) {
+      rateShowBadge.textContent = "";
+      rateShowBadge.classList.add("hidden");
+    }
+  }
+  if (!trimSilenceBoosting) {
+    audio.playbackRate = basePlaybackRate;
+  }
+}
+
+function applyPlaybackRateForCurrentEpisode() {
+  const resolved = resolveEpisodePlaybackRate(
+    current?.sourceId,
+    SOURCE_PLAYBACK_RATES,
+    sessionShowRateOverrides,
+    globalPlaybackRate,
+  );
+  applyEffectivePlaybackRate(resolved.rate, resolved.isShowDefault);
 }
 
 function stopTrimSilenceLoop() {
@@ -2990,7 +3102,7 @@ async function select(episode, autoplay, startPos) {
   if (!isSameSrc) {
     audio.src = episode.audioUrl;
   }
-  audio.playbackRate = basePlaybackRate;
+  applyPlaybackRateForCurrentEpisode();
 
   const artSrc = episode.artworkUrl || "/icon.png";
   if (nowArt) nowArt.src = artSrc;
@@ -3181,9 +3293,14 @@ if (npSeek) {
 rate.addEventListener("change", () => {
   const next = Number(rate.value);
   if (Number.isFinite(next) && next >= 0.5 && next <= 3) {
-    basePlaybackRate = next;
+    const rounded = Math.round(next * 100) / 100;
+    globalPlaybackRate = rounded;
+    if (current?.sourceId) {
+      sessionShowRateOverrides.set(current.sourceId, rounded);
+    }
+    applyEffectivePlaybackRate(rounded, false);
     restoreBasePlaybackRate();
-    saveRate(basePlaybackRate);
+    saveRate(globalPlaybackRate);
     saveNumberPref(PREFS_UPDATED_KEY, Date.now());
     scheduleStateSync(true);
   }
@@ -3740,11 +3857,8 @@ async function boot() {
   await refreshDownloaded();
 
   // Restore persisted playback speed across reloads
-  basePlaybackRate = loadSavedRate();
-  if ([...rate.options].some((o) => Number(o.value) === basePlaybackRate)) {
-    rate.value = String(basePlaybackRate);
-  }
-  audio.playbackRate = basePlaybackRate;
+  globalPlaybackRate = loadSavedRate();
+  applyEffectivePlaybackRate(globalPlaybackRate, false);
   updateAudioFxUI();
 
   // Restore persisted filter state for this token (audio-feed-3h1)
