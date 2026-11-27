@@ -112,6 +112,22 @@ function runWrangler(args: string[]): string {
   });
 }
 
+function parseWranglerJson<T>(raw: string): T {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    return JSON.parse(trimmed) as T;
+  }
+  const arrayStart = trimmed.indexOf("\n[");
+  if (arrayStart !== -1) {
+    return JSON.parse(trimmed.slice(arrayStart + 1)) as T;
+  }
+  const firstBracket = trimmed.indexOf("[");
+  if (firstBracket !== -1) {
+    return JSON.parse(trimmed.slice(firstBracket)) as T;
+  }
+  return JSON.parse(trimmed) as T;
+}
+
 function queryWavEpisodes(opts: BackfillCliOptions): WavEpisodeCandidate[] {
   const limitClause = opts.limit ? ` LIMIT ${opts.limit}` : "";
   const sql =
@@ -130,9 +146,11 @@ function queryWavEpisodes(opts: BackfillCliOptions): WavEpisodeCandidate[] {
     sql,
   ]);
 
-  const parsed = JSON.parse(raw) as Array<{
-    results?: Array<{ user_id: string; id: string; version: number; data: string }>;
-  }>;
+  const parsed = parseWranglerJson<
+    Array<{
+      results?: Array<{ user_id: string; id: string; version: number; data: string }>;
+    }>
+  >(raw);
   const rows = parsed[0]?.results ?? [];
   return rows.map((row) => ({
     userId: row.user_id,
@@ -241,7 +259,10 @@ function main(): void {
         `WHERE user_id = ${sqlLiteral(item.userId)} ` +
         `AND id = ${sqlLiteral(item.id)} ` +
         `AND version = ${item.version};`;
-      writeFileSync(sqlPath, updateSql, "utf8");
+      const useFile = Buffer.byteLength(updateSql, "utf8") > 32_768;
+      if (useFile) {
+        writeFileSync(sqlPath, updateSql, "utf8");
+      }
 
       const updateOut = runWrangler([
         "d1",
@@ -250,10 +271,9 @@ function main(): void {
         targetFlag,
         "--yes",
         "--json",
-        "--file",
-        sqlPath,
+        ...(useFile ? ["--file", sqlPath] : ["--command", updateSql]),
       ]);
-      const updateRes = JSON.parse(updateOut) as Array<{ meta?: { changes?: number } }>;
+      const updateRes = parseWranglerJson<Array<{ meta?: { changes?: number } }>>(updateOut);
       const changes = updateRes[0]?.meta?.changes ?? 0;
       if (changes !== 1) {
         console.warn(
