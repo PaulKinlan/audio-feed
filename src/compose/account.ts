@@ -26,7 +26,7 @@ const SEGMENT_DELETE_CONCURRENCY = 8;
  * that could ever find them. A delete that throws is recorded as an orphan — and
  * parseAudioBlobKey understands audio-segments/ keys, so the batch sweeper reclaims it.
  */
-async function sweepEpisodeSegments(
+export async function sweepEpisodeSegments(
   ctx: AppContext,
   userId: string,
   episodeId: string,
@@ -383,4 +383,112 @@ export async function countOutdatedEpisodes(
     outdated += batch.filter((e) => isOutdated(e)).length;
   }
   return outdated;
+}
+
+/** Maximum failed episodes that may be re-queued in one bulk retry call. */
+export const MAX_BULK_FAILED_RETRY = 25;
+/** Default failed episodes re-queued when `limit` is omitted on bulk retry. */
+export const DEFAULT_BULK_FAILED_RETRY = 10;
+/** Maximum failed episodes that may be deleted in one bulk delete call. */
+export const MAX_BULK_FAILED_DELETE = 200;
+/** Default failed episodes deleted when `limit` is omitted on bulk delete. */
+export const DEFAULT_BULK_FAILED_DELETE = 200;
+
+export interface BulkRetryFailedResult {
+  retried: number;
+  episodeIds: string[];
+  remainingFailed: number;
+}
+
+export interface BulkDeleteFailedResult {
+  deleted: number;
+  episodeIds: string[];
+  deletedBlobs: number;
+  failedBlobs: number;
+  remainingFailed: number;
+}
+
+/**
+ * Re-queue up to `limit` (clamped to `[1, MAX_BULK_FAILED_RETRY]`) failed episodes for a user,
+ * triggering immediate Workflow synthesis (`{ fresh: true }`) when bound.
+ */
+export async function bulkRetryFailedEpisodes(
+  ctx: AppContext,
+  userId: string,
+  limit: number = DEFAULT_BULK_FAILED_RETRY,
+): Promise<BulkRetryFailedResult> {
+  const effectiveLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_BULK_FAILED_RETRY);
+  const store = ctx.stores.metadata;
+  const failed = await store.listEpisodes({ userId, status: "failed", limit: effectiveLimit });
+  const episodeIds: string[] = [];
+
+  for (const candidate of failed) {
+    if (candidate.status !== "failed") continue;
+    const queued = await store.retryEpisode(userId, candidate.id);
+    if (!queued) continue;
+    episodeIds.push(queued.id);
+    if (ctx.triggerSynthesis) {
+      try {
+        await ctx.triggerSynthesis(queued.id, userId, { fresh: true });
+      } catch (err) {
+        console.warn(`[audio-feed] workflow retry trigger failed for episode ${queued.id}:`, err);
+      }
+    }
+  }
+
+  const remainingFailed = await countEpisodeScan(store, { userId, status: "failed" });
+  return { retried: episodeIds.length, episodeIds, remainingFailed };
+}
+
+/**
+ * Permanently delete up to `limit` (clamped to `[1, MAX_BULK_FAILED_DELETE]`) failed episodes
+ * for a user, reclaiming any stored partial audio or synthesis segment blobs.
+ *
+ * Strictly skips any episode whose current status is not `"failed"` (never touches
+ * `ready`, `pending`, `synthesizing`, or regenerating episodes).
+ */
+export async function bulkDeleteFailedEpisodes(
+  ctx: AppContext,
+  userId: string,
+  limit: number = DEFAULT_BULK_FAILED_DELETE,
+): Promise<BulkDeleteFailedResult> {
+  const effectiveLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_BULK_FAILED_DELETE);
+  const store = ctx.stores.metadata;
+  const failed = await store.listEpisodes({ userId, status: "failed", limit: effectiveLimit });
+  const episodeIds: string[] = [];
+  const deletedBlobKeys = new Set<string>();
+  const failedBlobKeys = new Set<string>();
+
+  for (const candidate of failed) {
+    if (candidate.status !== "failed") continue;
+    // Re-read to ensure a concurrent state change cannot cause deletion of a non-failed row.
+    const current = await store.getEpisode(userId, candidate.id);
+    if (!current || current.status !== "failed" || current.regenerating) continue;
+
+    if (current.audioKey && !deletedBlobKeys.has(current.audioKey)) {
+      try {
+        await ctx.stores.blobs.delete(current.audioKey);
+        deletedBlobKeys.add(current.audioKey);
+        failedBlobKeys.delete(current.audioKey);
+      } catch {
+        failedBlobKeys.add(current.audioKey);
+        await store.recordOrphanBlob(current.audioKey).catch(() => {});
+      }
+    }
+
+    await sweepEpisodeSegments(ctx, userId, current.id, deletedBlobKeys, failedBlobKeys);
+    const removed = await store.deleteEpisode(userId, current.id);
+    if (removed) {
+      episodeIds.push(current.id);
+    }
+  }
+
+  const remainingFailed = await countEpisodeScan(store, { userId, status: "failed" });
+  return {
+    deleted: episodeIds.length,
+    episodeIds,
+    deletedBlobs: deletedBlobKeys.size,
+    failedBlobs: failedBlobKeys.size,
+    remainingFailed,
+  };
 }

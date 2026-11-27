@@ -9,7 +9,7 @@ exhaustive analysis.
 
 The route table lives in exactly one file (`src/app.ts`, "Application wiring — the single place
 routes are mounted"), and every entry point is one `router.<method>(...)` registration there. Routes
-are mounted from that single registration path and nowhere else: `createRouter` registers all 77
+are mounted from that single registration path and nowhere else: `createRouter` registers all 80
 itself, and no callback, hook or extra-registration seam exists through which a caller could mount a
 route this census does not see — the census is the whole population, not a sample of it.
 The count is mechanical, re-derivable with:
@@ -17,16 +17,16 @@ The count is mechanical, re-derivable with:
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts
 
 Run from the repository root, on the revision this section was last re-derived at (`2026-11-27`),
-that command yields **77 registrations** (40 GET, 33 POST, 3 DELETE, 1 `add`): 76
+that command yields **80 registrations** (41 GET, 35 POST, 3 DELETE, 1 `add`): 79
 literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`, the
 exported constant in `src/app.ts`). The `router.add("OPTIONS", "/api/reports/csp", …)` registration
-shares the POST handler, so there are **76 distinct handler endpoints**, of which one (`GET
+shares the POST handler, so there are **79 distinct handler endpoints**, of which one (`GET
 /__test/throw`, the `AUDIO_FEED_TEST_THROW` trap door inside `createRouter`) exists only when an
 operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
-production attack surface — leaving **75 distinct production handler endpoints** (carried by 76
-registrations, because the OPTIONS alias is one of the 76).
+production attack surface — leaving **78 distinct production handler endpoints** (carried by 79
+registrations, because the OPTIONS alias is one of the 79).
 
-**76 production registrations; all 76 covered by one of the eight boundary sections below**; the three
+**79 production registrations; all 79 covered by one of the eight boundary sections below**; the three
 pre-existing decision sections (CSP reports, `/health`, offline cache) are cited from inside them.
 Unmitigated boundaries are labelled as such — none are softened or omitted. A citation should be
 re-derivable by a command; line ranges are the last resort and must say so. Concretely, every
@@ -42,7 +42,7 @@ waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 | 1 | Public capability URLs | 10 | `/feed/:token/master.xml`, `/feed/:token/art/:target`, `/feed/:token/chapters/:episodeId`, `/feed/:token/transcript/:episodeId`, `/feed/:token/:sourceId/:mode.xml`, `/listen/:token`, `/listen/:token/status`, `/listen/:token/episodes/:episodeId/article`, `POST /listen/:token/episodes/:episodeId/retry`, `/audio/:key+` |
 | 2 | Feed-token APIs | 5 | `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes` |
 | 3 | Anonymous browser writes | 7 | `POST /api/auth/login/options`, `POST /api/auth/register/options`, `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its OPTIONS alias), `GET /share` |
-| 4 | Session APIs and pages | 16 | `POST /api/auth/logout`, the 9 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
+| 4 | Session APIs and pages | 19 | `POST /api/auth/logout`, the 12 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
 | 5 | Admin surface | 28 | `GET /admin`, `GET /admin/subscribers`, `GET /admin/subscribers/:id`, `GET /admin/observability`, `GET /admin/observability/issues`, `GET /admin/observability/telemetry`, the 19 `/api/admin/*` routes, `POST /api/auth/bootstrap`, `GET /api/observability/errors`, `GET /api/observability/summary` |
 | 6 | Ingest fetch (SSRF) | — | the server-side fetch half of boundary 2, plus scheduled feed polling and `POST /api/sources` discovery |
 | 7 | Static, well-known, public pages | 10 | `/`, `/sw.js`, `/manifest.json`, `/robots.txt`, `/icon.svg`, `/icon.png`, `/assets/:name`, `/.well-known/webauthn`, `/health`, `/assets/voices/:voice` |
@@ -61,16 +61,16 @@ routes, listed separately because the attacker's position there is different, an
 of the sum — a route is counted once, under the boundary that terminates it, never twice.
 
 The counted rows sum to the production population, and the sum is checkable rather than trusted:
-**10 + 5 + 7 + 16 + 28 + 10 = 76**, which is exactly what the census command above yields once the one
+**10 + 5 + 7 + 19 + 28 + 10 = 79**, which is exactly what the census command above yields once the one
 non-production registration is removed:
 
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts | grep -v '__test/throw'
 
-That command is the figure beside this table — **76** (the census finds 77; `GET /__test/throw` is the
+That command is the figure beside this table — **79** (the census finds 80; `GET /__test/throw` is the
 `AUDIO_FEED_TEST_THROW` trap door), which is what the rows add up to. The unit is a *registration*,
 the thing the census counts: boundary 3's six route entries fill seven registrations because
 `router.add("OPTIONS", "/api/reports/csp", …)` is a registration the census counts, one that shares
-the CSP POST handler. Subtract that alias and the same 76 registrations are the **75 distinct
+the CSP POST handler. Subtract that alias and the same 79 registrations are the **78 distinct
 production handler endpoints** the paragraph above derives by its own route. The census those two
 figures are subtracted from, and its per-method split, are pinned by `tests/route_census_test.ts` —
 "audio-feed-q2cf5: the route census total matches src/app.ts", "audio-feed-q2cf5: the route census
@@ -297,7 +297,7 @@ does not depend on anyone's reading.
 
 ### Boundary 4 — Session APIs and pages
 
-- **Routes:** `POST /api/auth/logout`, the 9 `/api/account/*` routes, `POST /api/auth/login/verify`,
+- **Routes:** `POST /api/auth/logout`, the 12 `/api/account/*` routes, `POST /api/auth/login/verify`,
   `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, and the bare `GET
   /listen` — each the registration line naming that pattern in `createRouter` (`src/app.ts`).
 - **Attacker controls:** a cross-site browser context (CSRF position); a stolen session cookie if
@@ -343,6 +343,17 @@ does not depend on anyone's reading.
     `grep -nE 'export function renderListenLanding' src/routes/listen.ts`, pinned by
     `tests/listen_test.ts` test "the bare /listen launch resolves the session server-side (audio-feed-b6nr)"), which is unbounded by design (store-free
     template render, no token, no tenant reads).
+  - **OPML subscription export/import and bulk failed-episode triage:** `GET /api/account/sources/opml`
+    is a pure read behind session auth + `sameSiteRead`, returning XML-escaped OPML 2.0 with
+    `Cache-Control: private, no-store`. `POST /api/account/sources/opml` requires an approved session,
+    strict `sameOrigin` CSRF, per-subscriber rate limit (`OPML_IMPORT_RATE`), 512 KiB body cap
+    (`MAX_OPML_BYTES`), 100-feed per-import cap (`MAX_OPML_FEEDS`), and validates every feed URL
+    through `articleUrl` + `subscribeToFeed` (reusing SSRF checks, per-user source ceiling, and the
+    rolling 24h creation limiter). `POST /api/account/episodes/bulk-failed` requires a session +
+    strict `sameOrigin` CSRF (plus `isSynthesisAuthorized` on `"retry"`), bounds batch sizes
+    (`MAX_BULK_FAILED_RETRY` = 25, `MAX_BULK_FAILED_DELETE` = 200), and on `"delete"` re-verifies
+    `status === "failed"` (never deleting `ready`, `pending`, `synthesizing`, or regenerating rows)
+    while sweeping segment blobs via `sweepEpisodeSegments`.
 - **Residual (documented, accepted):** a stolen session cookie is a bearer credential until logout
   or `rotate-token`; nothing in code detects a replayed cookie from a second device.
 - **Residual (documented, accepted):** the read wall's absent-both admission is a standing

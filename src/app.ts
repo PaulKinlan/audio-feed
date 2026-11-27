@@ -411,11 +411,14 @@ export function createRouter(
   router.post("/api/account/profile", account("profile"));
   router.post("/api/account/rotate-token", account("rotateToken"));
   router.post("/api/account/sources", account("addSource"));
+  router.get("/api/account/sources/opml", account("exportOpml"));
+  router.post("/api/account/sources/opml", account("importOpml"));
   router.post("/api/account/discover-feed", account("discoverFeed"));
   router.delete("/api/account/sources/:sourceId", account("deleteSource"));
   router.delete("/api/account/passkeys/:id", account("deletePasskey"));
   router.post("/api/account/episodes/:episodeId/regenerate", account("regenerateEpisode"));
   router.post("/api/account/episodes/:episodeId/retry", account("regenerateEpisode"));
+  router.post("/api/account/episodes/bulk-failed", account("bulkFailedEpisodes"));
   router.post("/api/account/regenerate", account("regenerateOutdated"));
 
   router.get(
