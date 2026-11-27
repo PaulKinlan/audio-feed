@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   issues: write
 
 concurrency:
@@ -39,34 +39,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install Beads CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Installing bd (Beads CLI v1.3.0)..."
-          EXPECTED_SHA256="2f92b904ecf35b607e44dc5c39229173af69c54f1183e8d709f1773540cdcf3b"
-          TARBALL="$RUNNER_TEMP/beads_1.3.0_linux_amd64.tar.gz"
-          curl -fsSL "https://github.com/gastownhall/beads/releases/download/v1.3.0/beads_1.3.0_linux_amd64.tar.gz" -o "$TARBALL"
-          echo "${EXPECTED_SHA256}  ${TARBALL}" | sha256sum -c -
-          sudo tar -xz -C /usr/local/bin -f "$TARBALL" bd
-          sudo chmod +x /usr/local/bin/bd
-          rm -f "$TARBALL"
-          bd --version
-
-      - name: Set up Beads Database
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo "Initializing and restoring Beads Dolt database..."
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
-          git fetch origin refs/dolt/data:refs/dolt/data || true
-          bd init --prefix audio-feed || true
-          bd dolt pull origin
-          bd list >/dev/null
-          bd ready || true
-
       - name: Run Modern Web Factory Agent
         id: factory_agent
         uses: PaulKinlan/agents/.github/actions/factory@c7363b49d2957323b3ae8b60560d44a93379c316
@@ -74,7 +46,7 @@ jobs:
           agent: modern-web
           target: '.'
           engine: deepseek
-          sink: 'github-issues,beads'
+          sink: 'github-issues'
           deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY || secrets.deepseek_api_key }}
           deepseek_model: 'deepseek-chat'
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -96,30 +68,3 @@ jobs:
             exit 1
           fi
           echo "Report verified: $DELTA_REPORT ($(wc -l < "$DELTA_REPORT") lines)"
-
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Verify premise verdicts on closed modern-web beads (audio-feed-9ara)
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          deno run -A scripts/check-modern-web-verdicts.ts
-
-      - name: Sync Beads Database
-        if: always()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -d ".beads" ] && command -v bd >/dev/null 2>&1; then
-            echo "Syncing Beads Dolt database to origin..."
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
-            bd dolt push origin
-          fi

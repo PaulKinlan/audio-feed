@@ -1,25 +1,11 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
-
-> **Architecture in one line:** Issues live in a local Dolt database (`.beads/dolt/`); cross-machine
-> sync uses `bd dolt push/pull` (a git-compatible protocol), stored under `refs/dolt/data` on your
-> git remote — separate from `refs/heads/*` where your code lives. `.beads/issues.jsonl` is a
-> passive export, not the wire protocol.
->
-> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md) for
-> the one-screen overview and anti-patterns (don't treat JSONL as the source of truth; don't
-> `bd import` during normal operation; don't reach for third-party Dolt hosting before trying the
-> default).
-
-## Quick Reference
+This project runs on **Cloudflare Workers** (D1, R2, Workflows, Queues) with **Node 22 + Vitest + Wrangler** (see `CLAUDE.md` and `README.md` for quickstart).
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
+npm run gate          # build:assets + typecheck + wrangler deploy --dry-run + vitest (~10s)
+npm test              # run all Vitest suites
+npm run deploy        # deploy to Cloudflare Workers (or push to main for Workers Builds)
 ```
 
 ## Fast test tier (`deno task test:fast`)
