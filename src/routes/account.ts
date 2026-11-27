@@ -31,6 +31,7 @@ import {
 import { htmlResponse, newCspNonce } from "./csp.ts";
 import { blobStoreDirectUrlOrigin } from "../storage/mod.ts";
 import { countOutdatedEpisodes } from "../compose.ts";
+import { countEpisodeScan } from "../compose/ingest.ts";
 import { resolvePasskeyProvider } from "../auth/aaguid.ts";
 
 export interface PrefillData {
@@ -134,6 +135,23 @@ const CSS = `
   .upload-drop-zone { border: 2px dashed var(--border); border-radius: var(--radius); padding: var(--space-4); background: var(--surface-2); text-align: center; transition: border-color 0.15s ease, background-color 0.15s ease; margin-block-end: 0.75rem; }
   .upload-drop-zone.dragover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
   .drop-prompt { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--text-muted); }
+  .rows[hidden], .empty[hidden] { display: none; }
+  .rows > li > .source-feeds { grid-column: 1 / -1; }
+  .opml-box { margin-block-start: 1.25rem; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+  .opml-box-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; margin-block-end: 0.35rem; }
+  .opml-box-head h3 { margin: 0; font-size: 0.98rem; }
+  .opml-progress { display: block; inline-size: 100%; block-size: 0.45rem; accent-color: var(--accent); margin-block-start: 0.5rem; }
+  .opml-progress[hidden] { display: none; }
+  .opml-result { margin-block-start: 0.75rem; padding: 0.75rem 0.9rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface); font-size: 0.88rem; }
+  .opml-result[hidden] { display: none; }
+  .opml-result[data-tone="ok"] { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+  .opml-result[data-tone="warn"] { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+  .opml-result[data-tone="error"] { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); color: var(--danger); }
+  .opml-result-summary { margin: 0; font-weight: 600; }
+  .opml-failed-list { margin: 0.5rem 0 0; padding-inline-start: 1.25rem; font-size: 0.82rem; color: var(--muted); display: grid; gap: 0.25rem; overflow-wrap: anywhere; }
+  .failed-triage { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem 1rem; padding: 0.7rem 0.95rem; margin-block: 0.5rem 0.9rem; border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--danger) 8%, var(--surface-2)); }
+  .failed-triage[hidden] { display: none; }
+  .failed-triage-summary { font-size: 0.88rem; font-weight: 600; color: var(--text); }
 `;
 
 function when(iso: string | undefined): string {
@@ -428,7 +446,7 @@ ${
   }" tabindex="${isTab("add") ? "0" : "-1"}" data-tab="add">Add</button>
     <button class="account-tab" type="button" role="tab" id="tab-feeds" aria-controls="panel-feeds" aria-selected="${
     isTab("feeds") ? "true" : "false"
-  }" tabindex="${isTab("feeds") ? "0" : "-1"}" data-tab="feeds">Feeds <span class="tab-pill">${
+  }" tabindex="${isTab("feeds") ? "0" : "-1"}" data-tab="feeds">Feeds <span class="tab-pill" id="tabFeedsPill">${
     d.sources.length
   }</span></button>
     <button class="account-tab" type="button" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="${
@@ -451,6 +469,23 @@ ${
       : ""
   }</div>
     <p class="sub">Regenerate re-narrates with the current prompts. The old audio stays in your feed until the new one is ready.</p>
+    ${
+    approved
+      ? `<div class="failed-triage" id="failedTriageBar"${d.failedCount > 0 ? "" : " hidden"}>
+      <span class="failed-triage-summary" id="failedTriageSummary">${d.failedCount} failed episode${
+        d.failedCount === 1 ? "" : "s"
+      } need attention.</span>
+      <div class="row u-gap-2">
+        <button class="btn quiet small" type="button" id="bulkRetryFailed" data-count="${d.failedCount}"${
+        d.failedCount > 0 ? "" : " disabled"
+      }>Retry up to 10 failed</button>
+        <button class="btn danger small" type="button" id="bulkClearFailed" data-count="${d.failedCount}"${
+        d.failedCount > 0 ? "" : " disabled"
+      }>Clear failed (${d.failedCount})</button>
+      </div>
+    </div>`
+      : ""
+  }
     ${
     d.episodes.length
       ? `<div class="ep-filters" role="search" aria-label="Filter episodes">
@@ -509,17 +544,16 @@ ${
     isTab("feeds") ? "" : " hidden"
   }>
   <section class="panel" aria-labelledby="feeds-h">
-    <div class="section-title"><h2 id="feeds-h">Your feeds</h2></div>
+    <div class="section-title"><h2 id="feeds-h">Your feeds</h2>
+      <a class="btn quiet small" id="exportOpml" href="/api/account/sources/opml" download="audio-feed-subscriptions.opml" data-no-prefetch>Export OPML</a>
+    </div>
     <p class="sub">Paste into Pocket Casts, Apple Podcasts, Overcast or any app that takes an RSS URL. The URL is your password for listening: keep it to yourself.</p>
     <div class="field"><span class="legend">Everything, newest first</span>${
     copyRow(`${feedBase}/master.xml`, "master feed URL")
   }</div>
     <h3 class="legend u-legend">Sources</h3>
-    ${
-    sourceItems
-      ? `<ul class="rows">${sourceItems}</ul>`
-      : `<p class="empty">No sources yet. Add a blog or newsletter below.</p>`
-  }
+    <ul class="rows" id="sourcesList"${sourceItems ? "" : " hidden"}>${sourceItems}</ul>
+    <p class="empty" id="sourcesEmpty"${sourceItems ? " hidden" : ""}>No sources yet. Add a blog or newsletter below.</p>
     <p class="feedback" id="sourcesFeedback" role="status" aria-live="polite"></p>
     <details class="more"${d.sources.length ? "" : " open"}>
       <summary>Add an RSS or Atom feed</summary>
@@ -538,6 +572,31 @@ ${
         <p class="feedback" id="addSourceFeedback" role="status" aria-live="polite"></p>
       </form>
     </details>
+    <div class="opml-box">
+      <div class="opml-box-head">
+        <h3 id="opml-import-h">Import subscriptions from OPML</h3>
+      </div>
+      <p class="sub">Migrate feeds from Overcast, Pocket Casts, Feedly, NetNewsWire, or any OPML 2.0 export.</p>
+      <form id="opmlImportForm" class="stack" aria-labelledby="opml-import-h">
+        <div class="field">
+          <label for="opmlFile">OPML file</label>
+          <input id="opmlFile" name="opmlFile" type="file" required accept=".opml,.xml,text/xml,application/xml" aria-describedby="opmlFileHint">
+          <span id="opmlFileHint" class="hint">Up to 100 feeds per import (max 512 KiB). Already-subscribed feeds are skipped automatically.</span>
+        </div>
+        <fieldset class="choices">
+          <legend class="sr-only">Narration format for imported feeds</legend>
+          <label for="opmlModeDirect"><input id="opmlModeDirect" type="radio" name="opmlMode" value="direct" checked> Read aloud</label>
+          <label for="opmlModeDeepdive"><input id="opmlModeDeepdive" type="radio" name="opmlMode" value="deepdive"> Deep dive</label>
+        </fieldset>
+        <div class="actions">
+          <button class="btn" type="submit" id="opmlImportBtn"${
+    approved ? "" : " disabled"
+  }>Import OPML</button>
+        </div>
+        <progress id="opmlProgress" class="opml-progress" aria-label="Importing OPML subscriptions" hidden></progress>
+        <div id="opmlResult" class="opml-result" role="status" aria-live="polite" hidden></div>
+      </form>
+    </div>
   </section>
   </div>
 
@@ -591,6 +650,7 @@ ${
   const USER_HANDLE = ${jsonForScript(base64url(new TextEncoder().encode(user.id)))};
   const CREDENTIAL_IDS = ${jsonForScript(d.credentials.map((c) => c.id))};
   const DISPLAY = ${jsonForScript({ name: user.email, displayName: user.displayName })};
+  const FEED_BASE = ${jsonForScript(feedBase)};
   const PREFILL = ${jsonForScript(d.prefill ?? null)};
 ${SAME_ORIGIN_PATH_CLIENT}
 ${PASSKEY_CLIENT}
@@ -681,17 +741,19 @@ ${CONFIRM_DIALOG_CLIENT}
     }).catch(() => {});
   }
 
-  for (const button of document.querySelectorAll("[data-copy]")) {
-    button.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(button.dataset.copy);
-        button.textContent = "Copied";
-      } catch {
-        button.textContent = "Select and copy";
-      }
-      setTimeout(() => { button.textContent = "Copy"; }, 1800);
-    });
-  }
+  document.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const button = target.closest("[data-copy]");
+    if (!(button instanceof HTMLButtonElement)) return;
+    try {
+      await navigator.clipboard.writeText(button.dataset.copy || "");
+      button.textContent = "Copied";
+    } catch {
+      button.textContent = "Select and copy";
+    }
+    setTimeout(() => { button.textContent = "Copy"; }, 1800);
+  });
 
   // -- voice audition (audio-feed-msw) ---------------------------------------
   const voiceAudio = $("voiceSampleAudio");
@@ -869,8 +931,84 @@ ${CONFIRM_DIALOG_CLIENT}
     }
   });
 
-  for (const button of document.querySelectorAll("[data-remove-source]")) {
-    button.addEventListener("click", async () => {
+  const sourcesList = $("sourcesList");
+  const sourcesEmpty = $("sourcesEmpty");
+  const tabFeedsPill = $("tabFeedsPill");
+
+  function syncSourcesCount() {
+    if (!sourcesList) return;
+    const count = sourcesList.querySelectorAll(":scope > li").length;
+    if (tabFeedsPill) tabFeedsPill.textContent = String(count);
+    sourcesList.hidden = count === 0;
+    if (sourcesEmpty) sourcesEmpty.hidden = count > 0;
+  }
+
+  function createCopyRow(value, label) {
+    const wrap = document.createElement("div");
+    wrap.className = "copy";
+    const code = document.createElement("code");
+    code.textContent = value;
+    const btn = document.createElement("button");
+    btn.className = "btn quiet small";
+    btn.type = "button";
+    btn.dataset.copy = value;
+    btn.setAttribute("aria-label", "Copy " + label);
+    btn.textContent = "Copy";
+    wrap.appendChild(code);
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  function createSourceListItem(source) {
+    const li = document.createElement("li");
+    const head = document.createElement("div");
+    head.className = "row-head";
+    const titleSpan = document.createElement("span");
+    titleSpan.className = "row-title";
+    titleSpan.textContent = source.title || source.feedUrl || source.id;
+    head.appendChild(titleSpan);
+    if (source.id !== "inbox") {
+      const rm = document.createElement("button");
+      rm.className = "btn danger small";
+      rm.type = "button";
+      rm.dataset.removeSource = source.id;
+      rm.dataset.title = source.title || source.id;
+      rm.dataset.tooltip = "Remove " + (source.title || source.id);
+      rm.textContent = "Remove";
+      head.appendChild(rm);
+    }
+    li.appendChild(head);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const polled = source.lastPolledAt ? String(source.lastPolledAt).slice(0, 10) : "never";
+    meta.textContent = (source.feedUrl || "Articles you send") + " · last polled " + polled;
+    li.appendChild(meta);
+
+    const modes = Array.isArray(source.modes) && source.modes.length ? source.modes : ["direct"];
+    const details = document.createElement("details");
+    details.className = "source-feeds";
+    const summary = document.createElement("summary");
+    summary.textContent = "Feed URLs (" + modes.length + ")";
+    details.appendChild(summary);
+    const paths = document.createElement("div");
+    paths.className = "feed-paths";
+    for (const mode of modes) {
+      const url = FEED_BASE + "/" + encodeURIComponent(source.id) + "/" + encodeURIComponent(mode) + ".xml";
+      const label = (source.title || source.id) + " " + (mode === "direct" ? "read aloud" : "deep dive") + " feed";
+      paths.appendChild(createCopyRow(url, label));
+    }
+    details.appendChild(paths);
+    li.appendChild(details);
+    return li;
+  }
+
+  if (sourcesList) {
+    sourcesList.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const button = target.closest("[data-remove-source]");
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return;
       const ok = await askConfirm("Remove " + button.dataset.title + "? Episodes already made stay in your feed.", {
         title: "Remove Feed Source",
         confirmText: "Remove",
@@ -879,10 +1017,96 @@ ${CONFIRM_DIALOG_CLIENT}
       button.disabled = true;
       try {
         await send("DELETE", "/api/account/sources/" + encodeURIComponent(button.dataset.removeSource));
-        location.reload();
+        const li = button.closest("li");
+        if (li) li.remove();
+        syncSourcesCount();
+        say($("sourcesFeedback"), "ok", "Removed " + (button.dataset.title || "source") + ".");
       } catch (error) {
         say($("sourcesFeedback"), "error", String(error.message || error));
         button.disabled = false;
+      }
+    });
+  }
+
+  const opmlImportForm = $("opmlImportForm");
+  const opmlFile = $("opmlFile");
+  const opmlImportBtn = $("opmlImportBtn");
+  const opmlProgress = $("opmlProgress");
+  const opmlResult = $("opmlResult");
+
+  function showOpmlResult(tone, summaryText, failedItems) {
+    if (!opmlResult) return;
+    opmlResult.hidden = false;
+    opmlResult.dataset.tone = tone;
+    const p = document.createElement("p");
+    p.className = "opml-result-summary";
+    p.textContent = summaryText;
+    const nodes = [p];
+    if (Array.isArray(failedItems) && failedItems.length > 0) {
+      const ul = document.createElement("ul");
+      ul.className = "opml-failed-list";
+      for (const item of failedItems.slice(0, 20)) {
+        const li = document.createElement("li");
+        li.textContent = (item.url || "Unknown URL") + " — " + (item.reason || "Import failed.");
+        ul.appendChild(li);
+      }
+      if (failedItems.length > 20) {
+        const more = document.createElement("li");
+        more.textContent = "…and " + (failedItems.length - 20) + " more.";
+        ul.appendChild(more);
+      }
+      nodes.push(ul);
+    }
+    opmlResult.replaceChildren(...nodes);
+  }
+
+  if (opmlImportForm) {
+    opmlImportForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const file = opmlFile && opmlFile.files && opmlFile.files[0];
+      if (!file) {
+        showOpmlResult("error", "Choose an OPML file to import.");
+        return;
+      }
+      if (file.size > 512 * 1024) {
+        showOpmlResult("error", "That OPML file exceeds the 512 KiB limit.");
+        return;
+      }
+      const modeEl = document.querySelector("input[name=opmlMode]:checked");
+      const mode = modeEl ? modeEl.value : "direct";
+      if (opmlImportBtn) opmlImportBtn.disabled = true;
+      if (opmlProgress) opmlProgress.hidden = false;
+      showOpmlResult("ok", "Importing subscriptions from " + file.name + "…");
+      try {
+        const opml = await file.text();
+        const res = await send("POST", "/api/account/sources/opml", { opml, mode });
+        const added = Number(res && res.added) || 0;
+        const skipped = Number(res && res.skipped) || 0;
+        const failed = Array.isArray(res && res.failed) ? res.failed : [];
+        const truncated = Number(res && res.truncated) || 0;
+        if (sourcesList && Array.isArray(res && res.sources) && res.sources.length > 0) {
+          for (const src of res.sources) {
+            sourcesList.appendChild(createSourceListItem(src));
+          }
+          syncSourcesCount();
+        }
+        const parts = [
+          "Added " + added + " feed" + (added === 1 ? "" : "s"),
+          "skipped " + skipped + " already subscribed",
+          failed.length + " failed",
+        ];
+        let summary = parts.join(", ") + ".";
+        if (truncated > 0) {
+          summary += " " + truncated + " additional feed(s) exceeded the 100-feed per-import limit.";
+        }
+        const tone = failed.length > 0 && added === 0 ? "error" : failed.length > 0 ? "warn" : "ok";
+        showOpmlResult(tone, summary, failed);
+        if (added > 0 || skipped > 0) opmlImportForm.reset();
+      } catch (error) {
+        showOpmlResult("error", String(error.message || error));
+      } finally {
+        if (opmlProgress) opmlProgress.hidden = true;
+        if (opmlImportBtn) opmlImportBtn.disabled = false;
       }
     });
   }
@@ -891,6 +1115,10 @@ ${CONFIRM_DIALOG_CLIENT}
   const retryFailed = $("retryFailed");
   const regenOutdated = $("regenOutdated");
   const tabFailedPill = $("tabFailedPill");
+  const failedTriageBar = $("failedTriageBar");
+  const failedTriageSummary = $("failedTriageSummary");
+  const bulkRetryFailed = $("bulkRetryFailed");
+  const bulkClearFailed = $("bulkClearFailed");
 
   // ── Accessible 4-tab workspace controller (URL hash + keyboard arrows) ──
   const tabs = [...document.querySelectorAll('.account-tab[role="tab"]')];
@@ -1005,16 +1233,32 @@ ${CONFIRM_DIALOG_CLIENT}
     });
   }
 
-  function syncFailedPill(count) {
-    if (!tabFailedPill) return;
+  function syncFailedControls(count) {
     const n = Math.max(0, Number(count) || 0);
-    if (n > 0) {
-      tabFailedPill.hidden = false;
-      tabFailedPill.dataset.tone = "danger";
-      tabFailedPill.textContent = n + " failed";
-    } else {
-      tabFailedPill.hidden = true;
-      tabFailedPill.textContent = "";
+    if (tabFailedPill) {
+      if (n > 0) {
+        tabFailedPill.hidden = false;
+        tabFailedPill.dataset.tone = "danger";
+        tabFailedPill.textContent = n + " failed";
+      } else {
+        tabFailedPill.hidden = true;
+        tabFailedPill.textContent = "";
+      }
+    }
+    if (failedTriageBar) {
+      failedTriageBar.hidden = n === 0;
+    }
+    if (failedTriageSummary) {
+      failedTriageSummary.textContent = n + " failed episode" + (n === 1 ? "" : "s") + " need attention.";
+    }
+    if (bulkRetryFailed) {
+      bulkRetryFailed.dataset.count = String(n);
+      bulkRetryFailed.disabled = n === 0;
+    }
+    if (bulkClearFailed) {
+      bulkClearFailed.dataset.count = String(n);
+      bulkClearFailed.textContent = "Clear failed (" + n + ")";
+      bulkClearFailed.disabled = n === 0;
     }
   }
 
@@ -1024,7 +1268,7 @@ ${CONFIRM_DIALOG_CLIENT}
     btn.dataset.count = String(count);
     btn.textContent = labelPrefix + " (" + count + ")";
     btn.disabled = count === 0;
-    if (btn === retryFailed) syncFailedPill(count);
+    if (btn === retryFailed) syncFailedControls(count);
   }
 
   function rowBodyOf(li) {
@@ -1330,6 +1574,93 @@ ${CONFIRM_DIALOG_CLIENT}
     });
   }
 
+  if (bulkRetryFailed) {
+    bulkRetryFailed.addEventListener("click", async () => {
+      const count = Number(bulkRetryFailed.dataset.count) || 0;
+      if (count <= 0) return;
+      const batch = Math.min(count, 10);
+      const ok = await askConfirm(
+        "Retry up to " + batch + " failed episode" + (batch === 1 ? "" : "s") + "? Each retried episode is re-queued for synthesis.",
+        { title: "Retry Failed Episodes", confirmText: "Retry up to " + batch, danger: false },
+      );
+      if (!ok) return;
+      bulkRetryFailed.disabled = true;
+      try {
+        const res = await send("POST", "/api/account/episodes/bulk-failed", { action: "retry", limit: 10 });
+        const retriedSet = new Set(Array.isArray(res && res.episodeIds) ? res.episodeIds : []);
+        if (episodesList && retriedSet.size > 0) {
+          for (const li of episodesList.querySelectorAll("li[data-episode-id]")) {
+            if (!retriedSet.has(li.dataset.episodeId)) continue;
+            setRowStatus(li, "pending", "");
+            setRowFeedback(li, "ok", "Queued for retry.");
+            const btn = li.querySelector("[data-retry-episode]");
+            if (btn) {
+              btn.setAttribute("aria-disabled", "true");
+              btn.textContent = "Queued";
+            }
+          }
+        }
+        const remaining = typeof (res && res.remainingFailed) === "number"
+          ? res.remainingFailed
+          : Math.max(0, count - (Number(res && res.retried) || 0));
+        if (retryFailed) setCounterButton(retryFailed, "Retry failed", remaining);
+        else syncFailedControls(remaining);
+        applyEpisodeFilters();
+        const retried = Number(res && res.retried) || 0;
+        say(
+          $("regenFeedback"),
+          "ok",
+          retried + " failed episode" + (retried === 1 ? "" : "s") + " queued for retry." +
+            (remaining > 0 ? " " + remaining + " failed remaining." : ""),
+        );
+        scheduleEpisodePoll();
+      } catch (error) {
+        say($("regenFeedback"), "error", String(error.message || error));
+        bulkRetryFailed.disabled = Number(bulkRetryFailed.dataset.count) === 0;
+      }
+    });
+  }
+
+  if (bulkClearFailed) {
+    bulkClearFailed.addEventListener("click", async () => {
+      const count = Number(bulkClearFailed.dataset.count) || 0;
+      if (count <= 0) return;
+      const batch = Math.min(count, 200);
+      const ok = await askConfirm(
+        "Permanently delete up to " + batch + " failed episode" + (batch === 1 ? "" : "s") +
+          " and any partial audio segments? Ready episodes are never touched.",
+        { title: "Clear Failed Episodes", confirmText: "Clear Failed", danger: true },
+      );
+      if (!ok) return;
+      bulkClearFailed.disabled = true;
+      try {
+        const res = await send("POST", "/api/account/episodes/bulk-failed", { action: "delete", limit: 200 });
+        const deletedSet = new Set(Array.isArray(res && res.episodeIds) ? res.episodeIds : []);
+        if (episodesList && deletedSet.size > 0) {
+          for (const li of [...episodesList.querySelectorAll("li[data-episode-id]")]) {
+            if (deletedSet.has(li.dataset.episodeId)) li.remove();
+          }
+        }
+        const remaining = typeof (res && res.remainingFailed) === "number"
+          ? res.remainingFailed
+          : Math.max(0, count - (Number(res && res.deleted) || 0));
+        if (retryFailed) setCounterButton(retryFailed, "Retry failed", remaining);
+        else syncFailedControls(remaining);
+        applyEpisodeFilters();
+        const deleted = Number(res && res.deleted) || 0;
+        say(
+          $("regenFeedback"),
+          "ok",
+          "Cleared " + deleted + " failed episode" + (deleted === 1 ? "" : "s") + "." +
+            (remaining > 0 ? " " + remaining + " failed remaining." : ""),
+        );
+      } catch (error) {
+        say($("regenFeedback"), "error", String(error.message || error));
+        bulkClearFailed.disabled = Number(bulkClearFailed.dataset.count) === 0;
+      }
+    });
+  }
+
   if (retryFailed) {
     retryFailed.addEventListener("click", async () => {
       const count = Number(retryFailed.dataset.count);
@@ -1490,14 +1821,14 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     ? Math.min(Math.max(parsedLimit, 10), 100)
     : 10;
 
-  const [sources, credentials, rawEpisodes, outdatedCount, failedEpisodes] = await Promise.all([
+  const [sources, credentials, rawEpisodes, outdatedCount, failedCount] = await Promise.all([
     store.listSources(user.id),
     store.listCredentials(user.id),
     store.listEpisodes({ userId: user.id, limit: currentLimit + 1 }),
     user.status === "approved" ? countOutdatedEpisodes(store, user.id) : 0,
     user.status === "approved"
-      ? store.listEpisodes({ userId: user.id, status: "failed", limit: 50 })
-      : [],
+      ? countEpisodeScan(store, { userId: user.id, status: "failed" })
+      : 0,
   ]);
 
   const hasMoreEpisodes = rawEpisodes.length > currentLimit;
@@ -1535,7 +1866,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     nextEpisodesLimit,
     currentLimit,
     outdatedCount,
-    failedCount: failedEpisodes.length,
+    failedCount,
     prefill,
     initialTab,
     nonce,

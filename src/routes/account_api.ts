@@ -19,6 +19,7 @@ import {
   issueSetupLink,
   peekSetupLink,
   sameOrigin,
+  sameSiteRead,
   sessionCookie,
   sessionUser,
 } from "../auth/sessions.ts";
@@ -47,7 +48,15 @@ import {
   guardSecretAuth,
   SlidingWindowRateLimiter,
 } from "../auth/rate_limit.ts";
-import { subscribeToFeed } from "../ingest/feed.ts";
+import { subscribeToFeed, SubscriptionLimitError } from "../ingest/feed.ts";
+import { MAX_OPML_BYTES, normalizeOpmlUrl, parseOpml, renderOpml } from "../ingest/opml.ts";
+export { MAX_OPML_BYTES };
+import {
+  bulkDeleteFailedEpisodes,
+  bulkRetryFailedEpisodes,
+  DEFAULT_BULK_FAILED_DELETE,
+  DEFAULT_BULK_FAILED_RETRY,
+} from "../compose/account.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
 import {
   articleUrl,
@@ -69,11 +78,14 @@ export interface AccountHandlers {
   profile: Handler<AppContext>;
   rotateToken: Handler<AppContext>;
   addSource: Handler<AppContext>;
+  exportOpml: Handler<AppContext>;
+  importOpml: Handler<AppContext>;
   discoverFeed: Handler<AppContext>;
   deleteSource: Handler<AppContext>;
   deletePasskey: Handler<AppContext>;
   regenerateEpisode: Handler<AppContext>;
   regenerateOutdated: Handler<AppContext>;
+  bulkFailedEpisodes: Handler<AppContext>;
 }
 
 export interface AccountDeps {
@@ -129,6 +141,10 @@ export const DISCOVER_FEED_RATE = { maxRequests: 30, windowMs: 5 * 60 * 1000 } a
 
 /** The window's namespace, so it cannot swap rows with another limiter. */
 const DISCOVER_FEED_WINDOW = "discover_feed";
+
+/** Per-subscriber limit on bulk OPML import requests to bound outbound feed-validation traffic. */
+export const OPML_IMPORT_RATE = { maxRequests: 10, windowMs: 5 * 60 * 1000 } as const;
+const OPML_IMPORT_WINDOW = "opml_import";
 
 /**
  * Per-address limit on the anonymous challenge write (audio-feed-plmhk).
@@ -197,6 +213,23 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       { "set-cookie": sessionCookie(secret) },
     );
   };
+
+  /** Shared source-subscription path used by both single-feed add and OPML bulk import. */
+  const subscribeAccountFeed = (
+    user: User,
+    input: { feedUrl: string; title?: string; modes?: AudioMode[] },
+    maxItems: number,
+  ) =>
+    subscribeToFeed(
+      ctx,
+      {
+        userId: user.id,
+        feedUrl: input.feedUrl,
+        title: input.title,
+        modes: input.modes,
+      },
+      { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems },
+    );
 
   return {
     loginOptions: async ({ req, remoteAddr }) => {
@@ -442,17 +475,16 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         if (modes.length === 0) return reply({ error: "Choose direct, deepdive, or both." }, 400);
       }
       try {
-        const { source, poll } = await subscribeToFeed(
-          ctx,
+        const { source, poll } = await subscribeAccountFeed(
+          user,
           {
-            userId: user.id,
             feedUrl,
             title: typeof input.title === "string" && input.title.trim()
               ? input.title.trim()
               : undefined,
             modes,
           },
-          { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
+          5,
         );
         return reply({ source: { id: source.id, title: source.title }, poll }, 201);
       } catch (error) {
@@ -483,6 +515,144 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         );
         return reply({ error: "Could not subscribe to that feed." }, 502);
       }
+    },
+
+    exportOpml: async ({ req }) => {
+      const user = await sessionUser(store, req);
+      if (!user) return reply({ error: "Sign in first." }, 401);
+      if (!sameSiteRead(req, baseUrl(ctx, req))) {
+        return reply({ error: "Cross-origin request refused." }, 403);
+      }
+      const sources = await store.listSources(user.id);
+      const xml = renderOpml(sources, {
+        title: `${user.displayName} — Audio Feed`,
+        ownerName: user.displayName,
+        ownerEmail: user.email,
+      });
+      return new Response(xml, {
+        status: 200,
+        headers: {
+          "content-type": "application/xml; charset=utf-8",
+          "content-disposition": 'attachment; filename="audio-feed-subscriptions.opml"',
+          "cache-control": "private, no-store",
+        },
+      });
+    },
+
+    importOpml: async ({ req }) => {
+      const user = await signedIn(ctx, req);
+      if (user instanceof Response) return user;
+      if (user.status !== "approved") {
+        return reply({ error: "Your account is waiting for approval." }, 403);
+      }
+      const limit = await new SlidingWindowRateLimiter(
+        OPML_IMPORT_RATE,
+        store,
+        OPML_IMPORT_WINDOW,
+      ).check(user.id);
+      if (!limit.allowed) {
+        return reply(
+          { error: "Too many OPML imports. Please wait a moment and try again." },
+          429,
+          { "retry-after": String(Math.max(1, Math.ceil(limit.resetMs / 1000))) },
+        );
+      }
+
+      const input = await readCappedJson(req, MAX_OPML_BYTES);
+      if (typeof input.opml !== "string" || !input.opml.trim()) {
+        return reply({ error: "Provide an OPML document to import." }, 400);
+      }
+      if (input.mode !== undefined && input.mode !== "" && !isAudioMode(input.mode)) {
+        return reply({ error: "Choose direct or deepdive." }, 400);
+      }
+      const mode: AudioMode = isAudioMode(input.mode) ? input.mode : "direct";
+      const modes: AudioMode[] = [mode];
+
+      const parsed = parseOpml(input.opml);
+      if (!parsed.hasOpmlStructure) {
+        return reply({ error: "That file does not look like a valid OPML document." }, 400);
+      }
+
+      const existingSources = await store.listSources(user.id);
+      const existingUrls = new Set<string>();
+      for (const s of existingSources) {
+        if (!s.feedUrl) continue;
+        existingUrls.add(s.feedUrl);
+        const norm = normalizeOpmlUrl(s.feedUrl);
+        if (norm) existingUrls.add(norm);
+      }
+
+      let added = 0;
+      let skipped = 0;
+      const failed: Array<{ url: string; reason: string }> = [...parsed.invalid];
+      const addedSources: Array<{
+        id: string;
+        title: string;
+        feedUrl: string;
+        modes: AudioMode[];
+        lastPolledAt?: string;
+      }> = [];
+      let sourceCapError: string | null = null;
+
+      for (const entry of parsed.feeds) {
+        let feedUrl: string;
+        try {
+          feedUrl = articleUrl(entry.xmlUrl).href;
+        } catch (error) {
+          failed.push({
+            url: entry.xmlUrl,
+            reason: error instanceof IngestError
+              ? error.message
+              : "That does not look like a fetchable feed URL.",
+          });
+          continue;
+        }
+        if (existingUrls.has(feedUrl) || existingUrls.has(entry.xmlUrl)) {
+          skipped++;
+          continue;
+        }
+        if (sourceCapError !== null) {
+          failed.push({ url: feedUrl, reason: sourceCapError });
+          continue;
+        }
+        try {
+          const { source } = await subscribeAccountFeed(
+            user,
+            { feedUrl, title: entry.title, modes },
+            1,
+          );
+          added++;
+          existingUrls.add(feedUrl);
+          addedSources.push({
+            id: source.id,
+            title: source.title,
+            feedUrl: source.feedUrl ?? feedUrl,
+            modes: source.modes,
+            lastPolledAt: source.lastPolledAt,
+          });
+        } catch (error) {
+          if (error instanceof SubscriptionLimitError) {
+            sourceCapError = error.message;
+            failed.push({ url: feedUrl, reason: error.message });
+          } else if (error instanceof IngestError) {
+            failed.push({ url: feedUrl, reason: error.message });
+          } else {
+            const screened = screenErrorForLogging(error);
+            console.warn(
+              `[audio-feed] opml source import failed for user ${user.id}: ${screened.message}`,
+            );
+            failed.push({ url: feedUrl, reason: "Could not subscribe to that feed." });
+          }
+        }
+      }
+
+      return reply({
+        added,
+        skipped,
+        failed,
+        sources: addedSources,
+        truncated: parsed.truncated,
+      });
     },
 
     /**
@@ -594,6 +764,59 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       })) as { scope?: unknown };
       const scope = b.scope === "failed" ? "failed" : b.scope === "all" ? "all" : "outdated";
       return reply({ ok: true, queued: await deps.regenerateOutdated(user.id, scope) });
+    },
+
+    bulkFailedEpisodes: async ({ req }) => {
+      const user = await signedIn(ctx, req);
+      if (user instanceof Response) return user;
+      const input = await body(req);
+      const action = input.action;
+      if (action !== "retry" && action !== "delete") {
+        return reply({ error: 'Action must be "retry" or "delete".' }, 400);
+      }
+      if (action === "retry" && !isSynthesisAuthorized(user)) {
+        return reply({ error: "Your account is not approved for audio." }, 403);
+      }
+      let limit: number | undefined;
+      if (input.limit !== undefined) {
+        if (
+          typeof input.limit !== "number" ||
+          !Number.isFinite(input.limit) ||
+          Math.trunc(input.limit) < 1
+        ) {
+          return reply({ error: "Limit must be a positive integer." }, 400);
+        }
+        limit = Math.trunc(input.limit);
+      }
+      if (action === "retry") {
+        const result = await bulkRetryFailedEpisodes(
+          ctx,
+          user.id,
+          limit ?? DEFAULT_BULK_FAILED_RETRY,
+        );
+        return reply({
+          ok: true,
+          action: "retry",
+          retried: result.retried,
+          queued: result.retried,
+          episodeIds: result.episodeIds,
+          remainingFailed: result.remainingFailed,
+        });
+      }
+      const result = await bulkDeleteFailedEpisodes(
+        ctx,
+        user.id,
+        limit ?? DEFAULT_BULK_FAILED_DELETE,
+      );
+      return reply({
+        ok: true,
+        action: "delete",
+        deleted: result.deleted,
+        episodeIds: result.episodeIds,
+        deletedBlobs: result.deletedBlobs,
+        failedBlobs: result.failedBlobs,
+        remainingFailed: result.remainingFailed,
+      });
     },
   };
 }
