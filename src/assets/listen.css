@@ -1654,6 +1654,129 @@ dialog.np-sheet::backdrop {
   color: var(--text-2);
 }
 
+/* ── Audio enhancements (Voice Boost + Trim Silence) & Synced Read-Along ── */
+.np-audio-fx {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-block-start: var(--space-1);
+}
+.np-fx-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-block-size: 2.25rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease), border-color 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+.np-fx-toggle:hover:not([disabled]) {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+.np-fx-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  border-color: var(--accent);
+  color: var(--text);
+}
+.np-fx-toggle[disabled] {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+.np-fx-dot {
+  inline-size: 0.45rem;
+  block-size: 0.45rem;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.5;
+  flex: none;
+}
+.np-fx-toggle[aria-pressed="true"] .np-fx-dot {
+  background: var(--accent);
+  opacity: 1;
+}
+.np-fx-note {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--muted);
+  text-align: center;
+}
+@media (pointer: coarse) {
+  .np-fx-toggle {
+    min-block-size: 2.75rem;
+  }
+}
+
+.np-follow-pill {
+  min-block-size: 2.1rem;
+  padding: 0.3rem 0.75rem;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+  color: var(--accent-2);
+}
+.np-cue {
+  appearance: none;
+  width: 100%;
+  text-align: start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid transparent;
+  border-inline-start: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease), border-color 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+.np-cue:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.np-cue[data-active="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-inline-start-color: var(--accent);
+  color: var(--text);
+}
+.np-cue-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.74rem;
+}
+.np-cue-time {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-2);
+}
+.np-cue-speaker {
+  font-weight: 700;
+  color: var(--text);
+}
+.np-cue-text {
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+.np-cue[data-active="true"] .np-cue-text {
+  font-weight: 500;
+}
+
 /* -------------------------------------------------------------- narrow */
 
 @media (max-width: 30rem) {

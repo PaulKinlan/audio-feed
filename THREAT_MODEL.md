@@ -9,7 +9,7 @@ exhaustive analysis.
 
 The route table lives in exactly one file (`src/app.ts`, "Application wiring — the single place
 routes are mounted"), and every entry point is one `router.<method>(...)` registration there. Routes
-are mounted from that single registration path and nowhere else: `createRouter` registers all 80
+are mounted from that single registration path and nowhere else: `createRouter` registers all 82
 itself, and no callback, hook or extra-registration seam exists through which a caller could mount a
 route this census does not see — the census is the whole population, not a sample of it.
 The count is mechanical, re-derivable with:
@@ -17,16 +17,16 @@ The count is mechanical, re-derivable with:
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts
 
 Run from the repository root, on the revision this section was last re-derived at (`2026-11-27`),
-that command yields **80 registrations** (41 GET, 35 POST, 3 DELETE, 1 `add`): 79
+that command yields **82 registrations** (42 GET, 36 POST, 3 DELETE, 1 `add`): 81
 literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`, the
 exported constant in `src/app.ts`). The `router.add("OPTIONS", "/api/reports/csp", …)` registration
-shares the POST handler, so there are **79 distinct handler endpoints**, of which one (`GET
+shares the POST handler, so there are **81 distinct handler endpoints**, of which one (`GET
 /__test/throw`, the `AUDIO_FEED_TEST_THROW` trap door inside `createRouter`) exists only when an
 operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
-production attack surface — leaving **78 distinct production handler endpoints** (carried by 79
-registrations, because the OPTIONS alias is one of the 79).
+production attack surface — leaving **80 distinct production handler endpoints** (carried by 81
+registrations, because the OPTIONS alias is one of the 81).
 
-**79 production registrations; all 79 covered by one of the eight boundary sections below**; the three
+**81 production registrations; all 81 covered by one of the eight boundary sections below**; the three
 pre-existing decision sections (CSP reports, `/health`, offline cache) are cited from inside them.
 Unmitigated boundaries are labelled as such — none are softened or omitted. A citation should be
 re-derivable by a command; line ranges are the last resort and must say so. Concretely, every
@@ -39,7 +39,7 @@ waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 
 | # | Boundary | Registrations | Routes |
 |---|---|---|---|
-| 1 | Public capability URLs | 10 | `/feed/:token/master.xml`, `/feed/:token/art/:target`, `/feed/:token/chapters/:episodeId`, `/feed/:token/transcript/:episodeId`, `/feed/:token/:sourceId/:mode.xml`, `/listen/:token`, `/listen/:token/status`, `/listen/:token/episodes/:episodeId/article`, `POST /listen/:token/episodes/:episodeId/retry`, `/audio/:key+` |
+| 1 | Public capability URLs | 12 | `/feed/:token/master.xml`, `/feed/:token/art/:target`, `/feed/:token/chapters/:episodeId`, `/feed/:token/transcript/:episodeId`, `/feed/:token/:sourceId/:mode.xml`, `/listen/:token`, `/listen/:token/status`, `GET/POST /listen/:token/state`, `/listen/:token/episodes/:episodeId/article`, `POST /listen/:token/episodes/:episodeId/retry`, `/audio/:key+` |
 | 2 | Feed-token APIs | 5 | `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes` |
 | 3 | Anonymous browser writes | 7 | `POST /api/auth/login/options`, `POST /api/auth/register/options`, `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its OPTIONS alias), `GET /share` |
 | 4 | Session APIs and pages | 19 | `POST /api/auth/logout`, the 12 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
@@ -61,16 +61,16 @@ routes, listed separately because the attacker's position there is different, an
 of the sum — a route is counted once, under the boundary that terminates it, never twice.
 
 The counted rows sum to the production population, and the sum is checkable rather than trusted:
-**10 + 5 + 7 + 19 + 28 + 10 = 79**, which is exactly what the census command above yields once the one
+**12 + 5 + 7 + 19 + 28 + 10 = 81**, which is exactly what the census command above yields once the one
 non-production registration is removed:
 
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts | grep -v '__test/throw'
 
-That command is the figure beside this table — **79** (the census finds 80; `GET /__test/throw` is the
+That command is the figure beside this table — **81** (the census finds 82; `GET /__test/throw` is the
 `AUDIO_FEED_TEST_THROW` trap door), which is what the rows add up to. The unit is a *registration*,
 the thing the census counts: boundary 3's six route entries fill seven registrations because
 `router.add("OPTIONS", "/api/reports/csp", …)` is a registration the census counts, one that shares
-the CSP POST handler. Subtract that alias and the same 79 registrations are the **78 distinct
+the CSP POST handler. Subtract that alias and the same 81 registrations are the **80 distinct
 production handler endpoints** the paragraph above derives by its own route. The census those two
 figures are subtracted from, and its per-method split, are pinned by `tests/route_census_test.ts` —
 "audio-feed-q2cf5: the route census total matches src/app.ts", "audio-feed-q2cf5: the route census
@@ -154,6 +154,14 @@ does not depend on anyone's reading.
     By design, the bare `/listen` landing page (`renderListenLanding`, covered in Boundary 4) is
     unbounded: it is a store-free template render with no token and no tenant reads, so read
     limits do not cover it.
+  - Cross-device playback state sync (`GET /listen/:token/state` and `POST /listen/:token/state`,
+    `handleGetPlaybackState` / `handlePostPlaybackState` in `src/routes/playback_state.ts`) shares
+    the same uniform 404 approval gate and `cache-control: private, no-store` posture, enforces
+    sliding-window rate limits before token lookup (`PLAYBACK_STATE_READ_RATE` 120/5 min,
+    `PLAYBACK_STATE_WRITE_RATE` 240/5 min), rejects cross-origin browser POSTs, bounds request
+    bodies at `MAX_PLAYBACK_STATE_BYTES` (64 KiB) via `readBoundedBody` before JSON parsing, and
+    caps persisted state (`PLAYBACK_MAX_POSITIONS` = 200, `PLAYBACK_MAX_PLAYED` = 500,
+    `PLAYBACK_MAX_QUEUE` = 200) with conflict-free timestamp merging.
   - Feed routes (`GET /feed/:token/master.xml` and `GET /feed/:token/:sourceId/:mode.xml`) are
     rate-limited before ANY store work (audio-feed-oxyp1; `refuseFeedRead` in `src/compose/feeds.ts`): dual
     sliding windows in the shared metadata store bound requests per client IP (`FEED_IP_RATE`: 120

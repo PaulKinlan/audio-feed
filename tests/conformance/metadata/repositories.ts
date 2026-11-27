@@ -30,6 +30,7 @@ export function registerRepositoriesCases(suite: MetadataHarness) {
         "logs",
         "notifications",
         "orphanBlobs",
+        "playbackState",
         "runs",
         "segments",
         "sources",
@@ -57,6 +58,7 @@ export function registerRepositoriesCases(suite: MetadataHarness) {
       runs: ["listRuns", "getEpisode"],
       logs: ["listLogs", "getEpisode"],
       auth: ["getSession", "getUser"],
+      playbackState: ["getPlaybackState", "getUser"],
     };
     for (const [domain, [own, foreign]] of Object.entries(spotChecks)) {
       const view = repositories[domain as keyof typeof repositories] as unknown as Record<
@@ -102,6 +104,7 @@ export function registerRepositoriesCases(suite: MetadataHarness) {
         ["notifications", "queueNotification"],
         ["runs", "listRuns"],
         ["auth", "getSession"],
+        ["playbackState", "mergePlaybackState"],
       ] as const
     ) {
       assertEquals(

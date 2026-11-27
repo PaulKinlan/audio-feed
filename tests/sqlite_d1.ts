@@ -6,17 +6,19 @@
  */
 
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import type {
   D1DatabaseLike,
   D1PreparedStatementLike,
   D1ResultLike,
 } from "../src/storage/d1/types.ts";
 
-const INITIAL_SCHEMA_SQL = readFileSync(
-  new URL("../migrations/0001_initial.sql", import.meta.url),
-  "utf8",
-);
+const MIGRATIONS_DIR = new URL("../migrations/", import.meta.url);
+const INITIAL_SCHEMA_SQL = readdirSync(MIGRATIONS_DIR)
+  .filter((name) => /^\d+_.+\.sql$/.test(name))
+  .sort()
+  .map((name) => readFileSync(new URL(name, MIGRATIONS_DIR), "utf8"))
+  .join("\n\n");
 
 function normalizeParam(value: unknown): SQLInputValue {
   if (value === undefined || value === null) return null;

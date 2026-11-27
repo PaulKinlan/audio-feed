@@ -709,3 +709,45 @@ export interface AuthChallenge {
   setupTokenHash?: string;
   expiresAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// Cross-device playback state sync
+// ---------------------------------------------------------------------------
+
+export const PLAYBACK_MAX_POSITIONS = 200;
+export const PLAYBACK_MAX_PLAYED = 500;
+export const PLAYBACK_MAX_QUEUE = 200;
+export const PLAYBACK_MIN_RATE = 0.5;
+export const PLAYBACK_MAX_RATE = 3.0;
+export const PLAYBACK_MAX_ID_LENGTH = 200;
+
+export interface PlaybackPosition {
+  /** Playback offset in seconds (>= 0). A 0 value with newer updatedAt clears resume. */
+  time: number;
+  /** Optional known episode duration in seconds. */
+  duration?: number;
+  /** Epoch milliseconds when this position was recorded. */
+  updatedAt: number;
+}
+
+/**
+ * Compact, bounded cross-device playback state per subscriber.
+ *
+ * Persisted in D1 (`playback_state`) and merged conflict-free on write:
+ *   - `positions`: per-episode newest-`updatedAt` wins, capped at 200 most recent entries.
+ *   - `played`: set union, capped at 500 entries (newest retained).
+ *   - `queue`: LWW by `queueUpdatedAt` (falling back to `updatedAt`), capped at 200 entries.
+ *   - Preferences (`playbackRate`, `voiceBoost`, `trimSilence`): LWW by `updatedAt`.
+ */
+export interface PlaybackState {
+  positions: Record<string, PlaybackPosition>;
+  played: string[];
+  queue: string[];
+  queueUpdatedAt?: number;
+  /** Epoch ms of the last explicit preference edit (rate / voiceBoost / trimSilence). */
+  prefsUpdatedAt?: number;
+  playbackRate?: number;
+  voiceBoost?: boolean;
+  trimSilence?: boolean;
+  updatedAt: number;
+}

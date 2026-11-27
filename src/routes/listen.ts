@@ -192,6 +192,11 @@ export interface ListenPageOptions {
   feedUrl: string;
   episodes: ListenEpisode[];
   offlineEnabled: boolean;
+  /**
+   * Whether `<audio>` loads same-origin bytes without cross-origin redirects,
+   * making `AudioContext.createMediaElementSource()` CORS-safe (never silent).
+   */
+  audioProcessingAvailable?: boolean;
   /** Work in progress and work that failed (audio-feed-7s2). */
   activity?: PlayerActivity;
   /** CSP nonce for this response (audio-feed-syhu); stamped on the inline tags. */
@@ -230,8 +235,17 @@ const ICON_SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
 </svg>`;
 
 export function renderListenPage(
-  { token, userId, subscriber, feedUrl, episodes, offlineEnabled, activity, nonce }:
-    ListenPageOptions,
+  {
+    token,
+    userId,
+    subscriber,
+    feedUrl,
+    episodes,
+    offlineEnabled,
+    audioProcessingAvailable = false,
+    activity,
+    nonce,
+  }: ListenPageOptions,
 ): string {
   const title = `${subscriber} — Audio Feed`;
   // Everything the client used to receive as six injected constants, in one JSON document. The
@@ -249,6 +263,7 @@ export function renderListenPage(
     episodes,
     activity: activity ?? { inProgress: [], failed: [], playable: episodes.length },
     offlineEnabled,
+    audioProcessingAvailable: Boolean(audioProcessingAvailable),
   };
   return `<!doctype html>
 <html lang="en" data-theme="dark">
@@ -497,6 +512,18 @@ ${ICON_SPRITE}
             <svg class="icon" aria-hidden="true"><use href="#i-next"/></svg>
           </button>
         </div>
+
+        <div class="np-audio-fx" id="npAudioFx" role="group" aria-label="Audio enhancements">
+          <button type="button" class="np-fx-toggle" id="voiceBoostBtn" aria-pressed="false" data-tooltip="Boost speech clarity and normalize volume">
+            <span class="np-fx-dot" aria-hidden="true"></span>
+            Voice Boost
+          </button>
+          <button type="button" class="np-fx-toggle" id="trimSilenceBtn" aria-pressed="false" data-tooltip="Speed through silent pauses automatically">
+            <span class="np-fx-dot" aria-hidden="true"></span>
+            Trim Silence
+          </button>
+        </div>
+        <p class="np-fx-note hidden" id="npAudioFxNote" role="status"></p>
       </div>
 
       <div class="np-tabs" role="tablist" aria-label="Episode details">
@@ -520,6 +547,7 @@ ${ICON_SPRITE}
         </div>
         <div class="np-panel hidden" id="npPanelRead" role="tabpanel" aria-labelledby="npTabRead">
           <div class="np-read-head">
+            <button type="button" class="chip np-follow-pill hidden" id="npFollowBtn">Follow playback</button>
             <a class="chip hidden" id="npExternalLink" target="_blank" rel="noopener noreferrer">Open original article</a>
           </div>
           <div class="np-read-body" id="npReadBody"></div>
@@ -962,6 +990,7 @@ export async function handleListen(
   activity.playable = rows.length;
   const dbMs = performance.now() - dbStart;
 
+  const directAudioOrigin = blobStoreDirectUrlOrigin(ctx.stores.blobs);
   const renderStart = performance.now();
   const nonce = newCspNonce();
   const html = renderListenPage({
@@ -973,6 +1002,10 @@ export async function handleListen(
     activity,
     // Offline storage needs Cache Storage; without it the page still plays online.
     offlineEnabled: true,
+    // Web Audio createMediaElementSource() is only safe when audio streams same-origin
+    // (directUrlOrigin === null, e.g. native R2 binding). Redirecting stores without CORS
+    // headers would cause MediaElementAudioSourceNode to output silence.
+    audioProcessingAvailable: directAudioOrigin === null,
     nonce,
   });
   const renderMs = performance.now() - renderStart;
@@ -990,7 +1023,7 @@ export async function handleListen(
   // re-evaluates media-src against that target — permit the store's own origin by name
   // (audio-feed-327mm delta) rather than re-widening to a bare scheme-source.
   return htmlResponse(html, nonce, {
-    mediaSrcOrigin: blobStoreDirectUrlOrigin(ctx.stores.blobs),
+    mediaSrcOrigin: directAudioOrigin,
     headers: {
       // A capability-bearing page: never in a shared cache.
       "cache-control": "no-store",

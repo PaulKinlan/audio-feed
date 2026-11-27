@@ -23,6 +23,7 @@ import {
   type MetadataStore,
   type NotificationRepository,
   type OrphanBlobRepository,
+  type PlaybackStateRepository,
   type RunRepository,
   type SourceRepository,
   type SynthesisSegmentRepository,
@@ -69,6 +70,7 @@ const DOMAIN_NAMES = [
   "logs",
   "notifications",
   "orphanBlobs",
+  "playbackState",
   "runs",
   "segments",
   "sources",
@@ -104,6 +106,7 @@ Deno.test("every domain is reachable, and typed as its own repository (audio-fee
     RunRepository,
     AuthRepository,
     LogRepository,
+    PlaybackStateRepository,
   ] = [
     store.repositories.users,
     store.repositories.sources,
@@ -116,6 +119,7 @@ Deno.test("every domain is reachable, and typed as its own repository (audio-fee
     store.repositories.runs,
     store.repositories.auth,
     store.repositories.logs,
+    store.repositories.playbackState,
   ];
   for (const view of views) {
     assert(view !== (store as unknown as UserRepository), "a domain is its own implementation now");
