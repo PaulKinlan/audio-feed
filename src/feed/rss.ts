@@ -205,6 +205,11 @@ function itemXml(episode: Episode, title: string): string {
       `      <podcast:chapters url="${escapeXml(episode.chaptersUrl)}" type="application/json+chapters"/>`,
     );
   }
+  if (episode.transcriptUrl) {
+    lines.push(
+      `      <podcast:transcript url="${escapeXml(episode.transcriptUrl)}" type="text/vtt"/>`,
+    );
+  }
 
   lines.push(
     `      <enclosure url="${escapeXml(episode.audioUrl)}" length="${

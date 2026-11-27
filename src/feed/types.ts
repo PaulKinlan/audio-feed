@@ -47,6 +47,8 @@ export interface Episode {
   imageUrl?: string;
   /** Podcasting 2.0 JSON Chapters URL emitted as `<podcast:chapters>`. */
   chaptersUrl?: string;
+  /** Podcasting 2.0 WebVTT transcript URL emitted as `<podcast:transcript>`. */
+  transcriptUrl?: string;
   season?: number;
   episodeNumber?: number;
 }

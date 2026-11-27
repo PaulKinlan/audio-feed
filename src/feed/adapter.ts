@@ -114,7 +114,10 @@ export function toFeedEpisode(
     mimeType: episode.contentType,
     durationSeconds: episode.durationSeconds,
     ...(encodedToken
-      ? { imageUrl: `${base}/feed/${encodedToken}/art/episode-${encodedId}.png` }
+      ? {
+        imageUrl: `${base}/feed/${encodedToken}/art/episode-${encodedId}.png`,
+        transcriptUrl: `${base}/feed/${encodedToken}/transcript/${encodedId}.vtt`,
+      }
       : {}),
     ...(encodedToken && episode.chapters && episode.chapters.length > 0
       ? { chaptersUrl: `${base}/feed/${encodedToken}/chapters/${encodedId}.json` }

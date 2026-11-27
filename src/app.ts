@@ -46,6 +46,7 @@ import {
   handleFeedArtwork,
   handleListenArticle,
 } from "./routes/artwork.ts";
+import { handleEpisodeTranscript } from "./routes/transcript.ts";
 import {
   handleListen,
   handleListenRetry,
@@ -297,6 +298,7 @@ export function createRouter(
   );
   router.get("/feed/:token/art/:target", handleFeedArtwork);
   router.get("/feed/:token/chapters/:episodeId", handleEpisodeChapters);
+  router.get("/feed/:token/transcript/:episodeId", handleEpisodeTranscript);
   router.get(
     "/feed/:token/:sourceId/:mode.xml",
     handlers.sourceFeed ?? (() => notImplemented("Per-source feed")),

@@ -9,7 +9,7 @@ exhaustive analysis.
 
 The route table lives in exactly one file (`src/app.ts`, "Application wiring — the single place
 routes are mounted"), and every entry point is one `router.<method>(...)` registration there. Routes
-are mounted from that single registration path and nowhere else: `createRouter` registers all 76
+are mounted from that single registration path and nowhere else: `createRouter` registers all 77
 itself, and no callback, hook or extra-registration seam exists through which a caller could mount a
 route this census does not see — the census is the whole population, not a sample of it.
 The count is mechanical, re-derivable with:
@@ -17,16 +17,16 @@ The count is mechanical, re-derivable with:
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts
 
 Run from the repository root, on the revision this section was last re-derived at (`2026-11-27`),
-that command yields **76 registrations** (39 GET, 33 POST, 3 DELETE, 1 `add`): 75
+that command yields **77 registrations** (40 GET, 33 POST, 3 DELETE, 1 `add`): 76
 literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`, the
 exported constant in `src/app.ts`). The `router.add("OPTIONS", "/api/reports/csp", …)` registration
-shares the POST handler, so there are **75 distinct handler endpoints**, of which one (`GET
+shares the POST handler, so there are **76 distinct handler endpoints**, of which one (`GET
 /__test/throw`, the `AUDIO_FEED_TEST_THROW` trap door inside `createRouter`) exists only when an
 operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
-production attack surface — leaving **74 distinct production handler endpoints** (carried by 75
-registrations, because the OPTIONS alias is one of the 75).
+production attack surface — leaving **75 distinct production handler endpoints** (carried by 76
+registrations, because the OPTIONS alias is one of the 76).
 
-**75 production registrations; all 75 covered by one of the eight boundary sections below**; the three
+**76 production registrations; all 76 covered by one of the eight boundary sections below**; the three
 pre-existing decision sections (CSP reports, `/health`, offline cache) are cited from inside them.
 Unmitigated boundaries are labelled as such — none are softened or omitted. A citation should be
 re-derivable by a command; line ranges are the last resort and must say so. Concretely, every
@@ -39,7 +39,7 @@ waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 
 | # | Boundary | Registrations | Routes |
 |---|---|---|---|
-| 1 | Public capability URLs | 9 | `/feed/:token/master.xml`, `/feed/:token/art/:target`, `/feed/:token/chapters/:episodeId`, `/feed/:token/:sourceId/:mode.xml`, `/listen/:token`, `/listen/:token/status`, `/listen/:token/episodes/:episodeId/article`, `POST /listen/:token/episodes/:episodeId/retry`, `/audio/:key+` |
+| 1 | Public capability URLs | 10 | `/feed/:token/master.xml`, `/feed/:token/art/:target`, `/feed/:token/chapters/:episodeId`, `/feed/:token/transcript/:episodeId`, `/feed/:token/:sourceId/:mode.xml`, `/listen/:token`, `/listen/:token/status`, `/listen/:token/episodes/:episodeId/article`, `POST /listen/:token/episodes/:episodeId/retry`, `/audio/:key+` |
 | 2 | Feed-token APIs | 5 | `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes` |
 | 3 | Anonymous browser writes | 7 | `POST /api/auth/login/options`, `POST /api/auth/register/options`, `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its OPTIONS alias), `GET /share` |
 | 4 | Session APIs and pages | 16 | `POST /api/auth/logout`, the 9 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
@@ -61,16 +61,16 @@ routes, listed separately because the attacker's position there is different, an
 of the sum — a route is counted once, under the boundary that terminates it, never twice.
 
 The counted rows sum to the production population, and the sum is checkable rather than trusted:
-**9 + 5 + 7 + 16 + 28 + 10 = 75**, which is exactly what the census command above yields once the one
+**10 + 5 + 7 + 16 + 28 + 10 = 76**, which is exactly what the census command above yields once the one
 non-production registration is removed:
 
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts | grep -v '__test/throw'
 
-That command is the figure beside this table — **75** (the census finds 76; `GET /__test/throw` is the
+That command is the figure beside this table — **76** (the census finds 77; `GET /__test/throw` is the
 `AUDIO_FEED_TEST_THROW` trap door), which is what the rows add up to. The unit is a *registration*,
 the thing the census counts: boundary 3's six route entries fill seven registrations because
 `router.add("OPTIONS", "/api/reports/csp", …)` is a registration the census counts, one that shares
-the CSP POST handler. Subtract that alias and the same 75 registrations are the **74 distinct
+the CSP POST handler. Subtract that alias and the same 76 registrations are the **75 distinct
 production handler endpoints** the paragraph above derives by its own route. The census those two
 figures are subtracted from, and its per-method split, are pinned by `tests/route_census_test.ts` —
 "audio-feed-q2cf5: the route census total matches src/app.ts", "audio-feed-q2cf5: the route census
@@ -169,6 +169,15 @@ does not depend on anyone's reading.
     lacking `byteLength`.
   - Capability keys are redacted from logs and error URLs (`src/router.ts`, `redactAudioKey`,
     `sanitizeRequestUrl`).
+  - WebVTT transcript route (`GET /feed/:token/transcript/:episodeId`, `handleEpisodeTranscript` in
+    `src/routes/transcript.ts`) mirrors `handleEpisodeChapters` in `src/routes/artwork.ts`:
+    sliding-window per-IP rate limiting (`TRANSCRIPT_RATE_LIMIT`, 240 per 5 min) runs before any
+    store read, unknown and non-approved tokens receive uniform `404` (`Unknown feed`), responses
+    carry `Cache-Control: private, max-age=3600` and `X-Robots-Tag: noindex`, and strong `ETag` /
+    `If-None-Match` (`304`) evaluation happens strictly after approval and ownership checks (as do
+    weak `ETag` / `If-None-Match` `304` responses on `master.xml` and per-source RSS feeds in
+    `src/compose/feeds.ts`, which preserve `Cache-Control: private, no-store`), so conditional
+    headers like `If-None-Match: *` can never act as an existence oracle.
   - **Audio enclosure URL lifetime vs rotation (audio-feed-3wenc):** `/audio/:key+` URLs are bearer
     capabilities that embed the user id and episode id (`audio/<userId>/<mode>/<id>.<ext>`), but do NOT
     embed the feed token (`enclosureUrl` in `src/feed/adapter.ts`). Rotating a feed token (`POST /api/account/rotate-token`

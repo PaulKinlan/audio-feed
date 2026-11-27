@@ -8,9 +8,18 @@
 import { articleUrl, IngestError } from "../ingest/url.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
 import { buildFeed, masterFeedUrl, sourceFeedUrl } from "../feed/rss.ts";
+import { computeEtag, ifNoneMatchMatches } from "../feed/etag.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "../feed/types.ts";
 import { toFeedEpisode } from "../feed/adapter.ts";
-import { isAudioMode, isPublishable } from "../types.ts";
+import {
+  type AudioMode,
+  type CodeHandling,
+  DEFAULT_CODE_HANDLING,
+  type Episode as StoredEpisode,
+  isAudioMode,
+  isPublishable,
+} from "../types.ts";
+import { PROMPT_VERSION } from "../tts/prompt_version.ts";
 import { resolveOrigin } from "../origin.ts";
 import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
@@ -18,7 +27,6 @@ import { problem, readCappedJson } from "../http.ts";
 import { approvedUserFor, loadUserByFeedToken, notFound } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import type { ComposeDeps } from "./shared.ts";
-import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../types.ts";
 import { extractClientIp, SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
 
 /**
@@ -138,6 +146,14 @@ export async function refuseFeedRead(
   return null;
 }
 
+interface PublishableFeedEntry {
+  feed: FeedEpisode;
+  stored: StoredEpisode;
+}
+
+const FEED_FORMAT_VERSION = "rss-v2-transcripts-1";
+const FEED_CACHE_CONTROL = "private, no-store";
+
 async function publishableEpisodes(
   ctx: AppContext,
   userId: string,
@@ -146,7 +162,7 @@ async function publishableEpisodes(
   // audio a podcast client cannot fetch.
   baseUrl: string,
   filter: { sourceId?: string; mode?: AudioMode; feedToken?: string } = {},
-): Promise<FeedEpisode[]> {
+): Promise<PublishableFeedEntry[]> {
   // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found or the page cap is reached.
   // audio-feed-oxyp1 bounds the work per request:
   // 1. The query requests publishable episodes directly (`publishable: true`), so unpublishable
@@ -163,7 +179,7 @@ async function publishableEpisodes(
   // `listEpisodePage`'s limit bounds the SCAN, not the matches, so a short page is not the end —
   // the loop continues while a cursor advances. The cursor guard is not decoration: a store that
   // hands back the same cursor would otherwise spin here forever.
-  const publishable: FeedEpisode[] = [];
+  const publishable: PublishableFeedEntry[] = [];
   let cursor: string | undefined;
   let pages = 0;
   let headCalls = 0;
@@ -203,7 +219,7 @@ async function publishableEpisodes(
         feedToken: filter.feedToken,
         byteLength,
       });
-      if (mapped) publishable.push(mapped);
+      if (mapped) publishable.push({ feed: mapped, stored: episode });
     }
     cursor = page.cursor === cursor ? undefined : page.cursor;
   } while (
@@ -235,13 +251,51 @@ async function publishableEpisodes(
 
   return publishable;
 }
-function feedResponse(xml: string): Response {
+
+function episodeEtagFingerprints(entries: readonly PublishableFeedEntry[]) {
+  return [...entries]
+    .sort((a, b) => a.stored.id.localeCompare(b.stored.id))
+    .map(({ feed, stored }) => ({
+      id: stored.id,
+      pubDate: feed.pubDate,
+      readyAt: stored.readyAt ?? "",
+      lastHeartbeat: stored.lastHeartbeat ?? "",
+      promptVersion: stored.promptVersion ?? "",
+      title: feed.title,
+      link: feed.link ?? "",
+      description: feed.description ?? "",
+      kind: feed.kind ?? "",
+      audioUrl: feed.audioUrl,
+      byteLength: feed.byteLength ?? 0,
+      mimeType: feed.mimeType ?? "",
+      durationSeconds: feed.durationSeconds ?? 0,
+      sourceId: feed.sourceId ?? "",
+      sourceTitle: feed.sourceTitle ?? "",
+      chaptersUrl: feed.chaptersUrl ?? "",
+      transcriptUrl: feed.transcriptUrl ?? "",
+    }));
+}
+
+function feedNotModifiedResponse(etag: string): Response {
+  return new Response(null, {
+    status: 304,
+    headers: {
+      etag,
+      // Feeds are per-user capabilities: never let a shared cache hold one.
+      "cache-control": FEED_CACHE_CONTROL,
+      "x-robots-tag": "noindex",
+    },
+  });
+}
+
+function feedResponse(xml: string, etag: string): Response {
   return new Response(xml, {
     status: 200,
     headers: {
       "content-type": "application/rss+xml; charset=utf-8",
+      etag,
       // Feeds are per-user capabilities: never let a shared cache hold one.
-      "cache-control": "private, no-store",
+      "cache-control": FEED_CACHE_CONTROL,
       "x-robots-tag": "noindex",
     },
   });
@@ -278,8 +332,29 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
     // localhost enclosures that no podcast client could fetch (audio-feed-0k3).
     const { baseUrl } = resolveOrigin(ctx.config, req);
 
-    const episodes = await publishableEpisodes(ctx, user.id, baseUrl, { feedToken: token });
+    const entries = await publishableEpisodes(ctx, user.id, baseUrl, { feedToken: token });
     const sources = await ctx.stores.metadata.listSources(user.id);
+
+    const etag = await computeEtag(
+      JSON.stringify({
+        format: FEED_FORMAT_VERSION,
+        kind: "master",
+        promptVersion: PROMPT_VERSION,
+        baseUrl,
+        token,
+        displayName: user.displayName,
+        sources: [...sources]
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map((s) => [s.id, s.title]),
+        episodes: episodeEtagFingerprints(entries),
+      }),
+      { weak: true },
+    );
+    if (ifNoneMatchMatches(req.headers.get("if-none-match"), etag)) {
+      return feedNotModifiedResponse(etag);
+    }
+
+    const episodes = entries.map((e) => e.feed);
     const titles = new Map(sources.map((source) => [source.id, source.title]));
 
     // The channel carries the URL the router actually serves. Deriving it here
@@ -309,6 +384,7 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
           return sourceTitle ? `${sourceTitle}: ${episode.title}` : episode.title;
         },
       }),
+      etag,
     );
   };
 }
@@ -330,11 +406,34 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
 
     const { baseUrl } = resolveOrigin(ctx.config, req);
 
-    const episodes = await publishableEpisodes(ctx, user.id, baseUrl, {
+    const entries = await publishableEpisodes(ctx, user.id, baseUrl, {
       sourceId,
       mode,
       feedToken: token,
     });
+
+    const etag = await computeEtag(
+      JSON.stringify({
+        format: FEED_FORMAT_VERSION,
+        kind: "source",
+        promptVersion: PROMPT_VERSION,
+        baseUrl,
+        token,
+        mode,
+        source: {
+          id: source.id,
+          title: source.title,
+          siteUrl: source.siteUrl ?? "",
+        },
+        episodes: episodeEtagFingerprints(entries),
+      }),
+      { weak: true },
+    );
+    if (ifNoneMatchMatches(req.headers.get("if-none-match"), etag)) {
+      return feedNotModifiedResponse(etag);
+    }
+
+    const episodes = entries.map((e) => e.feed);
     const modeLabel = mode === "deepdive" ? "Deep Dive" : "Direct Read";
     const channel: ChannelMeta = {
       title: `${source.title} — ${modeLabel}`,
@@ -350,7 +449,7 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
       categories: ["News", "Technology"],
     };
 
-    return feedResponse(buildFeed(channel, episodes));
+    return feedResponse(buildFeed(channel, episodes), etag);
   };
 }
 /** `GET /api/sources` — the caller's subscribed feeds. */
