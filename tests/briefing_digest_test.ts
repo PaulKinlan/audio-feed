@@ -415,6 +415,7 @@ Deno.test("compileBriefingArticle: Gemini path invokes fetch detached (workerd-s
     schedule: "daily",
     now: MON_07_00,
     geminiApiKey: "secret-gemini-key-xyz",
+    geminiBaseUrl: "https://gemini.int.exe.xyz/",
     fetchFn: strictWorkerdFetch,
   });
 
@@ -423,6 +424,10 @@ Deno.test("compileBriefingArticle: Gemini path invokes fetch detached (workerd-s
   assertEquals(compiled.generator, "gemini");
   assertEquals(capturedApiKeyHeader, "secret-gemini-key-xyz");
   assert(!capturedUrl.includes("secret-gemini-key-xyz"), "API key must never travel in URL");
+  assert(
+    capturedUrl.startsWith("https://gemini.int.exe.xyz/v1beta/models/"),
+    `host-only geminiBaseUrl must normalize with /v1beta (got ${capturedUrl})`,
+  );
 
   // Verify fence breakout tags were stripped to a fixed point inside <briefing_stories>
   const openIdx = capturedPromptText.indexOf("<briefing_stories>");

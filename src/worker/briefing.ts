@@ -19,7 +19,7 @@ import { newArticleId, newEpisodeId } from "../ids.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
 import type { MetadataStore } from "../storage/mod.ts";
 import { attemptDeadline } from "../tts/deadline.ts";
-import { DEFAULT_GEMINI_API_BASE_URL } from "../tts/gemini.ts";
+import { type EnvReader, getGeminiApiBaseUrl } from "../tts/gemini.ts";
 import {
   type Article,
   type AudioMode,
@@ -670,6 +670,7 @@ async function summarizeBriefingWithGemini(
   opts: {
     apiKey: string;
     baseUrl?: string;
+    env?: EnvReader;
     model?: string;
     timeoutMs?: number;
     fetchFn?: typeof fetch;
@@ -678,7 +679,7 @@ async function summarizeBriefingWithGemini(
 ): Promise<ParsedGeminiBriefing | null> {
   const warn = opts.onWarn ?? ((msg: string) => console.warn(msg));
   const model = opts.model ?? DEFAULT_BRIEFING_MODEL;
-  const base = (opts.baseUrl || DEFAULT_GEMINI_API_BASE_URL).replace(/\/+$/, "");
+  const base = getGeminiApiBaseUrl(opts.baseUrl, opts.env);
   const url = `${base}/models/${encodeURIComponent(model)}:generateContent`;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BRIEFING_TIMEOUT_MS;
 
@@ -752,6 +753,7 @@ export interface CompileBriefingOptions {
   /** Optional Gemini API key to produce an edited briefing script; omit for offline extractive mode. */
   geminiApiKey?: string;
   geminiBaseUrl?: string;
+  env?: EnvReader;
   model?: string;
   timeoutMs?: number;
   fetchFn?: typeof fetch;
@@ -821,6 +823,7 @@ export async function compileBriefingArticle(
     const edited = await summarizeBriefingWithGemini(opts.schedule, dateKey, storyEntries, {
       apiKey,
       baseUrl: opts.geminiBaseUrl,
+      env: opts.env,
       model: opts.model,
       timeoutMs: opts.timeoutMs,
       fetchFn: opts.fetchFn,
@@ -1053,6 +1056,7 @@ export async function generateUserBriefing(
     maxArticles,
     geminiApiKey: ctx.config.geminiApiKey,
     geminiBaseUrl: ctx.env?.get("GEMINI_API_BASE_URL"),
+    env: ctx.env,
     model: opts.model,
     timeoutMs: opts.timeoutMs,
     fetchFn: opts.fetchFn,
