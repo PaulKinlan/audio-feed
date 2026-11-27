@@ -24,6 +24,7 @@ import {
 import { createHandlers } from "./compose.ts";
 import { screenErrorForLogging } from "./observability/error_screen.ts";
 import { recordRun } from "./stats.ts";
+import { runScheduledBriefings } from "./worker/briefing.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "./worker/synthesis.ts";
 import {
   type EpisodeSynthesisParams,
@@ -296,6 +297,60 @@ async function runScheduledSynthesis(ctx: AppContext, env?: WorkerEnv): Promise<
   }
 }
 
+async function runScheduledBriefingsIfDue(
+  ctx: AppContext,
+  scheduledTime?: number,
+): Promise<void> {
+  const now = typeof scheduledTime === "number" && Number.isFinite(scheduledTime)
+    ? new Date(scheduledTime)
+    : new Date();
+  // Piggyback on the */15 feed-poll cron during the first 15-minute window of each UTC hour
+  // without adding another Cloudflare Cron Trigger slot.
+  if (now.getUTCMinutes() >= 15) return;
+  try {
+    const result = await runScheduledBriefings(ctx, now);
+    if (result.considered > 0) {
+      console.log(
+        `[audio-feed] cron briefings: considered=${result.considered}, queued=${result.queued}, ` +
+          `empty=${result.empty}, skipped=${result.skipped}, failed=${result.failed}`,
+      );
+      await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        severity: result.failed > 0 ? "warn" : "info",
+        type: "briefing.scheduled",
+        message:
+          `cron briefings: considered=${result.considered}, queued=${result.queued}, ` +
+          `empty=${result.empty}, skipped=${result.skipped}, failed=${result.failed}`,
+        process: "cron",
+        job: "audio-feed-briefings",
+        context: {
+          considered: result.considered,
+          queued: result.queued,
+          empty: result.empty,
+          skipped: result.skipped,
+          failed: result.failed,
+          ...(result.errors.length > 0 ? { errors: result.errors } : {}),
+        },
+      });
+    }
+  } catch (err) {
+    console.error("[audio-feed] cron briefings error:", err);
+    try {
+      await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        severity: "error",
+        type: "briefing.scheduled",
+        message: `cron briefings error: ${(err as Error)?.message ?? String(err)}`,
+        process: "cron",
+        job: "audio-feed-briefings",
+        stack: (err as Error)?.stack,
+      });
+    } catch {
+      // ignore logging failure
+    }
+  }
+}
+
 async function runScheduledLogRetention(ctx: AppContext): Promise<void> {
   try {
     const days = ctx.config.logRetentionDays ?? DEFAULT_LOG_RETENTION_DAYS;
@@ -362,6 +417,7 @@ export default {
       switch (controller.cron) {
         case "*/15 * * * *":
           await runScheduledFeedPoll(ctx, env);
+          await runScheduledBriefingsIfDue(ctx, controller.scheduledTime);
           break;
         case "*/2 * * * *":
           await runScheduledSynthesis(ctx, env);
@@ -372,6 +428,7 @@ export default {
         default:
           // Allow manual trigger fallback in `wrangler dev --test-scheduled`
           await runScheduledFeedPoll(ctx, env);
+          await runScheduledBriefingsIfDue(ctx, controller.scheduledTime);
           await runScheduledSynthesis(ctx, env);
           break;
       }

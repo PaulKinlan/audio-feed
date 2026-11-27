@@ -47,6 +47,9 @@ const EXPECTED_PROMPT_SITES: ExpectedSite[] = [
   // The one reasoning-LLM prompt builder: fences title/author/summary/body through
   // fencedRegion + UNTRUSTED_FENCE_TAG. Judged from CODE (the fence call), not pinned by faith.
   { where: "src/worker/script.ts :: buildScriptPrompt", mitigation: "fenced" },
+  // Morning Briefing optional Gemini editor prompt builder: fences publisher stories payload
+  // through fencedRegion + UNTRUSTED_BRIEFING_FENCE_TAG + DEFAULT_MAX_BODY_CHARS cap.
+  { where: "src/worker/briefing.ts :: buildBriefingPrompt", mitigation: "fenced" },
   // The batch continuation instruction: interpolates app-computed segment bookkeeping;
   // article data reaches the model through structured role parts. Declared by marker.
   {
@@ -707,15 +710,27 @@ interface AssembledOverhead {
   reason: string;
 }
 
+interface DeclaredHoleBound {
+  maxChars: number;
+  reason: string;
+}
+
 interface AssembledPromptBound {
   /** "file :: name", matching the census key. */
   where: string;
   /** The assembled total must stay at or under this, with the reason for the number. */
   ceiling: number;
   ceilingReason: string;
-  /** Non-label template holes permitted for this site (defaults to DECLARED_LITERAL_HOLES). */
-  declaredHoles?: Record<string, string>;
+  /** Per-site declared app-computed literal holes (defaults to DEFAULT_DECLARED_HOLE_BOUNDS). */
+  declaredHoles?: Record<string, DeclaredHoleBound>;
 }
+
+const DEFAULT_DECLARED_HOLE_BOUNDS: Record<string, DeclaredHoleBound> = {
+  maxTurns: {
+    maxChars: MAX_TURNS_DIGITS,
+    reason: `DECLARED: ${DECLARED_LITERAL_HOLES.maxTurns} (see MAX_TURNS_DIGITS)`,
+  },
+};
 
 const ASSEMBLED_PROMPT_BOUNDS: AssembledPromptBound[] = [
   {
@@ -745,6 +760,21 @@ const ASSEMBLED_PROMPT_BOUNDS: AssembledPromptBound[] = [
       `DEFAULT_MAX_BODY_CHARS plus ${INSTRUCTION_TEXT_ALLOWANCE} characters of instruction text, ` +
       `with zero unmitigated template holes.`,
     declaredHoles: {},
+  },
+  {
+    where: "src/worker/briefing.ts :: buildBriefingPrompt",
+    ceiling: 1 * DEFAULT_MAX_BODY_CHARS + INSTRUCTION_TEXT_ALLOWANCE,
+    ceilingReason: `DECLARED ASSUMPTION: 1 capped publisher payload (storiesPayload, capped at ` +
+      `DEFAULT_MAX_BODY_CHARS = ${DEFAULT_MAX_BODY_CHARS}) plus ${INSTRUCTION_TEXT_ALLOWANCE} ` +
+      `characters of instruction text — publisher story titles, sources, and excerpts are ` +
+      `bounded and fenced inside <briefing_stories> via fencedRegion + capped().`,
+    declaredHoles: {
+      dateKey: {
+        maxChars: 10,
+        reason:
+          "DECLARED: buildBriefingPrompt validates dateKey against ISO_DATE_KEY_RE (/^\\d{4}-\\d{2}-\\d{2}$/), so it is always an exact 10-character UTC calendar date",
+      },
+    },
   },
 ];
 
@@ -779,7 +809,7 @@ interface MeasuredPromptHoles {
 function measurePromptHoles(
   site: PromptSite,
   source: string,
-  declaredHoles: Record<string, string> = DECLARED_LITERAL_HOLES,
+  declaredHoles: Record<string, DeclaredHoleBound> = DEFAULT_DECLARED_HOLE_BOUNDS,
 ): MeasuredPromptHoles {
   const fields = fencedPublisherFields(source, site);
 
@@ -841,7 +871,7 @@ function measurePromptHoles(
 function assembledPromptChars(
   site: PromptSite,
   source: string,
-  declaredHoles: Record<string, string> = DECLARED_LITERAL_HOLES,
+  declaredHoles: Record<string, DeclaredHoleBound> = DEFAULT_DECLARED_HOLE_BOUNDS,
 ): {
   literalChars: number;
   separatorChars: number;
@@ -881,20 +911,19 @@ function assembledPromptChars(
       reason:
         "MEASURED: the open and close tag characters the builder writes, read from its fence-tag constants — plain string literals, so the census's template-literal population does not see them",
     },
-    {
-      what: `the ${labelHoles.length} dialogue speaker labels (${labelHoles.join(", ")})`,
-      maxChars: labelHoles.length * SPEAKER_LABEL_MAX_CHARS,
-      reason:
-        "MEASURED hole count x DECLARED label length: these are the ${x.name} holes the builder actually interpolates, and labels are app-configured, never publisher-supplied (see SPEAKER_LABEL_MAX_CHARS)",
-    },
-    ...("maxTurns" in declaredHoles
+    ...(labelHoles.length > 0
       ? [{
-        what: "the maxTurns digit",
-        maxChars: MAX_TURNS_DIGITS,
+        what: `the ${labelHoles.length} dialogue speaker labels (${labelHoles.join(", ")})`,
+        maxChars: labelHoles.length * SPEAKER_LABEL_MAX_CHARS,
         reason:
-          "DECLARED: createGroundedScriptGenerator rejects a maxTurns that is not an integer from 2 to 32, so the interpolated number is at most two digits (see MAX_TURNS_DIGITS)",
+          "MEASURED hole count x DECLARED label length: these are the ${x.name} holes the builder actually interpolates, and labels are app-configured, never publisher-supplied (see SPEAKER_LABEL_MAX_CHARS)",
       }]
       : []),
+    ...Object.entries(declaredHoles).map(([name, info]) => ({
+      what: `the ${name} hole`,
+      maxChars: info.maxChars,
+      reason: info.reason,
+    })),
   ];
   const overheadChars = overhead.reduce((sum, part) => sum + part.maxChars, 0);
   return {
@@ -911,7 +940,7 @@ function assertAssembledPromptUnderCeiling(
   bound: AssembledPromptBound,
   source: string,
 ): void {
-  const chars = assembledPromptChars(site, source, bound.declaredHoles ?? DECLARED_LITERAL_HOLES);
+  const chars = assembledPromptChars(site, source, bound.declaredHoles);
   if (chars.total > bound.ceiling) {
     throw new Error(
       `ASSEMBLED PROMPT EXCEEDS ITS CEILING: ${
