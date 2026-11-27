@@ -119,8 +119,8 @@ interface RouteRegistration {
  * a literal rather than something derived from `enumerateRouteRegistrations`.
  */
 const EXPECTED_ROUTE_CENSUS = {
-  total: 82,
-  byMethod: { get: 42, post: 36, delete: 3, put: 0, patch: 0, add: 1 },
+  total: 85,
+  byMethod: { get: 43, post: 38, delete: 3, put: 0, patch: 0, add: 1 },
 } as const;
 
 /**
@@ -128,10 +128,10 @@ const EXPECTED_ROUTE_CENSUS = {
  * it. It is written out rather than composed from the pin so the row states what the document must
  * say; moving the pin means moving this sentence too, and the row's message names the line.
  */
-const CENSUS_SENTENCE = "**82 registrations** (42 GET, 36 POST, 3 DELETE, 1 `add`)";
+const CENSUS_SENTENCE = "**85 registrations** (43 GET, 38 POST, 3 DELETE, 1 `add`)";
 
 /** The section's second statement of the total, in the sentence about `createRouter`. */
-const CREATE_ROUTER_SENTENCE = "`createRouter` registers all 82";
+const CREATE_ROUTER_SENTENCE = "`createRouter` registers all 85";
 
 function isMethod(value: string): value is Method {
   return (METHODS as readonly string[]).includes(value);

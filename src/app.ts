@@ -66,6 +66,12 @@ import { handleCspReports } from "./routes/reports.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { hostGateRefusal, isHostGateExempt, resolveOrigin } from "./origin.ts";
 import type { AccountHandlers } from "./routes/account_api.ts";
+import {
+  type BriefingHandlers,
+  handleGenerateBriefing,
+  handleGetBriefing,
+  handleUpdateBriefing,
+} from "./routes/briefing_api.ts";
 
 export interface AppContext {
   config: AppConfig;
@@ -140,6 +146,8 @@ export interface AppHandlers {
   requestAccess?: Handler<AppContext>;
   /** audio-feed-8fc — passkey sign-in, sessions and the account page's API. */
   account?: AccountHandlers;
+  /** Issue #50 — Morning Briefing digest preferences and on-demand generation API. */
+  briefing?: BriefingHandlers;
   /** audio-feed-8oz — regenerate after the TTS prompts change. */
   adminListEpisodes?: Handler<AppContext>;
   adminRegenerateEpisode?: Handler<AppContext>;
@@ -426,6 +434,12 @@ export function createRouter(
   router.post("/api/account/episodes/:episodeId/retry", account("regenerateEpisode"));
   router.post("/api/account/episodes/bulk-failed", account("bulkFailedEpisodes"));
   router.post("/api/account/regenerate", account("regenerateOutdated"));
+  router.get("/api/account/briefing", handlers.briefing?.get ?? handleGetBriefing);
+  router.post("/api/account/briefing", handlers.briefing?.update ?? handleUpdateBriefing);
+  router.post(
+    "/api/account/briefing/generate",
+    handlers.briefing?.generate ?? handleGenerateBriefing,
+  );
 
   router.get(
     "/api/admin/users/:id/episodes",

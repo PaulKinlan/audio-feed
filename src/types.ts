@@ -46,6 +46,32 @@ export function isUserStatus(value: unknown): value is UserStatus {
   return USER_STATUSES.includes(value as UserStatus);
 }
 
+/** Morning Briefing digest cadence (Issue #50). */
+export type BriefingSchedule = "off" | "daily" | "weekly";
+
+export const BRIEFING_SCHEDULES: readonly BriefingSchedule[] = [
+  "off",
+  "daily",
+  "weekly",
+] as const;
+
+export function isBriefingSchedule(value: unknown): value is BriefingSchedule {
+  return value === "off" || value === "daily" || value === "weekly";
+}
+
+/** Per-subscriber Morning Briefing digest preferences stored inside `User`. */
+export interface BriefingPreferences {
+  schedule: BriefingSchedule;
+  /** UTC hour (0-23) when scheduled briefings run. */
+  hourUtc: number;
+  /** Audio presentation mode for generated briefings. */
+  mode: AudioMode;
+  /** Maximum stories compiled into a single briefing (1-12). */
+  maxArticles: number;
+  /** UTC calendar date ("YYYY-MM-DD") of the most recently generated briefing. */
+  lastGeneratedDate?: string;
+}
+
 /**
  * A subscriber. Each user is its own listening persona.
  *
@@ -93,6 +119,8 @@ export interface User {
    * is given.
    */
   dailyEpisodeBudget?: number;
+  /** Optional Morning Briefing digest preferences (Issue #50). */
+  briefing?: BriefingPreferences;
 }
 
 /**
@@ -247,6 +275,9 @@ export interface Source {
 
 /** Stable id of the per-user inbox that `Send-to-Audio` ingests land in. */
 export const INBOX_SOURCE_ID = "inbox";
+
+/** Stable id of the per-user synthetic source that Morning Briefing digests land in. */
+export const BRIEFING_SOURCE_ID = "briefing";
 
 // ---------------------------------------------------------------------------
 // Articles

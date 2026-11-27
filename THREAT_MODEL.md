@@ -9,24 +9,24 @@ exhaustive analysis.
 
 The route table lives in exactly one file (`src/app.ts`, "Application wiring — the single place
 routes are mounted"), and every entry point is one `router.<method>(...)` registration there. Routes
-are mounted from that single registration path and nowhere else: `createRouter` registers all 82
+are mounted from that single registration path and nowhere else: `createRouter` registers all 85
 itself, and no callback, hook or extra-registration seam exists through which a caller could mount a
 route this census does not see — the census is the whole population, not a sample of it.
 The count is mechanical, re-derivable with:
 
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts
 
-Run from the repository root, on the revision this section was last re-derived at (`2026-11-27`),
-that command yields **82 registrations** (42 GET, 36 POST, 3 DELETE, 1 `add`): 81
+Run from the repository root, on the revision this section was last re-derived at (`2026-11-28`),
+that command yields **85 registrations** (43 GET, 38 POST, 3 DELETE, 1 `add`): 84
 literal patterns plus the constant `ADMIN_OBSERVABILITY_ROUTE` (= `/admin/observability`, the
 exported constant in `src/app.ts`). The `router.add("OPTIONS", "/api/reports/csp", …)` registration
-shares the POST handler, so there are **81 distinct handler endpoints**, of which one (`GET
+shares the POST handler, so there are **84 distinct handler endpoints**, of which one (`GET
 /__test/throw`, the `AUDIO_FEED_TEST_THROW` trap door inside `createRouter`) exists only when an
 operator sets `AUDIO_FEED_TEST_THROW=1` and is not part of a
-production attack surface — leaving **80 distinct production handler endpoints** (carried by 81
-registrations, because the OPTIONS alias is one of the 81).
+production attack surface — leaving **83 distinct production handler endpoints** (carried by 84
+registrations, because the OPTIONS alias is one of the 84).
 
-**81 production registrations; all 81 covered by one of the eight boundary sections below**; the three
+**84 production registrations; all 84 covered by one of the eight boundary sections below**; the three
 pre-existing decision sections (CSP reports, `/health`, offline cache) are cited from inside them.
 Unmitigated boundaries are labelled as such — none are softened or omitted. A citation should be
 re-derivable by a command; line ranges are the last resort and must say so. Concretely, every
@@ -42,7 +42,7 @@ waiting to rot. (audio-feed-0c5uc swept this file to that rule.)
 | 1 | Public capability URLs | 12 | `/feed/:token/master.xml`, `/feed/:token/art/:target`, `/feed/:token/chapters/:episodeId`, `/feed/:token/transcript/:episodeId`, `/feed/:token/:sourceId/:mode.xml`, `/listen/:token`, `/listen/:token/status`, `GET/POST /listen/:token/state`, `/listen/:token/episodes/:episodeId/article`, `POST /listen/:token/episodes/:episodeId/retry`, `/audio/:key+` |
 | 2 | Feed-token APIs | 5 | `POST /api/ingest`, `POST /api/upload`, `GET/POST /api/sources`, `GET /api/episodes` |
 | 3 | Anonymous browser writes | 7 | `POST /api/auth/login/options`, `POST /api/auth/register/options`, `POST /api/request-access`, `POST /api/cwv`, `POST /api/reports/csp` (+ its OPTIONS alias), `GET /share` |
-| 4 | Session APIs and pages | 19 | `POST /api/auth/logout`, the 12 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
+| 4 | Session APIs and pages | 22 | `POST /api/auth/logout`, the 15 `/api/account/*` routes, `POST /api/auth/login/verify`, `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, `GET /listen` (bare path) |
 | 5 | Admin surface | 28 | `GET /admin`, `GET /admin/subscribers`, `GET /admin/subscribers/:id`, `GET /admin/observability`, `GET /admin/observability/issues`, `GET /admin/observability/telemetry`, the 19 `/api/admin/*` routes, `POST /api/auth/bootstrap`, `GET /api/observability/errors`, `GET /api/observability/summary` |
 | 6 | Ingest fetch (SSRF) | — | the server-side fetch half of boundary 2, plus scheduled feed polling and `POST /api/sources` discovery |
 | 7 | Static, well-known, public pages | 10 | `/`, `/sw.js`, `/manifest.json`, `/robots.txt`, `/icon.svg`, `/icon.png`, `/assets/:name`, `/.well-known/webauthn`, `/health`, `/assets/voices/:voice` |
@@ -61,16 +61,16 @@ routes, listed separately because the attacker's position there is different, an
 of the sum — a route is counted once, under the boundary that terminates it, never twice.
 
 The counted rows sum to the production population, and the sum is checkable rather than trusted:
-**12 + 5 + 7 + 19 + 28 + 10 = 81**, which is exactly what the census command above yields once the one
+**12 + 5 + 7 + 22 + 28 + 10 = 84**, which is exactly what the census command above yields once the one
 non-production registration is removed:
 
     grep -nE 'router\.(get|post|delete|put|patch|add)\(' src/app.ts | grep -v '__test/throw'
 
-That command is the figure beside this table — **81** (the census finds 82; `GET /__test/throw` is the
+That command is the figure beside this table — **84** (the census finds 85; `GET /__test/throw` is the
 `AUDIO_FEED_TEST_THROW` trap door), which is what the rows add up to. The unit is a *registration*,
 the thing the census counts: boundary 3's six route entries fill seven registrations because
 `router.add("OPTIONS", "/api/reports/csp", …)` is a registration the census counts, one that shares
-the CSP POST handler. Subtract that alias and the same 81 registrations are the **80 distinct
+the CSP POST handler. Subtract that alias and the same 84 registrations are the **83 distinct
 production handler endpoints** the paragraph above derives by its own route. The census those two
 figures are subtracted from, and its per-method split, are pinned by `tests/route_census_test.ts` —
 "audio-feed-q2cf5: the route census total matches src/app.ts", "audio-feed-q2cf5: the route census
@@ -305,7 +305,7 @@ does not depend on anyone's reading.
 
 ### Boundary 4 — Session APIs and pages
 
-- **Routes:** `POST /api/auth/logout`, the 12 `/api/account/*` routes, `POST /api/auth/login/verify`,
+- **Routes:** `POST /api/auth/logout`, the 15 `/api/account/*` routes, `POST /api/auth/login/verify`,
   `POST /api/auth/register/verify`, `GET /account`, `GET /login`, `GET /add`, and the bare `GET
   /listen` — each the registration line naming that pattern in `createRouter` (`src/app.ts`).
 - **Attacker controls:** a cross-site browser context (CSRF position); a stolen session cookie if
@@ -362,6 +362,21 @@ does not depend on anyone's reading.
     (`MAX_BULK_FAILED_RETRY` = 25, `MAX_BULK_FAILED_DELETE` = 200), and on `"delete"` re-verifies
     `status === "failed"` (never deleting `ready`, `pending`, `synthesizing`, or regenerating rows)
     while sweeping segment blobs via `sweepEpisodeSegments`.
+  - **Morning Briefing digest preferences and on-demand generation (Issue #50):**
+    `GET /api/account/briefing` (`handleGetBriefing` in `src/routes/briefing_api.ts`) is a pure read
+    behind session auth + `sameSiteRead` with `Cache-Control: private, no-store`, returning current
+    briefing preferences and bounded eligible unread article counts (no outbound fetches or writes).
+    `POST /api/account/briefing` (`handleUpdateBriefing`) requires a session + strict `sameOrigin`
+    CSRF, bounds bodies at `MAX_ACCOUNT_BODY_BYTES` (16 KiB), strictly validates `schedule`,
+    `hourUtc` (0–23), `mode`, and `maxArticles` (1–12), and preserves server-owned
+    `lastGeneratedDate`. `POST /api/account/briefing/generate` (`handleGenerateBriefing`) requires a
+    session + strict `sameOrigin` CSRF + `isSynthesisAuthorized` (approved account gate), enforces a
+    per-subscriber sliding-window rate limit (`BRIEFING_GENERATE_RATE` = 6/hour, namespace
+    `briefing_generate`) BEFORE scanning articles or calling Gemini, deduplicates per UTC date via
+    `insertArticleWithEpisodeIfAbsent` on `audiofeed://briefing/<schedule>/<YYYY-MM-DD>`, and
+    routes any optional Gemini briefing prompt through delimiter fencing (`buildBriefingPrompt` +
+    `fencedRegion` + `DEFAULT_MAX_BODY_CHARS` cap in `src/worker/briefing.ts`, pinned in
+    `tests/prompt_census_test.ts`).
 - **Residual (documented, accepted):** a stolen session cookie is a bearer credential until logout
   or `rotate-token`; nothing in code detects a replayed cookie from a second device.
 - **Residual (documented, accepted):** the read wall's absent-both admission is a standing
