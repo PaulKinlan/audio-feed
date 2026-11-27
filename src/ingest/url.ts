@@ -9,6 +9,7 @@ import ipaddr from "ipaddr.js";
 import { parseHTML } from "linkedom";
 import { getDocumentProxy, getMeta } from "unpdf";
 import { type AudioMode, isAudioMode, isSynthesisAuthorized, type User } from "../types.ts";
+import { extractYouTubeArticle, parseYouTubeVideoId } from "./youtube.ts";
 
 export interface ExtractedArticle {
   url: string;
@@ -259,6 +260,9 @@ export async function fetchArticle(
   options: { transport?: Transport; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<ExtractedArticle> {
   let url = articleUrl(input);
+  if (parseYouTubeVideoId(url.href)) {
+    return await extractYouTubeArticle(url.href, options);
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? TIMEOUT_MS);
   const signal = options.signal
@@ -279,6 +283,13 @@ export async function fetchArticle(
           throw new IngestError(422, "Article has an invalid or excessive redirect chain.");
         }
         url = articleUrl(new URL(location, url).href);
+        if (parseYouTubeVideoId(url.href)) {
+          return await extractYouTubeArticle(url.href, {
+            transport: options.transport,
+            signal,
+            timeoutMs: options.timeoutMs,
+          });
+        }
         continue;
       }
       if (!response.ok) {

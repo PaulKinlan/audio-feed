@@ -58,6 +58,10 @@ const EXPECTED_PROMPT_SITES: ExpectedSite[] = [
   { where: "src/tts/gemini.ts :: formatNarrationIntro", mitigation: "transcript-only" },
   { where: "src/tts/gemini.ts :: formatNarrationPrompt", mitigation: "transcript-only" },
   { where: "src/tts/gemini.ts :: formatDialoguePrompt", mitigation: "transcript-only" },
+  // Extra narration style builders ("3-Min Brief" and "Technical Walkthrough"): fence all
+  // publisher-controlled fields through fencedRegion + capped() bounded by DEFAULT_MAX_BODY_CHARS.
+  { where: "src/tts/styles.ts :: buildBriefSummaryPrompt", mitigation: "fenced" },
+  { where: "src/tts/styles.ts :: buildCodeWalkthroughPrompt", mitigation: "fenced" },
 ];
 
 function siteKey(site: PromptSite): string {
@@ -709,6 +713,8 @@ interface AssembledPromptBound {
   /** The assembled total must stay at or under this, with the reason for the number. */
   ceiling: number;
   ceilingReason: string;
+  /** Non-label template holes permitted for this site (defaults to DECLARED_LITERAL_HOLES). */
+  declaredHoles?: Record<string, string>;
 }
 
 const ASSEMBLED_PROMPT_BOUNDS: AssembledPromptBound[] = [
@@ -721,6 +727,24 @@ const ASSEMBLED_PROMPT_BOUNDS: AssembledPromptBound[] = [
       `wording. The field count is POLICY, not structure (see PUBLISHER_FIELD_BUDGET): the ` +
       `arithmetic below measures how many fields the builder really fences, so a fifth field ` +
       `reds naming the field and the new total instead of widening this ceiling in silence.`,
+  },
+  {
+    where: "src/tts/styles.ts :: buildBriefSummaryPrompt",
+    ceiling: 3 * DEFAULT_MAX_BODY_CHARS + INSTRUCTION_TEXT_ALLOWANCE,
+    ceilingReason:
+      `DECLARED ASSUMPTION: 3 capped publisher fields (title, author, body) bounded by ` +
+      `DEFAULT_MAX_BODY_CHARS plus ${INSTRUCTION_TEXT_ALLOWANCE} characters of instruction text, ` +
+      `with zero unmitigated template holes.`,
+    declaredHoles: {},
+  },
+  {
+    where: "src/tts/styles.ts :: buildCodeWalkthroughPrompt",
+    ceiling: 2 * DEFAULT_MAX_BODY_CHARS + INSTRUCTION_TEXT_ALLOWANCE,
+    ceilingReason:
+      `DECLARED ASSUMPTION: 2 capped publisher fields (language, code) bounded by ` +
+      `DEFAULT_MAX_BODY_CHARS plus ${INSTRUCTION_TEXT_ALLOWANCE} characters of instruction text, ` +
+      `with zero unmitigated template holes.`,
+    declaredHoles: {},
   },
 ];
 
@@ -752,7 +776,11 @@ interface MeasuredPromptHoles {
   labelHoles: string[];
 }
 
-function measurePromptHoles(site: PromptSite, source: string): MeasuredPromptHoles {
+function measurePromptHoles(
+  site: PromptSite,
+  source: string,
+  declaredHoles: Record<string, string> = DECLARED_LITERAL_HOLES,
+): MeasuredPromptHoles {
   const fields = fencedPublisherFields(source, site);
 
   // A tag the census cannot resolve is not zero characters, it is unknown ones: counting it as
@@ -784,7 +812,7 @@ function measurePromptHoles(site: PromptSite, source: string): MeasuredPromptHol
   const holes = literalHoles(site);
   // The declaration must not outlive its fact, or it becomes one more hand-maintained table that
   // says a name the builder no longer interpolates.
-  const stale = Object.keys(DECLARED_LITERAL_HOLES).filter((name) => !holes.includes(name));
+  const stale = Object.keys(declaredHoles).filter((name) => !holes.includes(name));
   if (stale.length > 0) {
     throw new Error(
       `STALE DECLARED HOLE(S): ${stale.join(", ")} no longer reach any prompt literal of ${
@@ -794,7 +822,7 @@ function measurePromptHoles(site: PromptSite, source: string): MeasuredPromptHol
   }
   const labelHoles = holes.filter((hole) => LABEL_HOLE_RE.test(hole));
   const unnamed = holes.filter((hole) =>
-    !LABEL_HOLE_RE.test(hole) && !(hole in DECLARED_LITERAL_HOLES)
+    !LABEL_HOLE_RE.test(hole) && !(hole in declaredHoles)
   );
   if (unnamed.length > 0) {
     throw new Error(
@@ -813,6 +841,7 @@ function measurePromptHoles(site: PromptSite, source: string): MeasuredPromptHol
 function assembledPromptChars(
   site: PromptSite,
   source: string,
+  declaredHoles: Record<string, string> = DECLARED_LITERAL_HOLES,
 ): {
   literalChars: number;
   separatorChars: number;
@@ -820,7 +849,7 @@ function assembledPromptChars(
   overheadChars: number;
   total: number;
 } {
-  const { fields, labelHoles } = measurePromptHoles(site, source);
+  const { fields, labelHoles } = measurePromptHoles(site, source, declaredHoles);
   // The backticks are syntax, not prompt text; the interior is what the model or TTS engine
   // receives. Holes still count their SOURCE characters here, which over-states the sent text
   // (an interpolated value can be shorter than its expression) — the arithmetic must not
@@ -858,12 +887,14 @@ function assembledPromptChars(
       reason:
         "MEASURED hole count x DECLARED label length: these are the ${x.name} holes the builder actually interpolates, and labels are app-configured, never publisher-supplied (see SPEAKER_LABEL_MAX_CHARS)",
     },
-    {
-      what: "the maxTurns digit",
-      maxChars: MAX_TURNS_DIGITS,
-      reason:
-        "DECLARED: createGroundedScriptGenerator rejects a maxTurns that is not an integer from 2 to 32, so the interpolated number is at most two digits (see MAX_TURNS_DIGITS)",
-    },
+    ...("maxTurns" in declaredHoles
+      ? [{
+        what: "the maxTurns digit",
+        maxChars: MAX_TURNS_DIGITS,
+        reason:
+          "DECLARED: createGroundedScriptGenerator rejects a maxTurns that is not an integer from 2 to 32, so the interpolated number is at most two digits (see MAX_TURNS_DIGITS)",
+      }]
+      : []),
   ];
   const overheadChars = overhead.reduce((sum, part) => sum + part.maxChars, 0);
   return {
@@ -880,7 +911,7 @@ function assertAssembledPromptUnderCeiling(
   bound: AssembledPromptBound,
   source: string,
 ): void {
-  const chars = assembledPromptChars(site, source);
+  const chars = assembledPromptChars(site, source, bound.declaredHoles ?? DECLARED_LITERAL_HOLES);
   if (chars.total > bound.ceiling) {
     throw new Error(
       `ASSEMBLED PROMPT EXCEEDS ITS CEILING: ${
