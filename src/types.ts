@@ -744,6 +744,8 @@ export interface PlaybackState {
   played: string[];
   queue: string[];
   queueUpdatedAt?: number;
+  /** Epoch ms of the last explicit preference edit (rate / voiceBoost / trimSilence). */
+  prefsUpdatedAt?: number;
   playbackRate?: number;
   voiceBoost?: boolean;
   trimSilence?: boolean;

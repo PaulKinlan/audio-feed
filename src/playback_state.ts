@@ -116,6 +116,7 @@ export interface PlaybackStatePatch {
   played?: string[];
   queue?: string[];
   queueUpdatedAt?: number;
+  prefsUpdatedAt?: number;
   playbackRate?: number;
   voiceBoost?: boolean;
   trimSilence?: boolean;
@@ -137,6 +138,7 @@ export function parsePlaybackStatePatch(
     "played" in raw ||
     "queue" in raw ||
     "queueUpdatedAt" in raw ||
+    "prefsUpdatedAt" in raw ||
     "playbackRate" in raw ||
     "voiceBoost" in raw ||
     "trimSilence" in raw ||
@@ -184,6 +186,13 @@ export function parsePlaybackStatePatch(
       return null;
     }
     patch.queueUpdatedAt = normalizeTimestamp(source.queueUpdatedAt, 0);
+  }
+
+  if ("prefsUpdatedAt" in source && source.prefsUpdatedAt !== undefined) {
+    if (typeof source.prefsUpdatedAt !== "number" || !Number.isFinite(source.prefsUpdatedAt)) {
+      return null;
+    }
+    patch.prefsUpdatedAt = normalizeTimestamp(source.prefsUpdatedAt, 0);
   }
 
   if ("playbackRate" in source && source.playbackRate !== undefined) {
@@ -238,12 +247,18 @@ export function sanitizePlaybackState(
       input.queueUpdatedAt >= 0
     ? Math.trunc(input.queueUpdatedAt)
     : undefined;
+  const prefsUpdatedAt = typeof input.prefsUpdatedAt === "number" &&
+      Number.isFinite(input.prefsUpdatedAt) &&
+      input.prefsUpdatedAt >= 0
+    ? Math.trunc(input.prefsUpdatedAt)
+    : undefined;
 
   return {
     positions: boundPositions(rawPositions),
     played,
     queue,
     ...(queueUpdatedAt !== undefined ? { queueUpdatedAt } : {}),
+    ...(prefsUpdatedAt !== undefined ? { prefsUpdatedAt } : {}),
     ...(playbackRate !== undefined ? { playbackRate } : {}),
     ...(typeof input.voiceBoost === "boolean" ? { voiceBoost: input.voiceBoost } : {}),
     ...(typeof input.trimSilence === "boolean" ? { trimSilence: input.trimSilence } : {}),
@@ -258,7 +273,7 @@ export function sanitizePlaybackState(
  * - `positions`: per-episode newest-`updatedAt` wins (ties favour incoming). Bounded to 200 newest.
  * - `played`: set union preserving order, capped at 500 most recent.
  * - `queue`: last-write-wins using `queueUpdatedAt` (falling back to `updatedAt`), capped at 200.
- * - `playbackRate`, `voiceBoost`, `trimSilence`: LWW using `updatedAt` (existing kept if strictly newer).
+ * - `playbackRate`, `voiceBoost`, `trimSilence`: LWW using `prefsUpdatedAt` (falling back to `updatedAt`).
  */
 export function mergePlaybackStates(
   existing: PlaybackState | null,
@@ -290,11 +305,12 @@ export function mergePlaybackStates(
     ? dedupeBoundedIds([...base.played, ...incoming.played], PLAYBACK_MAX_PLAYED, true)
     : base.played;
 
-  // 3. Queue: LWW by queueUpdatedAt (or top-level updatedAt when queueUpdatedAt is absent).
+  // 3. Queue: LWW by queueUpdatedAt (falling back to updatedAt only when a queue is present).
   let mergedQueue = base.queue;
-  let mergedQueueUpdatedAt = base.queueUpdatedAt;
+  let mergedQueueUpdatedAt = base.queueUpdatedAt ??
+    (base.queue.length > 0 ? base.updatedAt : undefined);
   if (incoming.queue !== undefined) {
-    const baseQueueTs = base.queueUpdatedAt ?? base.updatedAt;
+    const baseQueueTs = mergedQueueUpdatedAt ?? 0;
     const incQueueTs = incoming.queueUpdatedAt ?? incomingUpdatedAt;
     if (!existing || incQueueTs >= baseQueueTs) {
       mergedQueue = dedupeBoundedIds(incoming.queue, PLAYBACK_MAX_QUEUE, false);
@@ -302,20 +318,38 @@ export function mergePlaybackStates(
     }
   }
 
-  // 4. Scalar preferences: LWW by updatedAt; adopt incoming if existing had no value yet.
-  const incomingIsNewerOrEqual = !existing || incomingUpdatedAt >= base.updatedAt;
+  // 4. Scalar preferences: LWW by prefsUpdatedAt (falling back to updatedAt only when prefs exist);
+  //    adopt incoming if existing had no value yet so a position-only sync never clobbers newer
+  //    remote prefs or inflates a missing prefs timestamp.
+  const baseHasPref = base.playbackRate !== undefined ||
+    base.voiceBoost !== undefined ||
+    base.trimSilence !== undefined;
+  const hasIncomingPref = incoming.playbackRate !== undefined ||
+    incoming.voiceBoost !== undefined ||
+    incoming.trimSilence !== undefined;
+  const basePrefsTs = base.prefsUpdatedAt ?? (baseHasPref ? base.updatedAt : 0);
+  const incPrefsTs = incoming.prefsUpdatedAt ?? incomingUpdatedAt;
+  const incomingPrefsWin = !existing || incPrefsTs >= basePrefsTs;
+
   const playbackRate = incoming.playbackRate !== undefined &&
-      (incomingIsNewerOrEqual || base.playbackRate === undefined)
+      (incomingPrefsWin || base.playbackRate === undefined)
     ? normalizeRate(incoming.playbackRate)
     : base.playbackRate;
   const voiceBoost = incoming.voiceBoost !== undefined &&
-      (incomingIsNewerOrEqual || base.voiceBoost === undefined)
+      (incomingPrefsWin || base.voiceBoost === undefined)
     ? incoming.voiceBoost
     : base.voiceBoost;
   const trimSilence = incoming.trimSilence !== undefined &&
-      (incomingIsNewerOrEqual || base.trimSilence === undefined)
+      (incomingPrefsWin || base.trimSilence === undefined)
     ? incoming.trimSilence
     : base.trimSilence;
+
+  let mergedPrefsUpdatedAt = base.prefsUpdatedAt ?? (baseHasPref ? base.updatedAt : undefined);
+  if (hasIncomingPref) {
+    if (!existing || incPrefsTs >= basePrefsTs) {
+      mergedPrefsUpdatedAt = incPrefsTs;
+    }
+  }
 
   let maxPositionTs = 0;
   for (const pos of Object.values(mergedPositions)) {
@@ -326,6 +360,7 @@ export function mergePlaybackStates(
     base.updatedAt,
     incomingUpdatedAt,
     mergedQueueUpdatedAt ?? 0,
+    mergedPrefsUpdatedAt ?? 0,
     maxPositionTs,
   );
 
@@ -335,6 +370,7 @@ export function mergePlaybackStates(
       played: mergedPlayed,
       queue: mergedQueue,
       ...(mergedQueueUpdatedAt !== undefined ? { queueUpdatedAt: mergedQueueUpdatedAt } : {}),
+      ...(mergedPrefsUpdatedAt !== undefined ? { prefsUpdatedAt: mergedPrefsUpdatedAt } : {}),
       ...(playbackRate !== undefined ? { playbackRate } : {}),
       ...(voiceBoost !== undefined ? { voiceBoost } : {}),
       ...(trimSilence !== undefined ? { trimSilence } : {}),

@@ -173,6 +173,112 @@ Deno.test("playback sync: conflict-free merge resolves newest-timestamp per epis
   assertEquals(step3.voiceBoost, false);
 });
 
+Deno.test("playback sync: unhydrated & position-only syncs never clobber remote queue or newer prefs", () => {
+  // Device A sets queue and audio prefs at T=15_000.
+  const deviceA = mergePlaybackStates(null, {
+    positions: { "ep-1": { time: 120, duration: 600, updatedAt: 15_000 } },
+    played: ["ep-0"],
+    queue: ["ep-a", "ep-b"],
+    queueUpdatedAt: 15_000,
+    prefsUpdatedAt: 15_000,
+    playbackRate: 1.75,
+    voiceBoost: true,
+    trimSilence: true,
+    updatedAt: 15_000,
+  });
+
+  // (a) Unhydrated Device B sends a position-only update at T=20_000 (omits queue & prefs).
+  const afterUnhydrated = mergePlaybackStates(deviceA, {
+    positions: { "ep-1": { time: 240, updatedAt: 20_000 } },
+    played: ["ep-done-b"],
+    updatedAt: 20_000,
+  });
+  assertEquals(afterUnhydrated.positions["ep-1"], { time: 240, duration: 600, updatedAt: 20_000 });
+  assertEquals(afterUnhydrated.played, ["ep-0", "ep-done-b"]);
+  assertEquals(afterUnhydrated.queue, ["ep-a", "ep-b"], "position-only sync must not wipe queue");
+  assertEquals(afterUnhydrated.queueUpdatedAt, 15_000);
+  assertEquals(afterUnhydrated.playbackRate, 1.75, "position-only sync must not wipe playbackRate");
+  assertEquals(afterUnhydrated.voiceBoost, true, "position-only sync must not wipe voiceBoost");
+  assertEquals(afterUnhydrated.trimSilence, true, "position-only sync must not wipe trimSilence");
+  assertEquals(afterUnhydrated.prefsUpdatedAt, 15_000);
+
+  // (b) Hydrated Device B (whose prefs/queue came from T=10_000) pauses at T=25_000 and sends a
+  //     newer position (updatedAt: 25_000) alongside its stale prefs/queue from T=10_000.
+  const afterStalePrefsWithNewPos = mergePlaybackStates(afterUnhydrated, {
+    positions: { "ep-1": { time: 310, updatedAt: 25_000 } },
+    queue: ["ep-old"],
+    queueUpdatedAt: 10_000,
+    prefsUpdatedAt: 10_000,
+    playbackRate: 1.0,
+    voiceBoost: false,
+    trimSilence: false,
+    updatedAt: 25_000,
+  });
+  assertEquals(
+    afterStalePrefsWithNewPos.positions["ep-1"],
+    { time: 310, duration: 600, updatedAt: 25_000 },
+    "Device B newer position must still win",
+  );
+  assertEquals(
+    afterStalePrefsWithNewPos.queue,
+    ["ep-a", "ep-b"],
+    "Device B newer position sync must not clobber Device A newer queue",
+  );
+  assertEquals(afterStalePrefsWithNewPos.queueUpdatedAt, 15_000);
+  assertEquals(
+    afterStalePrefsWithNewPos.playbackRate,
+    1.75,
+    "Device B newer position sync must not clobber Device A newer playbackRate",
+  );
+  assertEquals(
+    afterStalePrefsWithNewPos.voiceBoost,
+    true,
+    "Device B newer position sync must not clobber Device A newer voiceBoost",
+  );
+  assertEquals(
+    afterStalePrefsWithNewPos.trimSilence,
+    true,
+    "Device B newer position sync must not clobber Device A newer trimSilence",
+  );
+  assertEquals(afterStalePrefsWithNewPos.prefsUpdatedAt, 15_000);
+
+  // (c) A fresh position-only sync at T=10_000 must not block an offline device's earlier
+  //     explicit queue/prefs edit at T=5_000 from landing when server had no queue/prefs yet.
+  const posOnlyFirst = mergePlaybackStates(null, {
+    positions: { "ep-1": { time: 60, updatedAt: 10_000 } },
+    updatedAt: 10_000,
+  });
+  const withEarlierOfflineEdits = mergePlaybackStates(posOnlyFirst, {
+    queue: ["ep-offline"],
+    queueUpdatedAt: 5_000,
+    prefsUpdatedAt: 5_000,
+    playbackRate: 1.25,
+    voiceBoost: true,
+    updatedAt: 10_000,
+  });
+  assertEquals(withEarlierOfflineEdits.queue, ["ep-offline"]);
+  assertEquals(withEarlierOfflineEdits.queueUpdatedAt, 5_000);
+  assertEquals(withEarlierOfflineEdits.playbackRate, 1.25);
+  assertEquals(withEarlierOfflineEdits.voiceBoost, true);
+  assertEquals(withEarlierOfflineEdits.prefsUpdatedAt, 5_000);
+
+  // Explicit empty queue clear at T=30_000 must not be resurrected by a stale T=20_000 queue.
+  const clearedQueue = mergePlaybackStates(afterStalePrefsWithNewPos, {
+    queue: [],
+    queueUpdatedAt: 30_000,
+    updatedAt: 30_000,
+  });
+  assertEquals(clearedQueue.queue, []);
+  assertEquals(clearedQueue.queueUpdatedAt, 30_000);
+  const afterStaleResurrection = mergePlaybackStates(clearedQueue, {
+    queue: ["ep-zombie"],
+    queueUpdatedAt: 20_000,
+    updatedAt: 35_000,
+  });
+  assertEquals(afterStaleResurrection.queue, []);
+  assertEquals(afterStaleResurrection.queueUpdatedAt, 30_000);
+});
+
 Deno.test("playback sync: parsePlaybackStatePatch validates types, clamps rates, strips forbidden keys, and bounds collections", () => {
   assertEquals(parsePlaybackStatePatch(null), null);
   assertEquals(parsePlaybackStatePatch([]), null);
@@ -183,6 +289,8 @@ Deno.test("playback sync: parsePlaybackStatePatch validates types, clamps rates,
   assertEquals(parsePlaybackStatePatch({ voiceBoost: "yes" }), null);
   assertEquals(parsePlaybackStatePatch({ trimSilence: 1 }), null);
   assertEquals(parsePlaybackStatePatch({ playbackRate: "fast" }), null);
+  assertEquals(parsePlaybackStatePatch({ prefsUpdatedAt: "yesterday" }), null);
+  assertEquals(parsePlaybackStatePatch({ prefsUpdatedAt: Number.POSITIVE_INFINITY }), null);
 
   // Prototype-pollution keys and absurdly long IDs are ignored safely.
   const hostile = JSON.parse(
@@ -314,6 +422,70 @@ Deno.test("playback sync API: GET/POST round-trip over D1, supporting both appli
     const bobJson = await bobRes.json();
     assertEquals(bobJson.state.positions, {});
     assertEquals(bobJson.state.played, []);
+
+    // Cross-device prefsUpdatedAt & queueUpdatedAt protection end-to-end over D1:
+    // Device A saves newer prefs/queue at T=15_000; Device B posts a newer position at T=25_000
+    // with stale prefsUpdatedAt/queueUpdatedAt (T=10_000) -> Device A's prefs/queue survive.
+    const postDeviceA = await fetch(
+      new Request(`${BASE}/listen/${TOKEN_A}/state`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: BASE },
+        body: JSON.stringify({
+          queue: ["ep-next-a"],
+          queueUpdatedAt: 15_000,
+          prefsUpdatedAt: 15_000,
+          playbackRate: 2.0,
+          voiceBoost: true,
+          trimSilence: false,
+          updatedAt: 15_000,
+        }),
+      }),
+    );
+    assertEquals(postDeviceA.status, 200);
+
+    const postDeviceB = await fetch(
+      new Request(`${BASE}/listen/${TOKEN_A}/state`, {
+        method: "POST",
+        headers: { "content-type": "text/plain;charset=UTF-8", origin: BASE },
+        body: JSON.stringify({
+          positions: { "ep-1": { time: 400, updatedAt: 25_000 } },
+          queue: ["ep-stale-b"],
+          queueUpdatedAt: 10_000,
+          prefsUpdatedAt: 10_000,
+          playbackRate: 1.0,
+          voiceBoost: false,
+          trimSilence: true,
+          updatedAt: 25_000,
+        }),
+      }),
+    );
+    assertEquals(postDeviceB.status, 200);
+    const mergedAfterB = (await postDeviceB.json()).state;
+    assertEquals(mergedAfterB.positions["ep-1"].time, 400);
+    assertEquals(mergedAfterB.queue, ["ep-next-a"]);
+    assertEquals(mergedAfterB.queueUpdatedAt, 15_000);
+    assertEquals(mergedAfterB.playbackRate, 2.0);
+    assertEquals(mergedAfterB.voiceBoost, true);
+    assertEquals(mergedAfterB.trimSilence, false);
+    assertEquals(mergedAfterB.prefsUpdatedAt, 15_000);
+
+    // Unhydrated position-only POST at T=30_000 (omitting queue & prefs) also leaves them intact.
+    const postUnhydrated = await fetch(
+      new Request(`${BASE}/listen/${TOKEN_A}/state`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: BASE },
+        body: JSON.stringify({
+          positions: { "ep-1": { time: 450, updatedAt: 30_000 } },
+          updatedAt: 30_000,
+        }),
+      }),
+    );
+    assertEquals(postUnhydrated.status, 200);
+    const mergedAfterUnhydrated = (await postUnhydrated.json()).state;
+    assertEquals(mergedAfterUnhydrated.positions["ep-1"].time, 450);
+    assertEquals(mergedAfterUnhydrated.queue, ["ep-next-a"]);
+    assertEquals(mergedAfterUnhydrated.playbackRate, 2.0);
+    assertEquals(mergedAfterUnhydrated.prefsUpdatedAt, 15_000);
   } finally {
     d1.close();
   }
@@ -587,6 +759,23 @@ Deno.test("listen page & assets: audioProcessingAvailable reflects blobStoreDire
   assertStringIncludes(client, "createDynamicsCompressor");
   assertStringIncludes(client, "createAnalyser");
   assertStringIncludes(client, "restoreBasePlaybackRate");
+  assertStringIncludes(client, "payload.prefsUpdatedAt = prefsTs;");
+  assertStringIncludes(client, "if (queueTs > 0 || upNextIds.length > 0)");
+  assertStringIncludes(client, "if (prefsTs > 0)");
+  assertStringIncludes(client, "remote.prefsUpdatedAt");
+
+  // openNowPlaying must call showModal() BEFORE activateNpTab/loadReadAlong so cached Read-Along
+  // cues see npDialog.open === true and scroll smoothly into view on sheet open.
+  const openFnStart = client.indexOf("function openNowPlaying(");
+  assert(openFnStart > 0, "listen.js must define openNowPlaying");
+  const openFnBody = client.slice(openFnStart, client.indexOf("}", openFnStart) + 1);
+  const showModalIdx = openFnBody.indexOf("npDialog.showModal()");
+  const activateTabIdx = openFnBody.indexOf("activateNpTab(");
+  const loadReadIdx = openFnBody.indexOf("loadReadAlong(");
+  assert(
+    showModalIdx > 0 && showModalIdx < activateTabIdx && showModalIdx < loadReadIdx,
+    "openNowPlaying must open npDialog.showModal() before activateNpTab / loadReadAlong",
+  );
 
   const css = assetBody("listen.css") ?? "";
   assertStringIncludes(css, ".np-audio-fx");

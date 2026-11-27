@@ -1793,16 +1793,36 @@ function buildPlaybackStatePayload() {
   for (const entry of Object.values(positions)) {
     if (entry.updatedAt > maxTs) maxTs = entry.updatedAt;
   }
-  return {
+  /** @type {{
+    positions: Record<string, { time: number; duration?: number; updatedAt: number }>;
+    played: string[];
+    queue?: string[];
+    queueUpdatedAt?: number;
+    prefsUpdatedAt?: number;
+    playbackRate?: number;
+    voiceBoost?: boolean;
+    trimSilence?: boolean;
+    updatedAt: number;
+  }} */
+  const payload = {
     positions,
     played: [...loadPlayed()].slice(-500),
-    queue: upNextIds.slice(0, 200),
-    ...(queueTs > 0 ? { queueUpdatedAt: queueTs } : {}),
-    playbackRate: basePlaybackRate,
-    voiceBoost: voiceBoostEnabled,
-    trimSilence: trimSilenceEnabled,
     updatedAt: maxTs || Date.now(),
   };
+  // Only include queue / preferences when locally edited (or non-empty legacy queue),
+  // carrying their own LWW timestamps so an unhydrated device or a position-only sync
+  // never overwrites another device's newer queue or audio preferences.
+  if (queueTs > 0 || upNextIds.length > 0) {
+    payload.queue = upNextIds.slice(0, 200);
+    payload.queueUpdatedAt = queueTs > 0 ? queueTs : 1;
+  }
+  if (prefsTs > 0) {
+    payload.prefsUpdatedAt = prefsTs;
+    payload.playbackRate = basePlaybackRate;
+    payload.voiceBoost = voiceBoostEnabled;
+    payload.trimSilence = trimSilenceEnabled;
+  }
+  return payload;
 }
 
 /**
@@ -1819,6 +1839,7 @@ function applyRemotePlaybackState(remoteRaw) {
     played?: string[];
     queue?: string[];
     queueUpdatedAt?: number;
+    prefsUpdatedAt?: number;
     playbackRate?: number;
     voiceBoost?: boolean;
     trimSilence?: boolean;
@@ -1897,26 +1918,33 @@ function applyRemotePlaybackState(remoteRaw) {
     }
   }
 
-  // 3. Queue: LWW by queueUpdatedAt (fallback to updatedAt).
+  // 3. Queue: LWW by queueUpdatedAt (fallback to updatedAt when remote has a queue).
   const localQueueTs = loadNumberPref(QUEUE_UPDATED_KEY);
+  const hasRemoteQueue = Array.isArray(remote.queue) &&
+    (typeof remote.queueUpdatedAt === "number" || remote.queue.length > 0);
   const remoteQueueTs = typeof remote.queueUpdatedAt === "number"
     ? remote.queueUpdatedAt
-    : (typeof remote.updatedAt === "number" ? remote.updatedAt : 0);
-  if (Array.isArray(remote.queue) && remoteQueueTs > localQueueTs) {
-    upNextIds = remote.queue.filter(
+    : (hasRemoteQueue && typeof remote.updatedAt === "number" ? remote.updatedAt : 0);
+  if (hasRemoteQueue && remoteQueueTs > localQueueTs) {
+    upNextIds = (remote.queue ?? []).filter(
       (id) => typeof id === "string" && EPISODES.some((e) => e.id === id),
     );
     saveQueue(upNextIds);
     saveNumberPref(QUEUE_UPDATED_KEY, remoteQueueTs);
     changed = true;
-  } else if (localQueueTs > remoteQueueTs) {
+  } else if (localQueueTs > remoteQueueTs || (!hasRemoteQueue && upNextIds.length > 0)) {
     localHasNewer = true;
   }
 
-  // 4. Scalar preferences: LWW by updatedAt.
+  // 4. Scalar preferences: LWW by prefsUpdatedAt (falling back to updatedAt).
   const localPrefsTs = loadNumberPref(PREFS_UPDATED_KEY);
-  const remoteUpdatedAt = typeof remote.updatedAt === "number" ? remote.updatedAt : 0;
-  if (remoteUpdatedAt > localPrefsTs) {
+  const hasRemotePrefs = typeof remote.playbackRate === "number" ||
+    typeof remote.voiceBoost === "boolean" ||
+    typeof remote.trimSilence === "boolean";
+  const remotePrefsTs = typeof remote.prefsUpdatedAt === "number"
+    ? remote.prefsUpdatedAt
+    : (hasRemotePrefs && typeof remote.updatedAt === "number" ? remote.updatedAt : 0);
+  if (hasRemotePrefs && remotePrefsTs > localPrefsTs) {
     if (
       typeof remote.playbackRate === "number" &&
       Number.isFinite(remote.playbackRate) &&
@@ -1941,8 +1969,8 @@ function applyRemotePlaybackState(remoteRaw) {
       saveBoolPref(TRIM_SILENCE_KEY, trimSilenceEnabled);
       changed = true;
     }
-    saveNumberPref(PREFS_UPDATED_KEY, remoteUpdatedAt);
-  } else if (localPrefsTs > remoteUpdatedAt) {
+    saveNumberPref(PREFS_UPDATED_KEY, remotePrefsTs);
+  } else if (localPrefsTs > remotePrefsTs) {
     localHasNewer = true;
   }
 
@@ -2856,10 +2884,10 @@ function activateNpTab(tabName) {
 /** @param {string} [initialTab] */
 function openNowPlaying(initialTab) {
   if (!npDialog || typeof npDialog.showModal !== "function") return;
-  if (initialTab) activateNpTab(initialTab);
-  else if (activeNpTab === "read" && current) void loadReadAlong(current);
   renderQueueUI();
   if (!npDialog.open) npDialog.showModal();
+  if (initialTab) activateNpTab(initialTab);
+  else if (activeNpTab === "read" && current) void loadReadAlong(current);
 }
 
 function updateSleepUI() {
