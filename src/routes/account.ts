@@ -209,8 +209,7 @@ const SOURCE_PLAYBACK_RATE_PRESETS = [0.8, 1, 1.2, 1.4, 1.5, 1.75, 2] as const;
 const BRIEFING_MAX_ARTICLE_PRESETS = [4, 6, 8, 10, 12] as const;
 
 function effectiveSourceNarrationStyle(source: Source): NarrationStyleId {
-  const raw = (source as { narrationStyle?: string }).narrationStyle;
-  return isNarrationStyleId(raw) ? raw : "standard";
+  return isNarrationStyleId(source.narrationStyle) ? source.narrationStyle : "standard";
 }
 
 function renderNarrationStyleOptions(selected: NarrationStyleId = "standard"): string {

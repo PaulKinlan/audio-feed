@@ -1109,12 +1109,23 @@ function mountAccountScript(
       el instanceof win.HTMLElement && (el as HTMLElement).tagName === "FORM",
   };
 
+  const inFlight = new Set<Promise<unknown>>();
+  const trackedFetch = (input: string, init?: RequestInit): Promise<Response> => {
+    const p = Promise.resolve().then(() => fetchImpl(input, init));
+    const done = () => {
+      inFlight.delete(p);
+    };
+    inFlight.add(p);
+    p.then(done, done);
+    return p;
+  };
+
   runner(
     win,
     doc,
     mockLocation,
     mockHistory,
-    fetchImpl,
+    trackedFetch,
     MockDOMParser,
     win.Element,
     win.HTMLElement,
@@ -1129,7 +1140,15 @@ function mountAccountScript(
     clearInterval,
   );
 
-  const flush = () => new Promise((r) => setTimeout(r, 25));
+  const flush = async () => {
+    for (let i = 0; i < 20; i++) {
+      if (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight]);
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      if (inFlight.size === 0) break;
+    }
+  };
   const cleanup = () => {
     for (const id of timers) clearInterval(id);
     timers.length = 0;
@@ -1431,7 +1450,7 @@ Deno.test(
         id: "src-walkthrough",
         userId: me.id,
         title: "Engineering Blog",
-        ...({ narrationStyle: "walkthrough" } as Record<string, unknown>),
+        narrationStyle: "walkthrough",
       }),
     );
     await stores.metadata.putSource(
