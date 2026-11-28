@@ -9,6 +9,7 @@ import {
   readBounded,
 } from "./url.ts";
 import { type AudioMode, isSynthesisAuthorized, type User } from "../types.ts";
+import { isNarrationStyleId, type NarrationStyleId } from "../tts/styles.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import { MAX_TTS_INPUT_BYTES, MAX_TTS_SEGMENTS } from "../tts/gemini.ts";
 
@@ -32,6 +33,7 @@ export interface UploadDependencies {
       article: ExtractedArticle;
       mode: AudioMode;
       user: User;
+      narrationStyle?: NarrationStyleId;
       articleId?: string;
       episodeId?: string;
     },
@@ -620,6 +622,26 @@ export function createUploadIngestHandler(
       }
       const mode: AudioMode = rawMode === "deepdive" ? "deepdive" : "direct";
 
+      const rawNarrationStyle = formData.get("narrationStyle");
+      let narrationStyle: NarrationStyleId | undefined;
+      if (rawNarrationStyle !== null && rawNarrationStyle !== "") {
+        if (typeof rawNarrationStyle !== "string" || !isNarrationStyleId(rawNarrationStyle)) {
+          const correlationId = crypto.randomUUID();
+          const error = 'Narration style must be "standard", "brief", or "walkthrough".';
+          await deps.onFailure?.({
+            user,
+            reason: "invalid_input",
+            status: 400,
+            correlationId,
+            error,
+            filename: rawFilename,
+            mode,
+          });
+          return json({ error, correlationId, file: rawFilename }, 400);
+        }
+        narrationStyle = rawNarrationStyle;
+      }
+
       const fileBytes = new Uint8Array(await file.arrayBuffer());
       if (fileBytes.byteLength === 0) {
         const correlationId = crypto.randomUUID();
@@ -877,6 +899,7 @@ export function createUploadIngestHandler(
           article,
           mode,
           user,
+          ...(narrationStyle ? { narrationStyle } : {}),
           articleId,
           episodeId,
         });
@@ -912,6 +935,7 @@ export function createUploadIngestHandler(
         ...job,
         status: "queued",
         mode,
+        ...(narrationStyle ? { narrationStyle } : {}),
         article,
         correlationId: job.episodeId,
       }, 202);

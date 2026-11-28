@@ -9,6 +9,7 @@ import ipaddr from "ipaddr.js";
 import { parseHTML } from "linkedom";
 import { getDocumentProxy, getMeta } from "unpdf";
 import { type AudioMode, isAudioMode, isSynthesisAuthorized, type User } from "../types.ts";
+import { isNarrationStyleId, type NarrationStyleId } from "../tts/styles.ts";
 import { extractYouTubeArticle, parseYouTubeVideoId } from "./youtube.ts";
 
 export interface ExtractedArticle {
@@ -1248,7 +1249,12 @@ export interface IngestDependencies {
   authorize: (request: Request) => Promise<User | Response>;
   /** Persist the job before resolving; 202 means queued, not synthesized. Recheck approval in the worker. */
   enqueue: (
-    input: { article: ExtractedArticle; mode: AudioMode; user: User },
+    input: {
+      article: ExtractedArticle;
+      mode: AudioMode;
+      user: User;
+      narrationStyle?: NarrationStyleId;
+    },
   ) => Promise<{ articleId: string; episodeId: string }>;
   fetchArticle?: (url: string, signal: AbortSignal) => Promise<ExtractedArticle>;
   onFailure?: (info: IngestFailureInfo) => Promise<void> | void;
@@ -1295,12 +1301,28 @@ export function createUrlIngestHandler(
         await deps.onFailure?.({ user, reason: "invalid_input", status: 400 });
         return json({ error: "Expected { url, mode }." }, 400);
       }
-      const { url, mode = "direct" } = input as Record<string, unknown>;
+      const { url, mode = "direct", narrationStyle: rawNarrationStyle } = input as Record<
+        string,
+        unknown
+      >;
       if (typeof url !== "string" || !isAudioMode(mode)) {
         await deps.onFailure?.({ user, reason: "invalid_input", status: 400 });
         return json({ error: "Expected a URL and mode direct or deepdive." }, 400);
       }
       targetMode = mode;
+      let narrationStyle: NarrationStyleId | undefined;
+      if (
+        rawNarrationStyle !== undefined && rawNarrationStyle !== null && rawNarrationStyle !== ""
+      ) {
+        if (!isNarrationStyleId(rawNarrationStyle)) {
+          await deps.onFailure?.({ user, reason: "invalid_input", status: 400, mode: targetMode });
+          return json(
+            { error: 'Narration style must be "standard", "brief", or "walkthrough".' },
+            400,
+          );
+        }
+        narrationStyle = rawNarrationStyle;
+      }
       let target: string;
       try {
         target = articleUrl(url).href;
@@ -1345,7 +1367,12 @@ export function createUrlIngestHandler(
       request.signal.throwIfAborted();
       let job: { articleId: string; episodeId: string };
       try {
-        job = await deps.enqueue({ article, mode, user });
+        job = await deps.enqueue({
+          article,
+          mode,
+          user,
+          ...(narrationStyle ? { narrationStyle } : {}),
+        });
       } catch (error) {
         const errorDetail = error instanceof Error
           ? error.message
@@ -1363,7 +1390,10 @@ export function createUrlIngestHandler(
         });
         throw error;
       }
-      return json({ ...job, status: "queued", mode, article }, 202);
+      return json(
+        { ...job, status: "queued", mode, ...(narrationStyle ? { narrationStyle } : {}), article },
+        202,
+      );
     } catch (error) {
       return error instanceof IngestError
         ? json({ error: error.message }, error.status)

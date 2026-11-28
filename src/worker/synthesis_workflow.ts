@@ -69,6 +69,11 @@ import {
 } from "../tts/gemini.ts";
 import { PROMPT_VERSION } from "../tts/prompt_version.ts";
 import {
+  NARRATION_STYLES,
+  prepareNarrationForStyle,
+  type StyleLlmDeps,
+} from "../tts/styles.ts";
+import {
   audioBlobKey,
   DEFAULT_CODE_HANDLING,
   DEFAULT_VOICES,
@@ -83,6 +88,7 @@ import { createGroundedScriptGenerator, type ScriptGenerator } from "./script.ts
 import {
   dailyEpisodeBudgetFor,
   globalDailyEpisodeBudgetFor,
+  resolveNarrationStyle,
   resolveNarratorVoice,
   resolveSourceNarratorVoice,
 } from "./synthesis.ts";
@@ -135,6 +141,8 @@ export interface WorkflowDeps {
   blobs?: BlobStore;
   ttsClient?: GeminiTtsClient;
   scriptGenerator?: ScriptGenerator | null;
+  /** Optional fetch implementation for narration style LLM calls (`brief`/`walkthrough`); `null` forces deterministic offline fallback. */
+  styleFetchFn?: typeof fetch | null;
   now?: () => number;
 }
 
@@ -144,6 +152,7 @@ type SegmentPlanItem =
     textKey: string;
     voice: string;
     text: string;
+    ttsStyle?: string;
     heading?: string;
   }
   | {
@@ -247,10 +256,13 @@ async function synthesizeOnePlanSegment(
   client: GeminiTtsClient,
   item: SegmentPlanItem,
 ): Promise<DecodedAudioResult> {
+  const ttsStyle = item.kind === "narration"
+    ? (item.ttsStyle ?? DEFAULT_NARRATION_STYLE)
+    : DEFAULT_NARRATION_STYLE;
   const synthesizeNarrationText = async (text: string, depth = 0): Promise<DecodedAudioResult> => {
     try {
       const decoded = await client.sendRequest(
-        buildSingleVoiceRequest(text, item.voice, undefined, DEFAULT_NARRATION_STYLE),
+        buildSingleVoiceRequest(text, item.voice, undefined, ttsStyle),
         { maxRetries: 0 },
       );
       ttsPcmBytes(decoded, "fresh");
@@ -353,6 +365,16 @@ export async function runEpisodeSynthesisWorkflow(
       (config.geminiApiKey
         ? createGroundedScriptGenerator({ apiKey: config.geminiApiKey })
         : null);
+  const geminiBaseUrl = reader.get("GEMINI_API_BASE_URL");
+  const allowStyleLlm = deps.styleFetchFn !== null &&
+    (Boolean(deps.styleFetchFn) || !deps.ttsClient || Boolean(geminiBaseUrl));
+  const styleLlmDeps: StyleLlmDeps = allowStyleLlm && config.geminiApiKey
+    ? {
+      apiKey: config.geminiApiKey,
+      ...(geminiBaseUrl ? { baseUrl: geminiBaseUrl } : {}),
+      ...(deps.styleFetchFn ? { fetchFn: deps.styleFetchFn } : {}),
+    }
+    : {};
 
   const notifyOnDemand = async (episode: Episode, status: "ready" | "failed", error?: string) => {
     if (!config.notifyOutboxEnabled || episode.sourceId !== INBOX_SOURCE_ID || episode.regenerating) {
@@ -489,15 +511,15 @@ export async function runEpisodeSynthesisWorkflow(
         const source = await metadata.getSource(userId, ep.sourceId);
         const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
         const maxInputBytes = MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS;
-        const processedBody = await formatCodeForTts(article.content, codeHandling);
-        const inputBytes = new TextEncoder().encode(processedBody).length;
-        if (inputBytes > maxInputBytes) {
-          throw new NonRetryableError(
-            `article content exceeds input limit (${inputBytes} > ${maxInputBytes} bytes)`,
-          );
-        }
 
         if (ep.mode === "deepdive") {
+          const processedBody = await formatCodeForTts(article.content, codeHandling);
+          const inputBytes = new TextEncoder().encode(processedBody).length;
+          if (inputBytes > maxInputBytes) {
+            throw new NonRetryableError(
+              `article content exceeds input limit (${inputBytes} > ${maxInputBytes} bytes)`,
+            );
+          }
           const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive;
           const speakers: [DialogueSpeaker, DialogueSpeaker] = [
             { name: "Alex", role: "expert", voice: expert },
@@ -598,15 +620,53 @@ export async function runEpisodeSynthesisWorkflow(
           user,
           defaultVoice: config.defaultVoice,
         });
-        const prompt = formatNarrationPrompt({
-          title: article.title,
-          author: article.author,
-          publishedAt: article.publishedAt,
-          sourceName: source?.title ?? ep.sourceTitle,
-          body: processedBody,
-          voice,
-        });
         const headings = extractArticleHeadings(article.content, article.headings);
+        const narrationStyle = resolveNarrationStyle(ep, source);
+
+        let prompt: string;
+        let ttsStyle: string | undefined;
+
+        if (narrationStyle === "brief" || narrationStyle === "walkthrough") {
+          const prepared = await prepareNarrationForStyle(
+            {
+              title: article.title,
+              author: article.author,
+              publishedAt: article.publishedAt,
+              sourceName: source?.title ?? ep.sourceTitle,
+              lead: narrationStyle === "brief" ? article.excerpt : undefined,
+              body: article.content,
+              voice,
+              headings,
+            },
+            narrationStyle,
+            styleLlmDeps,
+          );
+          const inputBytes = new TextEncoder().encode(prepared.body).length;
+          if (inputBytes > maxInputBytes) {
+            throw new NonRetryableError(
+              `article content exceeds input limit (${inputBytes} > ${maxInputBytes} bytes)`,
+            );
+          }
+          prompt = formatNarrationPrompt(prepared);
+          ttsStyle = prepared.style ?? NARRATION_STYLES[narrationStyle].ttsStyle;
+        } else {
+          const processedBody = await formatCodeForTts(article.content, codeHandling);
+          const inputBytes = new TextEncoder().encode(processedBody).length;
+          if (inputBytes > maxInputBytes) {
+            throw new NonRetryableError(
+              `article content exceeds input limit (${inputBytes} > ${maxInputBytes} bytes)`,
+            );
+          }
+          prompt = formatNarrationPrompt({
+            title: article.title,
+            author: article.author,
+            publishedAt: article.publishedAt,
+            sourceName: source?.title ?? ep.sourceTitle,
+            body: processedBody,
+            voice,
+          });
+        }
+
         const chaptered = splitNarrationIntoChapteredSegments(prompt, headings, MAX_TTS_INPUT_BYTES);
         if (chaptered.length === 0) {
           throw new NonRetryableError("Narration contained no spoken text");
@@ -616,11 +676,15 @@ export async function runEpisodeSynthesisWorkflow(
             `Narration needs ${chaptered.length} TTS segments (limit ${MAX_TTS_SEGMENTS})`,
           );
         }
+        const customTtsStyle = ttsStyle && ttsStyle !== DEFAULT_NARRATION_STYLE
+          ? ttsStyle
+          : undefined;
         return chaptered.map((seg): SegmentPlanItem => ({
           kind: "narration",
-          textKey: seg.text,
+          textKey: customTtsStyle ? `${customTtsStyle}\u0000${seg.text}` : seg.text,
           voice,
           text: seg.text,
+          ...(customTtsStyle ? { ttsStyle: customTtsStyle } : {}),
           ...(seg.heading ? { heading: seg.heading } : {}),
         }));
       },

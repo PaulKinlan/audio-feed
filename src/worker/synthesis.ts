@@ -61,7 +61,14 @@ import {
   inspectStoredWavSegment,
   type StoredWavSegment,
 } from "../storage/wav_assembly.ts";
-import type { DecodedAudioResult, DialogueSpeaker } from "../tts/gemini.ts";
+import type { DecodedAudioResult, DialogueSpeaker, NarrationInput } from "../tts/gemini.ts";
+import {
+  isNarrationStyleId,
+  type NarrationStyleId,
+  prepareNarrationForStyle,
+  type StyleLlmDeps,
+} from "../tts/styles.ts";
+import { extractArticleHeadings } from "../synthesis/chapters.ts";
 import type { AppContext } from "../app.ts";
 import { PROMPT_VERSION } from "../tts/prompt_version.ts";
 import {
@@ -838,6 +845,20 @@ export function resolveNarratorVoice(opts: {
   );
 }
 
+/**
+ * Resolve the effective direct-mode narration style:
+ * `episode.narrationStyle ?? source?.narrationStyle ?? "standard"`.
+ * Unknown/malformed values fall back safely so corrupt records never break synthesis.
+ */
+export function resolveNarrationStyle(
+  episode: Pick<Episode, "narrationStyle"> | null | undefined,
+  source: Pick<Source, "narrationStyle"> | null | undefined,
+): NarrationStyleId {
+  if (isNarrationStyleId(episode?.narrationStyle)) return episode.narrationStyle;
+  if (isNarrationStyleId(source?.narrationStyle)) return source.narrationStyle;
+  return "standard";
+}
+
 export function createGeminiSynthesizer(
   ctx: AppContext,
   /** Injectable so a test can drive the real request path with a capturing fetchFn
@@ -847,6 +868,8 @@ export function createGeminiSynthesizer(
     codeSummarizer?: (code: string) => string | Promise<string>;
     /** `undefined` = use the real generator when a key is configured; `null` = stage is off. */
     scriptGenerator?: ScriptGenerator | null;
+    /** Optional fetch implementation for narration style LLM calls (`brief`/`walkthrough`); `null` forces deterministic offline fallback. */
+    styleFetchFn?: typeof fetch | null;
     /** Whole-stage deadline across continued turns; see DEFAULT_SCRIPT_STAGE_TIMEOUT_MS. */
     scriptTimeoutMs?: number;
     perTurnTimeoutMs?: number;
@@ -862,6 +885,16 @@ export function createGeminiSynthesizer(
     (ctx.config.geminiApiKey
       ? createGroundedScriptGenerator({ apiKey: ctx.config.geminiApiKey })
       : null);
+  const geminiBaseUrl = ctx.env?.get("GEMINI_API_BASE_URL");
+  const allowStyleLlm = deps.styleFetchFn !== null &&
+    (Boolean(deps.styleFetchFn) || !deps.client || Boolean(geminiBaseUrl));
+  const styleLlmDeps: StyleLlmDeps = allowStyleLlm && ctx.config.geminiApiKey
+    ? {
+      apiKey: ctx.config.geminiApiKey,
+      ...(geminiBaseUrl ? { baseUrl: geminiBaseUrl } : {}),
+      ...(deps.styleFetchFn ? { fetchFn: deps.styleFetchFn } : {}),
+    }
+    : {};
   return async ({
     article,
     source,
@@ -1264,6 +1297,32 @@ export function createGeminiSynthesizer(
     ) {
       throw new GeminiTtsError("synthesis stopped before claim lease expired", 400);
     }
+    const narrationStyle = resolveNarrationStyle(episode, source);
+    let narrationInput: NarrationInput = {
+      title: article.title,
+      author: article.author,
+      publishedAt: article.publishedAt,
+      sourceName: source?.title ?? episode.sourceTitle,
+      body: article.content,
+      voice,
+      codeHandling,
+      codeSummarizer: deps.codeSummarizer,
+    };
+    if (narrationStyle === "brief" || narrationStyle === "walkthrough") {
+      narrationInput = await prepareNarrationForStyle(
+        {
+          ...narrationInput,
+          ...(narrationStyle === "brief" ? { lead: article.excerpt } : {}),
+          headings: extractArticleHeadings(article.content, article.headings),
+        },
+        narrationStyle,
+        {
+          ...styleLlmDeps,
+          ...(leaseSignal ? { signal: leaseSignal } : {}),
+        },
+      );
+    }
+
     const turnEstimate = invocationBudget?.estimatedTurnDurationMs ??
       deps.estimatedTurnDurationMs ??
       ESTIMATED_TTS_TURN_DURATION_MS;
@@ -1285,16 +1344,7 @@ export function createGeminiSynthesizer(
         const combinedSignal = signal && leaseSignal
           ? AbortSignal.any([leaseSignal, signal])
           : (signal ?? leaseSignal);
-        return client.synthesizeNarration({
-          title: article.title,
-          author: article.author,
-          publishedAt: article.publishedAt,
-          sourceName: source?.title ?? episode.sourceTitle,
-          body: article.content,
-          voice,
-          codeHandling,
-          codeSummarizer: deps.codeSummarizer,
-        }, {
+        return client.synthesizeNarration(narrationInput, {
           ...ttsOptions,
           ...(combinedSignal ? { signal: combinedSignal } : {}),
         });
@@ -2484,36 +2534,39 @@ async function runSynthesisBatchCore(
     // gate.
     // audio-feed-cg8s: fast-path articles without code fences or <pre> tags so we do not
     // invoke code-formatting routines when no code blocks exist.
-    const hasPotentialCode = article.content.includes("```") ||
-      article.content.includes("~~~") ||
-      /<pre\b/i.test(article.content);
+    const narrationStyle = resolveNarrationStyle(claimed, source);
+    if (!(claimed.mode === "direct" && narrationStyle === "brief")) {
+      const hasPotentialCode = article.content.includes("```") ||
+        article.content.includes("~~~") ||
+        /<pre\b/i.test(article.content);
 
-    const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
-    const narrationInput = hasPotentialCode
-      ? await formatCodeForTts(article.content, codeHandling)
-      : article.content;
-    const inputBytes = new TextEncoder().encode(narrationInput).length;
-    if (opts.maxInputBytes && inputBytes > opts.maxInputBytes) {
-      const error =
-        `article content exceeds input limit (${inputBytes} > ${opts.maxInputBytes} bytes)`;
-      console.error(
-        `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
-      );
-      const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
-      if (wrote) {
-        await sweepAbandonedStagingBlobs(
-          metadata,
-          blobs,
-          claimed.userId,
-          claimed.id,
-          claimed.audioKey,
+      const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
+      const narrationInput = hasPotentialCode
+        ? await formatCodeForTts(article.content, codeHandling)
+        : article.content;
+      const inputBytes = new TextEncoder().encode(narrationInput).length;
+      if (opts.maxInputBytes && inputBytes > opts.maxInputBytes) {
+        const error =
+          `article content exceeds input limit (${inputBytes} > ${opts.maxInputBytes} bytes)`;
+        console.error(
+          `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
         );
-        result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
-        await notifyOnDemand(claimed, "failed", error);
-      } else {
-        result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+        const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
+        if (wrote) {
+          await sweepAbandonedStagingBlobs(
+            metadata,
+            blobs,
+            claimed.userId,
+            claimed.id,
+            claimed.audioKey,
+          );
+          result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
+          await notifyOnDemand(claimed, "failed", error);
+        } else {
+          result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+        }
+        continue;
       }
-      continue;
     }
 
     // Durable resumable chunking (audio-feed-wr1u): hooks are bound to THIS claim, so every
