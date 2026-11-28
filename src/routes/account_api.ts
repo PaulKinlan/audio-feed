@@ -66,6 +66,7 @@ import {
   IngestError,
 } from "../ingest/url.ts";
 import { GEMINI_TTS_VOICES } from "../tts/gemini.ts";
+import { isNarrationStyleId, type NarrationStyleId } from "../tts/styles.ts";
 import {
   type AudioMode,
   CODE_HANDLINGS,
@@ -229,7 +230,12 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
   /** Shared source-subscription path used by both single-feed add and OPML bulk import. */
   const subscribeAccountFeed = (
     user: User,
-    input: { feedUrl: string; title?: string; modes?: AudioMode[] },
+    input: {
+      feedUrl: string;
+      title?: string;
+      modes?: AudioMode[];
+      narrationStyle?: NarrationStyleId;
+    },
     maxItems: number,
   ) =>
     subscribeToFeed(
@@ -239,6 +245,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         feedUrl: input.feedUrl,
         title: input.title,
         modes: input.modes,
+        narrationStyle: input.narrationStyle,
       },
       { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems },
     );
@@ -486,6 +493,20 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         modes = input.modes.filter((m): m is AudioMode => isAudioMode(m));
         if (modes.length === 0) return reply({ error: "Choose direct, deepdive, or both." }, 400);
       }
+      let narrationStyle: NarrationStyleId | undefined;
+      if (
+        input.narrationStyle !== undefined &&
+        input.narrationStyle !== null &&
+        input.narrationStyle !== ""
+      ) {
+        if (!isNarrationStyleId(input.narrationStyle)) {
+          return reply(
+            { error: 'Narration style must be "standard", "brief", or "walkthrough".' },
+            400,
+          );
+        }
+        narrationStyle = input.narrationStyle;
+      }
       try {
         const { source, poll } = await subscribeAccountFeed(
           user,
@@ -495,10 +516,21 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
               ? input.title.trim()
               : undefined,
             modes,
+            narrationStyle,
           },
           5,
         );
-        return reply({ source: { id: source.id, title: source.title }, poll }, 201);
+        return reply(
+          {
+            source: {
+              id: source.id,
+              title: source.title,
+              ...(source.narrationStyle ? { narrationStyle: source.narrationStyle } : {}),
+            },
+            poll,
+          },
+          201,
+        );
       } catch (error) {
         // audio-feed-rt6q6: this response is read by the account holder, so its message must
         // be one this codebase wrote. An IngestError detail is authored for the user ("That
@@ -610,6 +642,19 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         updated.codeHandling = input.codeHandling as CodeHandling;
       }
 
+      if (input.narrationStyle !== undefined) {
+        if (input.narrationStyle === null || input.narrationStyle === "") {
+          delete updated.narrationStyle;
+        } else if (isNarrationStyleId(input.narrationStyle)) {
+          updated.narrationStyle = input.narrationStyle;
+        } else {
+          return reply(
+            { error: 'Narration style must be "standard", "brief", or "walkthrough".' },
+            400,
+          );
+        }
+      }
+
       await store.putSource(updated);
       return reply({
         ok: true,
@@ -620,6 +665,9 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
           playbackRate: updated.playbackRate ?? null,
           modes: updated.modes,
           codeHandling: updated.codeHandling ?? DEFAULT_CODE_HANDLING,
+          ...(updated.narrationStyle !== undefined
+            ? { narrationStyle: updated.narrationStyle }
+            : {}),
         },
       });
     },
@@ -672,6 +720,20 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       if (input.mode !== undefined && input.mode !== "" && !isAudioMode(input.mode)) {
         return reply({ error: "Choose direct or deepdive." }, 400);
       }
+      let narrationStyle: NarrationStyleId | undefined;
+      if (
+        input.narrationStyle !== undefined &&
+        input.narrationStyle !== null &&
+        input.narrationStyle !== ""
+      ) {
+        if (!isNarrationStyleId(input.narrationStyle)) {
+          return reply(
+            { error: 'Narration style must be "standard", "brief", or "walkthrough".' },
+            400,
+          );
+        }
+        narrationStyle = input.narrationStyle;
+      }
       const mode: AudioMode = isAudioMode(input.mode) ? input.mode : "direct";
       const modes: AudioMode[] = [mode];
 
@@ -697,6 +759,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         title: string;
         feedUrl: string;
         modes: AudioMode[];
+        narrationStyle?: NarrationStyleId;
         lastPolledAt?: string;
       }> = [];
       let sourceCapError: string | null = null;
@@ -725,7 +788,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         try {
           const { source } = await subscribeAccountFeed(
             user,
-            { feedUrl, title: entry.title, modes },
+            { feedUrl, title: entry.title, modes, narrationStyle },
             1,
           );
           added++;
@@ -735,6 +798,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
             title: source.title,
             feedUrl: source.feedUrl ?? feedUrl,
             modes: source.modes,
+            ...(source.narrationStyle ? { narrationStyle: source.narrationStyle } : {}),
             lastPolledAt: source.lastPolledAt,
           });
         } catch (error) {

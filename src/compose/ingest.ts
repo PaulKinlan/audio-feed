@@ -9,7 +9,7 @@
 import { createUrlIngestHandler, type ExtractedArticle } from "../ingest/url.ts";
 import { createUploadIngestHandler } from "../ingest/upload.ts";
 import { SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
-import { type AudioMode, INBOX_SOURCE_ID, type User } from "../types.ts";
+import { type AudioMode, INBOX_SOURCE_ID, type NarrationStyleId, type User } from "../types.ts";
 import { sameOrigin, sessionUser } from "../auth/sessions.ts";
 import type { EpisodeQuery, MetadataStore } from "../storage/mod.ts";
 import type { Episode } from "../types.ts";
@@ -502,6 +502,7 @@ export interface EnqueueInboxItemInput {
   article: ExtractedArticle;
   mode: AudioMode;
   user: User;
+  narrationStyle?: NarrationStyleId;
   articleId?: string;
   episodeId?: string;
   route?: string;
@@ -539,6 +540,7 @@ export async function enqueueInboxArticle(
     sourceTitle: "Inbox",
     articleId,
     mode,
+    ...(input.narrationStyle ? { narrationStyle: input.narrationStyle } : {}),
     status: "pending",
     title: article.title,
     description: article.lead,
@@ -635,8 +637,8 @@ export function createIngestHandler(
     fetchArticle: deps.fetchArticle,
     // Identity is the feed token, the same capability the feed routes use.
     authorize: (request) => authorizeIngestWithCap(ctx, request),
-    enqueue: ({ article, mode, user }) =>
-      enqueueInboxArticle(ctx, { article, mode, user, route: "/api/ingest" }),
+    enqueue: ({ article, mode, user, narrationStyle }) =>
+      enqueueInboxArticle(ctx, { article, mode, user, narrationStyle, route: "/api/ingest" }),
     onFailure: async ({ user, reason, status, mode, error, article }) => {
       // audio-feed-r7sb, audio-feed-tm97, audio-feed-fapx, audio-feed-8v53: surface pre-episode ingest failures
       // in structured logs for dead-letter visibility, preserving article URL/title and screened error cause.
@@ -675,11 +677,12 @@ export function createUploadHandler(
 ): AppHandlers["upload"] {
   const handler = createUploadIngestHandler({
     authorize: (request) => authorizeIngestWithCap(ctx, request),
-    enqueue: ({ article, mode, user, articleId, episodeId }) =>
+    enqueue: ({ article, mode, user, narrationStyle, articleId, episodeId }) =>
       enqueueInboxArticle(ctx, {
         article,
         mode,
         user,
+        narrationStyle,
         articleId,
         episodeId,
         route: "/api/upload",

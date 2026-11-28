@@ -1,4 +1,6 @@
 import { DEFAULT_NARRATION_VOICE } from "./tts/gemini.ts";
+import type { NarrationStyleId } from "./tts/styles.ts";
+export type { NarrationStyleId };
 
 /**
  * Canonical domain model for audio-feed.
@@ -269,6 +271,11 @@ export interface Source {
   playbackRate?: number;
   /** How to handle code blocks in TTS generation (audio-feed-bdo). Defaults to "skip". */
   codeHandling?: CodeHandling;
+  /**
+   * Optional narration style override for direct-mode episodes from this source (Issue #54).
+   * `"standard"` = verbatim full narration, `"brief"` = 3-Min Brief, `"walkthrough"` = Technical Walkthrough.
+   */
+  narrationStyle?: NarrationStyleId;
   createdAt: string;
   lastPolledAt?: string;
   /** Next feed index to examine when a bounded unseen scan could not finish. */
@@ -339,6 +346,11 @@ export interface Episode {
   sourceTitle?: string;
   articleId: string;
   mode: AudioMode;
+  /**
+   * Optional narration style for direct-mode synthesis (Issue #54).
+   * Overrides `Source.narrationStyle`; defaults to `"standard"` when unset.
+   */
+  narrationStyle?: NarrationStyleId;
   status: EpisodeStatus;
   title: string;
   description?: string;

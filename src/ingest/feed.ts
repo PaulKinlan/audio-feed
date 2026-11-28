@@ -50,6 +50,7 @@ import {
   type CodeHandling,
   DEFAULT_CODE_HANDLING,
   type Episode,
+  type NarrationStyleId,
   type Source,
 } from "../types.ts";
 
@@ -678,6 +679,7 @@ async function queueItems(
       sourceTitle: source.title,
       articleId,
       mode,
+      ...(source.narrationStyle ? { narrationStyle: source.narrationStyle } : {}),
       // The worker picks this up; this module never synthesises.
       status: "pending",
       title: article.title,
@@ -748,6 +750,7 @@ export async function subscribeToFeed(
     title?: string;
     modes?: AudioMode[];
     codeHandling?: CodeHandling;
+    narrationStyle?: NarrationStyleId;
   },
   deps: PollDependencies = {},
 ): Promise<{ source: Source; poll: PollResult }> {
@@ -784,6 +787,7 @@ export async function subscribeToFeed(
     // resolves source -> user -> DEFAULT_VOICE -> DEFAULT_NARRATION_VOICE.
     voices: {},
     codeHandling: input.codeHandling ?? DEFAULT_CODE_HANDLING,
+    ...(input.narrationStyle ? { narrationStyle: input.narrationStyle } : {}),
     createdAt: new Date().toISOString(),
   };
   // Validate BEFORE persisting: a user who pastes an article URL or an unreachable

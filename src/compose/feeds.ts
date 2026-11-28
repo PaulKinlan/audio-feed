@@ -20,6 +20,7 @@ import {
   isPublishable,
 } from "../types.ts";
 import { PROMPT_VERSION } from "../tts/prompt_version.ts";
+import { isNarrationStyleId, type NarrationStyleId } from "../tts/styles.ts";
 import { resolveOrigin } from "../origin.ts";
 import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { screenErrorForLogging } from "../observability/error_screen.ts";
@@ -467,6 +468,7 @@ export function createListSourcesHandler(ctx: AppContext): AppHandlers["listSour
           siteUrl: source.siteUrl,
           modes: source.modes,
           codeHandling: source.codeHandling ?? DEFAULT_CODE_HANDLING,
+          ...(source.narrationStyle ? { narrationStyle: source.narrationStyle } : {}),
           lastPolledAt: source.lastPolledAt,
           // The per-source feed paths a subscriber would actually poll.
           feedPaths: source.feedUrl
@@ -500,6 +502,7 @@ export function createCreateSourceHandler(
       title?: unknown;
       modes?: unknown;
       codeHandling?: unknown;
+      narrationStyle?: unknown;
     };
     if (typeof body.feedUrl !== "string" || body.feedUrl.trim() === "") {
       return Response.json({ error: "A feed URL is required." }, {
@@ -531,6 +534,20 @@ export function createCreateSourceHandler(
     }
 
     const codeHandling: CodeHandling = body.codeHandling === "explain" ? "explain" : "skip";
+    let narrationStyle: NarrationStyleId | undefined;
+    if (
+      body.narrationStyle !== undefined &&
+      body.narrationStyle !== null &&
+      body.narrationStyle !== ""
+    ) {
+      if (!isNarrationStyleId(body.narrationStyle)) {
+        return Response.json(
+          { error: 'Narration style must be "standard", "brief", or "walkthrough".' },
+          { status: 400, headers: { "cache-control": "no-store" } },
+        );
+      }
+      narrationStyle = body.narrationStyle;
+    }
 
     try {
       const { source, poll } = await subscribeToFeed(
@@ -541,6 +558,7 @@ export function createCreateSourceHandler(
           title: typeof body.title === "string" ? body.title : undefined,
           modes,
           codeHandling,
+          narrationStyle,
         },
         { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
       );
@@ -552,6 +570,7 @@ export function createCreateSourceHandler(
             feedUrl: source.feedUrl,
             modes: source.modes,
             codeHandling: source.codeHandling ?? DEFAULT_CODE_HANDLING,
+            ...(source.narrationStyle ? { narrationStyle: source.narrationStyle } : {}),
           },
           poll,
           // What the user subscribes to next.
