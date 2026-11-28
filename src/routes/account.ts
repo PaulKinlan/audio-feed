@@ -19,6 +19,13 @@ import { relyingParty } from "../auth/passkeys.ts";
 import { GEMINI_TTS_VOICES, VOICE_PROFILES } from "../tts/gemini.ts";
 import { isOutdated } from "../tts/prompt_version.ts";
 import {
+  isNarrationStyleId,
+  NARRATION_STYLE_IDS,
+  NARRATION_STYLES,
+  type NarrationStyleId,
+} from "../tts/styles.ts";
+import { resolveBriefingPreferences } from "../worker/briefing.ts";
+import {
   DEFAULT_CODE_HANDLING,
   INBOX_SOURCE_ID,
   isClaimExpired,
@@ -175,6 +182,13 @@ const CSS = `
   .failed-triage { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem 1rem; padding: 0.7rem 0.95rem; margin-block: 0.5rem 0.9rem; border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--danger) 8%, var(--surface-2)); }
   .failed-triage[hidden] { display: none; }
   .failed-triage-summary { font-size: 0.88rem; font-weight: 600; color: var(--text); }
+  .style-select-field { margin-block-start: 0.75rem; max-inline-size: 24rem; }
+  .briefing-card { margin-block: 1rem; }
+  .briefing-grid { display: grid; gap: 0.75rem; }
+  @media (min-width: 38rem) { .briefing-grid { grid-template-columns: 1fr 1fr; } }
+  .briefing-eligibility { margin: 0 0 0.85rem; min-block-size: 1.4em; }
+  .badge[data-schedule="daily"], .badge[data-schedule="weekly"] { color: var(--ok); }
+  .badge[data-schedule="off"] { color: var(--muted); }
 `;
 
 function when(iso: string | undefined): string {
@@ -192,6 +206,20 @@ function when(iso: string | undefined): string {
 }
 
 const SOURCE_PLAYBACK_RATE_PRESETS = [0.8, 1, 1.2, 1.4, 1.5, 1.75, 2] as const;
+const BRIEFING_MAX_ARTICLE_PRESETS = [4, 6, 8, 10, 12] as const;
+
+function effectiveSourceNarrationStyle(source: Source): NarrationStyleId {
+  const raw = (source as { narrationStyle?: string }).narrationStyle;
+  return isNarrationStyleId(raw) ? raw : "standard";
+}
+
+function renderNarrationStyleOptions(selected: NarrationStyleId = "standard"): string {
+  return NARRATION_STYLE_IDS.map((id) =>
+    `<option value="${id}"${selected === id ? " selected" : ""}>${
+      esc(NARRATION_STYLES[id].label)
+    }</option>`
+  ).join("");
+}
 
 function emailHostOf(baseUrl: string): string {
   try {
@@ -246,6 +274,10 @@ function sourcePrefsSummary(source: Source): { text: string; customized: boolean
   if (source.codeHandling === "explain") {
     parts.push("Explain code");
   }
+  const style = effectiveSourceNarrationStyle(source);
+  if (style !== "standard") {
+    parts.push(NARRATION_STYLES[style].label);
+  }
   if (parts.length === 0) {
     return { text: "Account defaults", customized: false };
   }
@@ -287,6 +319,7 @@ export function renderAccountPage(d: AccountPageData): string {
       : null;
     const currentModeVal = sourceModeSelectValue(s.modes);
     const currentCodeHandling = s.codeHandling === "explain" ? "explain" : DEFAULT_CODE_HANDLING;
+    const currentNarrationStyle = effectiveSourceNarrationStyle(s);
     const summary = sourcePrefsSummary(s);
     const voiceOptions = [
       `<option value=""${currentVoice === "" ? " selected" : ""}>Default</option>`,
@@ -340,6 +373,12 @@ export function renderAccountPage(d: AccountPageData): string {
                 <option value="skip"${currentCodeHandling === "skip" ? " selected" : ""}>Skip code blocks</option>
                 <option value="explain"${currentCodeHandling === "explain" ? " selected" : ""}>Explain code blocks</option>
               </select>
+            </div>
+            <div class="field">
+              <label for="src-style-${idx}">Narration style</label>
+              <select id="src-style-${idx}" name="narrationStyle">${
+      renderNarrationStyleOptions(currentNarrationStyle)
+    }</select>
             </div>
           </div>
           <div class="actions">
@@ -484,6 +523,12 @@ ${
             <label><input type="radio" name="quickMode" value="direct" checked> Read aloud</label>
             <label><input type="radio" name="quickMode" value="deepdive"> Deep dive</label>
           </div>
+          <div class="field style-select-field">
+            <label for="quickNarrationStyle">Narration style</label>
+            <select id="quickNarrationStyle" name="narrationStyle">${
+      renderNarrationStyleOptions("standard")
+    }</select>
+          </div>
         </div>
         <button type="button" class="btn small" id="quickSingleBtn"${
       approved ? "" : " disabled"
@@ -524,6 +569,14 @@ ${
         <label><input type="radio" name="sendMode" value="direct" checked> Read aloud</label>
         <label><input type="radio" name="sendMode" value="deepdive"> Deep dive, two voices</label>
       </fieldset>
+      <div class="field style-select-field">
+        <label for="sendNarrationStyle">Narration style</label>
+        <select id="sendNarrationStyle" name="narrationStyle" aria-describedby="sendNarrationStyleHint"
+                toolparamdescription="Read-aloud narration preset: standard (Full Narration), brief (3-Min Brief), or walkthrough (Technical Walkthrough)">${
+    renderNarrationStyleOptions("standard")
+  }</select>
+        <span id="sendNarrationStyleHint" class="hint">Full Narration, 3-Min Brief, or Technical Walkthrough (for read-aloud episodes).</span>
+      </div>
       <p class="feedback" id="sendFeedback" role="status" aria-live="polite"></p>
     </form>
     <div class="u-mt-3">
@@ -578,6 +631,30 @@ ${
 
   const activeTab = d.initialTab ?? (prefill ? "add" : "episodes");
   const isTab = (name: "episodes" | "add" | "feeds" | "settings") => activeTab === name;
+
+  const briefing = resolveBriefingPreferences(user.briefing);
+  const briefingHourOptions = Array.from({ length: 24 }, (_, hour) => {
+    const label = `${String(hour).padStart(2, "0")}:00 UTC`;
+    return `<option value="${hour}"${briefing.hourUtc === hour ? " selected" : ""}>${label}</option>`;
+  }).join("");
+  const briefingMaxValues: number[] = [...BRIEFING_MAX_ARTICLE_PRESETS];
+  if (!briefingMaxValues.includes(briefing.maxArticles)) {
+    briefingMaxValues.push(briefing.maxArticles);
+    briefingMaxValues.sort((a, b) => a - b);
+  }
+  const briefingMaxOptions = briefingMaxValues.map((count) =>
+    `<option value="${count}"${briefing.maxArticles === count ? " selected" : ""}>${count} ${
+      count === 1 ? "story" : "stories"
+    }</option>`
+  ).join("");
+  const briefingBadgeText = briefing.schedule === "daily"
+    ? `Daily · ${String(briefing.hourUtc).padStart(2, "0")}:00 UTC`
+    : briefing.schedule === "weekly"
+    ? `Weekly (Mon) · ${String(briefing.hourUtc).padStart(2, "0")}:00 UTC`
+    : "Off";
+  const initialBriefingMeta = briefing.lastGeneratedDate
+    ? `Last briefing generated ${esc(briefing.lastGeneratedDate)}.`
+    : "Compiles recent unread articles from the past 24 hours (daily) or 7 days (weekly).";
 
   const main = `<div class="wrap">
   <div class="account-head">
@@ -666,11 +743,8 @@ ${
     </div>`
       : ""
   }
-    ${
-    episodeItems
-      ? `<ul class="rows" id="episodesList">${episodeItems}</ul>`
-      : `<p class="empty">Nothing yet. Switch to the Add tab to send an article or subscribe a feed.</p>`
-  }
+    <ul class="rows" id="episodesList"${episodeItems ? "" : " hidden"}>${episodeItems}</ul>
+    <p class="empty" id="episodesEmpty"${episodeItems ? " hidden" : ""}>Nothing yet. Switch to the Add tab to send an article or subscribe a feed.</p>
     <p class="empty ep-filter-empty" id="epFilterEmpty" hidden>No episodes match this filter. <button class="btn quiet small" type="button" id="epClearFilters">Clear filters</button></p>
     ${
     d.hasMoreEpisodes || (d.currentLimit && d.currentLimit > 10)
@@ -724,6 +798,13 @@ ${
         <div class="choices" role="group" aria-label="Formats">
           <label><input type="checkbox" name="sourceMode" value="direct" checked> Read aloud</label>
           <label><input type="checkbox" name="sourceMode" value="deepdive"> Deep dive</label>
+        </div>
+        <div class="field">
+          <label for="sourceNarrationStyle">Narration style</label>
+          <select id="sourceNarrationStyle" name="narrationStyle" aria-describedby="sourceNarrationStyleHint">${
+    renderNarrationStyleOptions("standard")
+  }</select>
+          <span id="sourceNarrationStyleHint" class="hint">Default read-aloud style for new posts from this feed.</span>
         </div>
         <div class="actions"><button class="btn" type="submit"${
     approved ? "" : " disabled"
@@ -794,6 +875,57 @@ ${
     </section>
   </div>
 
+  <div class="panel briefing-card" id="briefingCard">
+    <div class="section-title">
+      <h2 id="briefing-h">Morning Briefing</h2>
+      <span class="badge" id="briefingScheduleBadge" data-schedule="${
+    esc(briefing.schedule)
+  }">${esc(briefingBadgeText)}</span>
+    </div>
+    <p class="sub">Compile your recent unread stories into a single chaptered audio briefing delivered to your feed.</p>
+    <p class="meta briefing-eligibility" id="briefingEligibility">${initialBriefingMeta}</p>
+    <form id="briefingForm" class="stack" aria-labelledby="briefing-h">
+      <div class="briefing-grid">
+        <div class="field">
+          <label for="briefingSchedule">Schedule</label>
+          <select id="briefingSchedule" name="schedule">
+            <option value="off"${briefing.schedule === "off" ? " selected" : ""}>Off</option>
+            <option value="daily"${briefing.schedule === "daily" ? " selected" : ""}>Daily</option>
+            <option value="weekly"${
+    briefing.schedule === "weekly" ? " selected" : ""
+  }>Weekly (Mondays)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="briefingHour">Delivery hour</label>
+          <select id="briefingHour" name="hourUtc">${briefingHourOptions}</select>
+        </div>
+        <div class="field">
+          <label for="briefingMode">Format</label>
+          <select id="briefingMode" name="mode">
+            <option value="direct"${
+    briefing.mode === "direct" ? " selected" : ""
+  }>Direct narration</option>
+            <option value="deepdive"${
+    briefing.mode === "deepdive" ? " selected" : ""
+  }>Two-host Deep Dive</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="briefingMaxArticles">Stories per briefing</label>
+          <select id="briefingMaxArticles" name="maxArticles">${briefingMaxOptions}</select>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" type="submit" id="saveBriefingBtn">Save briefing settings</button>
+        <button class="btn quiet" type="button" id="generateBriefingBtn"${
+    approved ? "" : " disabled"
+  }>Generate briefing now</button>
+      </div>
+      <p class="feedback" id="briefingFeedback" role="status" aria-live="polite"></p>
+    </form>
+  </div>
+
   <section class="panel danger-zone" aria-labelledby="rotate-h">
     <h2 id="rotate-h">Leaked your feed URL?</h2>
     <p class="sub">Rotating makes a new feed URL and stops the old one at once. Every podcast app you subscribed needs the new one. Previously fetched audio links remain accessible until account suspension.</p>
@@ -815,6 +947,9 @@ ${
     jsonForScript(GEMINI_TTS_VOICES.map((v) => ({ name: v, style: VOICE_PROFILES[v].style })))
   };
   const RATE_PRESETS = ${jsonForScript([...SOURCE_PLAYBACK_RATE_PRESETS])};
+  const NARRATION_STYLE_CATALOG = ${
+    jsonForScript(NARRATION_STYLE_IDS.map((id) => ({ value: id, label: NARRATION_STYLES[id].label })))
+  };
 ${SAME_ORIGIN_PATH_CLIENT}
 ${PASSKEY_CLIENT}
 ${CONFIRM_DIALOG_CLIENT}
@@ -831,12 +966,15 @@ ${CONFIRM_DIALOG_CLIENT}
       const feedback = $("quickFeedback");
       const modeEl = document.querySelector("input[name=quickMode]:checked");
       const mode = modeEl ? modeEl.value : "direct";
+      const styleEl = $("quickNarrationStyle");
+      const narrationStyle = styleEl instanceof HTMLSelectElement ? styleEl.value : "standard";
       quickSingleBtn.disabled = true;
       say(feedback, "ok", "Queuing article for audio…");
       try {
-        const res = await send("POST", "/api/ingest", { url: PREFILL.url, mode });
+        const res = await send("POST", "/api/ingest", { url: PREFILL.url, mode, narrationStyle });
         const title = (res && res.article && res.article.title) || PREFILL.title || "Article";
         say(feedback, "ok", "Queued for synthesis: " + title + ". It will appear in your feed once ready.");
+        void refreshEpisodesListFromServer();
       } catch (err) {
         say(feedback, "error", String(err.message || err));
       } finally {
@@ -850,6 +988,8 @@ ${CONFIRM_DIALOG_CLIENT}
     quickSubscribeBtn.addEventListener("click", async () => {
       const feedback = $("quickFeedback");
       if (!feedUrl) return;
+      const styleEl = $("quickNarrationStyle");
+      const narrationStyle = styleEl instanceof HTMLSelectElement ? styleEl.value : "standard";
       quickSubscribeBtn.disabled = true;
       say(feedback, "ok", "Subscribing to feed…");
       try {
@@ -857,6 +997,7 @@ ${CONFIRM_DIALOG_CLIENT}
           feedUrl: feedUrl,
           title: PREFILL.title || undefined,
           modes: ["direct", "deepdive"],
+          narrationStyle,
         });
         const title = (res && res.source && res.source.title) || PREFILL.title || "feed";
         say(feedback, "ok", "Subscribed to " + title + ". " + ((res && res.poll && res.poll.queued) ?? 0) + " post(s) queued.");
@@ -973,14 +1114,25 @@ ${CONFIRM_DIALOG_CLIENT}
   if (sendForm) sendForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const feedback = $("sendFeedback");
+    const submitBtn = sendForm.querySelector('button[type="submit"]');
     const mode = document.querySelector("input[name=sendMode]:checked").value;
+    const styleEl = $("sendNarrationStyle");
+    const narrationStyle = styleEl instanceof HTMLSelectElement ? styleEl.value : "standard";
+    if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = true;
     say(feedback, "ok", "Fetching the article…");
     try {
-      const res = await send("POST", "/api/ingest", { url: $("sendUrl").value.trim(), mode });
+      const res = await send("POST", "/api/ingest", {
+        url: $("sendUrl").value.trim(),
+        mode,
+        narrationStyle,
+      });
       say(feedback, "ok", "Queued: " + res.article.title + ". It appears in your feed once narrated.");
       $("sendUrl").value = "";
+      void refreshEpisodesListFromServer();
     } catch (error) {
       say(feedback, "error", String(error.message || error));
+    } finally {
+      if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = false;
     }
   });
 
@@ -1081,19 +1233,49 @@ ${CONFIRM_DIALOG_CLIENT}
     }
   });
 
-  $("addSourceForm").addEventListener("submit", async (event) => {
+  const addSourceForm = $("addSourceForm");
+  if (addSourceForm) addSourceForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const feedback = $("addSourceFeedback");
+    const submitBtn = addSourceForm.querySelector('button[type="submit"]');
+    const feedUrlInput = $("sourceUrl").value.trim();
+    const titleInput = $("sourceTitle").value.trim();
     const modes = [...document.querySelectorAll("input[name=sourceMode]:checked")].map((i) => i.value);
+    const styleEl = $("sourceNarrationStyle");
+    const narrationStyle = styleEl instanceof HTMLSelectElement ? styleEl.value : "standard";
+    if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = true;
     say(feedback, "ok", "Reading the feed…");
     try {
       const res = await send("POST", "/api/account/sources", {
-        feedUrl: $("sourceUrl").value.trim(), title: $("sourceTitle").value.trim(), modes,
+        feedUrl: feedUrlInput,
+        title: titleInput,
+        modes,
+        narrationStyle,
       });
-      say(feedback, "ok", "Added " + res.source.title + ". " + res.poll.queued + " post(s) queued.");
-      setTimeout(() => location.reload(), 700);
+      const src = res && res.source;
+      if (sourcesList && src && src.id) {
+        const alreadyListed = [...sourcesList.querySelectorAll(":scope > li")]
+          .some((li) => li.dataset.sourceId === src.id);
+        if (!alreadyListed) {
+          sourcesList.appendChild(createSourceListItem({
+            id: src.id,
+            title: src.title || titleInput || feedUrlInput,
+            feedUrl: src.feedUrl || feedUrlInput,
+            modes: Array.isArray(src.modes) && src.modes.length ? src.modes : (modes.length ? modes : ["direct"]),
+            narrationStyle: src.narrationStyle || narrationStyle,
+            lastPolledAt: src.lastPolledAt || new Date().toISOString(),
+          }));
+          syncSourcesCount();
+        }
+      }
+      const queued = (res && res.poll && Number(res.poll.queued)) || 0;
+      say(feedback, "ok", "Added " + ((src && src.title) || "feed") + ". " + queued + " post(s) queued.");
+      addSourceForm.reset();
+      if (queued > 0) void refreshEpisodesListFromServer();
     } catch (error) {
       say(feedback, "error", String(error.message || error));
+    } finally {
+      if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = false;
     }
   });
 
@@ -1139,6 +1321,10 @@ ${CONFIRM_DIALOG_CLIENT}
     if (prefs.codeHandling === "explain") {
       parts.push("Explain code");
     }
+    const styleEntry = prefs.narrationStyle && prefs.narrationStyle !== "standard"
+      ? NARRATION_STYLE_CATALOG.find((item) => item.value === prefs.narrationStyle)
+      : null;
+    if (styleEntry) parts.push(styleEntry.label);
     return parts.length > 0
       ? { text: parts.join(" · "), customized: true }
       : { text: "Account defaults", customized: false };
@@ -1225,11 +1411,15 @@ ${CONFIRM_DIALOG_CLIENT}
     prefsSummary.appendChild(document.createTextNode("Feed defaults "));
     const prefsMeta = document.createElement("span");
     prefsMeta.className = "source-prefs-meta";
+    const sourceStyle = NARRATION_STYLE_CATALOG.some((s) => s.value === source.narrationStyle)
+      ? source.narrationStyle
+      : "standard";
     const summaryInfo = formatSourcePrefsSummary({
       voice: source.voice || null,
       playbackRate: typeof source.playbackRate === "number" ? source.playbackRate : null,
       modes,
       codeHandling: source.codeHandling || "skip",
+      narrationStyle: sourceStyle,
     });
     prefsMeta.dataset.customized = summaryInfo.customized ? "true" : "false";
     prefsMeta.textContent = summaryInfo.text;
@@ -1277,6 +1467,15 @@ ${CONFIRM_DIALOG_CLIENT}
         "codeHandling",
         codeOpts,
         source.codeHandling === "explain" ? "explain" : "skip",
+      ),
+    );
+    grid.appendChild(
+      createSelectField(
+        "src-style-" + suffix,
+        "Narration style",
+        "narrationStyle",
+        NARRATION_STYLE_CATALOG,
+        sourceStyle,
       ),
     );
     form.appendChild(grid);
@@ -1334,17 +1533,20 @@ ${CONFIRM_DIALOG_CLIENT}
       const rateEl = form.elements.namedItem("playbackRate");
       const modeEl = form.elements.namedItem("mode");
       const codeEl = form.elements.namedItem("codeHandling");
+      const styleEl = form.elements.namedItem("narrationStyle");
 
       const voiceVal = voiceEl instanceof HTMLSelectElement ? voiceEl.value : "";
       const rateVal = rateEl instanceof HTMLSelectElement ? rateEl.value : "";
       const modeVal = modeEl instanceof HTMLSelectElement ? modeEl.value : "direct";
       const codeVal = codeEl instanceof HTMLSelectElement ? codeEl.value : "skip";
+      const styleVal = styleEl instanceof HTMLSelectElement ? styleEl.value : "standard";
 
       const payload = {
         voice: voiceVal || null,
         playbackRate: rateVal ? Number(rateVal) : null,
         modes: modeVal.split(",").filter(Boolean),
         codeHandling: codeVal,
+        narrationStyle: styleVal,
       };
 
       if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = true;
@@ -1355,7 +1557,9 @@ ${CONFIRM_DIALOG_CLIENT}
           "/api/account/sources/" + encodeURIComponent(sourceId) + "/preferences",
           payload,
         );
-        const saved = (res && res.source) || payload;
+        const saved = (res && res.source)
+          ? { narrationStyle: styleVal, ...res.source }
+          : payload;
         const li = form.closest("li");
         if (li) {
           const metaEl = li.querySelector(".source-prefs-meta");
@@ -1472,6 +1676,183 @@ ${CONFIRM_DIALOG_CLIENT}
     });
   }
 
+  // ── Morning Briefing settings & on-demand generation (Settings tab) ─────
+  const briefingForm = $("briefingForm");
+  const briefingSchedule = $("briefingSchedule");
+  const briefingHour = $("briefingHour");
+  const briefingMode = $("briefingMode");
+  const briefingMaxArticles = $("briefingMaxArticles");
+  const briefingEligibility = $("briefingEligibility");
+  const briefingScheduleBadge = $("briefingScheduleBadge");
+  const saveBriefingBtn = $("saveBriefingBtn");
+  const generateBriefingBtn = $("generateBriefingBtn");
+  const briefingFeedback = $("briefingFeedback");
+
+  let briefingStats = null;
+  let briefingLoaded = false;
+  let briefingLoadPromise = null;
+
+  function formatUtcHour(hour) {
+    return String(hour).padStart(2, "0") + ":00 UTC";
+  }
+
+  function updateBriefingBadge(schedule, hourUtc) {
+    if (!briefingScheduleBadge) return;
+    briefingScheduleBadge.dataset.schedule = schedule;
+    if (schedule === "daily") {
+      briefingScheduleBadge.textContent = "Daily · " + formatUtcHour(hourUtc);
+    } else if (schedule === "weekly") {
+      briefingScheduleBadge.textContent = "Weekly (Mon) · " + formatUtcHour(hourUtc);
+    } else {
+      briefingScheduleBadge.textContent = "Off";
+    }
+  }
+
+  function renderBriefingEligibility() {
+    if (!briefingEligibility || !briefingStats) return;
+    const selectedSchedule = briefingSchedule instanceof HTMLSelectElement ? briefingSchedule.value : "off";
+    const isWeekly = selectedSchedule === "weekly";
+    const primaryCount = isWeekly ? briefingStats.weeklyArticleCount : briefingStats.dailyArticleCount;
+    const primaryWindow = isWeekly ? "past 7 days" : "past 24 hours";
+    const otherCount = isWeekly ? briefingStats.dailyArticleCount : briefingStats.weeklyArticleCount;
+    const otherWindow = isWeekly ? "past 24 hours" : "past 7 days";
+    let text = primaryCount + " unread " + (primaryCount === 1 ? "story" : "stories") +
+      " eligible in the " + primaryWindow + " (" + otherCount + " in the " + otherWindow + ").";
+    if (briefingStats.lastGeneratedDate) {
+      text += " Last generated " + briefingStats.lastGeneratedDate + ".";
+    }
+    briefingEligibility.textContent = text;
+  }
+
+  function loadBriefingStatus(force) {
+    if (!briefingForm) return Promise.resolve();
+    if (briefingLoaded && !force) return Promise.resolve();
+    if (briefingLoadPromise) return briefingLoadPromise;
+    briefingLoadPromise = send("GET", "/api/account/briefing")
+      .then((data) => {
+        if (!data) return;
+        briefingLoaded = true;
+        briefingStats = {
+          dailyArticleCount: Number(data.dailyArticleCount) || 0,
+          weeklyArticleCount: Number(data.weeklyArticleCount) || 0,
+          lastGeneratedDate: data.briefing && data.briefing.lastGeneratedDate
+            ? String(data.briefing.lastGeneratedDate)
+            : null,
+        };
+        renderBriefingEligibility();
+      })
+      .catch(() => {
+        // Keep server-rendered defaults intact if background eligibility fetch fails.
+      })
+      .finally(() => {
+        briefingLoadPromise = null;
+      });
+    return briefingLoadPromise;
+  }
+
+  if (briefingSchedule) {
+    briefingSchedule.addEventListener("change", () => {
+      renderBriefingEligibility();
+    });
+  }
+
+  if (briefingForm) {
+    briefingForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!briefingFeedback) return;
+      const schedule = briefingSchedule instanceof HTMLSelectElement ? briefingSchedule.value : "off";
+      const hourUtc = briefingHour instanceof HTMLSelectElement ? Number(briefingHour.value) : 7;
+      const mode = briefingMode instanceof HTMLSelectElement ? briefingMode.value : "direct";
+      const maxArticles = briefingMaxArticles instanceof HTMLSelectElement
+        ? Number(briefingMaxArticles.value)
+        : 8;
+      if (saveBriefingBtn instanceof HTMLButtonElement) saveBriefingBtn.disabled = true;
+      say(briefingFeedback, "ok", "Saving briefing settings…");
+      try {
+        const res = await send("POST", "/api/account/briefing", {
+          schedule,
+          hourUtc,
+          mode,
+          maxArticles,
+        });
+        const saved = (res && res.briefing) || { schedule, hourUtc, mode, maxArticles };
+        updateBriefingBadge(saved.schedule, saved.hourUtc);
+        if (briefingStats) {
+          if (saved.lastGeneratedDate) briefingStats.lastGeneratedDate = saved.lastGeneratedDate;
+          renderBriefingEligibility();
+        }
+        const summary = saved.schedule === "off"
+          ? "Briefing settings saved. Scheduled briefings are off."
+          : "Briefing settings saved (" +
+            (saved.schedule === "weekly" ? "Weekly Mondays" : "Daily") + " at " +
+            formatUtcHour(saved.hourUtc) + ").";
+        say(briefingFeedback, "ok", summary);
+      } catch (error) {
+        say(briefingFeedback, "error", String(error.message || error));
+      } finally {
+        if (saveBriefingBtn instanceof HTMLButtonElement) saveBriefingBtn.disabled = false;
+      }
+    });
+  }
+
+  if (generateBriefingBtn) {
+    generateBriefingBtn.addEventListener("click", async () => {
+      if (!briefingFeedback || generateBriefingBtn.disabled) return;
+      const chosenSchedule = briefingSchedule instanceof HTMLSelectElement ? briefingSchedule.value : "daily";
+      const schedule = chosenSchedule === "weekly" ? "weekly" : "daily";
+      const mode = briefingMode instanceof HTMLSelectElement ? briefingMode.value : "direct";
+      const maxArticles = briefingMaxArticles instanceof HTMLSelectElement
+        ? Number(briefingMaxArticles.value)
+        : 8;
+      generateBriefingBtn.disabled = true;
+      say(briefingFeedback, "ok", "Compiling your morning briefing…");
+      try {
+        const res = await send("POST", "/api/account/briefing/generate", {
+          schedule,
+          mode,
+          maxArticles,
+        });
+        const status = res && res.status;
+        if (status === "queued") {
+          const count = Number(res.articleCount) || 0;
+          say(
+            briefingFeedback,
+            "ok",
+            "Morning briefing queued (" + count + " " + (count === 1 ? "story" : "stories") +
+              "). Episodes list refreshed.",
+          );
+          if (res.dateKey && briefingStats) {
+            briefingStats.lastGeneratedDate = String(res.dateKey);
+            renderBriefingEligibility();
+          } else if (res.dateKey && briefingEligibility) {
+            briefingEligibility.textContent = "Last briefing generated " + String(res.dateKey) + ".";
+          }
+          await refreshEpisodesListFromServer();
+        } else if (status === "exists") {
+          const label = res.schedule === "weekly" ? "weekly" : "daily";
+          say(
+            briefingFeedback,
+            "ok",
+            "Today's " + label + " briefing (" + (res.dateKey || "today") + ") already exists in your feed.",
+          );
+        } else if (status === "empty") {
+          const win = res.schedule === "weekly" ? "past 7 days" : "past 24 hours";
+          say(
+            briefingFeedback,
+            "ok",
+            "No new unread articles found in the " + win + " for a briefing.",
+          );
+        } else {
+          say(briefingFeedback, "ok", "Briefing request completed.");
+        }
+      } catch (error) {
+        say(briefingFeedback, "error", String(error.message || error));
+      } finally {
+        generateBriefingBtn.disabled = false;
+      }
+    });
+  }
+
   const episodesList = $("episodesList");
   const retryFailed = $("retryFailed");
   const regenOutdated = $("regenOutdated");
@@ -1505,6 +1886,9 @@ ${CONFIRM_DIALOG_CLIENT}
       const activeBtn = tabs.find((t) => t.dataset.tab === target);
       if (activeBtn) activeBtn.focus();
     }
+    if (target === "settings") {
+      void loadBriefingStatus(false);
+    }
   }
 
   for (const tab of tabs) {
@@ -1528,12 +1912,19 @@ ${CONFIRM_DIALOG_CLIENT}
     if (raw === "episodes" || raw === "episodes-h") activateTab("episodes", { updateHash: false });
     else if (raw === "add" || raw === "send-h") activateTab("add", { updateHash: false });
     else if (raw === "feeds" || raw === "feeds-h") activateTab("feeds", { updateHash: false });
-    else if (raw === "settings" || raw === "profile-h" || raw === "passkeys-h") {
+    else if (
+      raw === "settings" || raw === "profile-h" || raw === "passkeys-h" ||
+      raw === "briefing" || raw === "briefing-h"
+    ) {
       activateTab("settings", { updateHash: false });
     }
   }
   if (location.hash) syncTabFromHash();
   window.addEventListener("hashchange", syncTabFromHash);
+  const settingsTabPanel = $("panel-settings");
+  if (settingsTabPanel && !settingsTabPanel.hidden) {
+    void loadBriefingStatus(false);
+  }
 
   // ── Episode status, source, and text filtering ──────────────────────────
   let activeStatusFilter = "all";
@@ -2086,6 +2477,72 @@ ${CONFIRM_DIALOG_CLIENT}
 
   // If episodes are already pending or synthesizing on load, track them live in-place.
   scheduleEpisodePoll();
+
+  async function refreshEpisodesListFromServer() {
+    if (!episodesList) return;
+    try {
+      const res = await fetch(assertSameOriginPath("/account" + (location.search || "")), {
+        headers: { accept: "text/html" },
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const freshList = doc.getElementById("episodesList");
+      if (freshList) {
+        const existingById = new Map();
+        for (const li of episodesList.querySelectorAll("li[data-episode-id]")) {
+          existingById.set(li.dataset.episodeId, li);
+        }
+        const freshItems = [...freshList.querySelectorAll("li[data-episode-id]")];
+        let insertBeforeNode = episodesList.firstElementChild;
+        for (const freshLi of freshItems) {
+          const id = freshLi.dataset.episodeId;
+          const existing = existingById.get(id);
+          if (existing) {
+            syncEpisodeRowFromServer(existing, freshLi);
+            insertBeforeNode = existing.nextElementSibling;
+          } else {
+            const adopted = document.importNode(freshLi, true);
+            const importedAudio = adopted.querySelector("audio.ep-audio");
+            if (importedAudio) {
+              const src = importedAudio.getAttribute("src") || "";
+              if (src) importedAudio.setAttribute("src", assertSameOriginPath(src));
+            }
+            episodesList.insertBefore(adopted, insertBeforeNode);
+          }
+        }
+        const hasRows = episodesList.querySelectorAll("li[data-episode-id]").length > 0;
+        episodesList.hidden = !hasRows;
+        const emptyEl = $("episodesEmpty");
+        if (emptyEl) emptyEl.hidden = hasRows;
+      }
+      const freshSourceSelect = doc.getElementById("epFilterSource");
+      if (freshSourceSelect && epFilterSource) {
+        const prevVal = epFilterSource.value;
+        const opts = [...freshSourceSelect.querySelectorAll("option")].map((o) => {
+          const opt = document.createElement("option");
+          opt.value = o.value;
+          opt.textContent = o.textContent;
+          return opt;
+        });
+        epFilterSource.replaceChildren(...opts);
+        epFilterSource.value = prevVal;
+      }
+      const freshRetry = doc.getElementById("retryFailed");
+      if (freshRetry && retryFailed) {
+        setCounterButton(retryFailed, "Retry failed", freshRetry.dataset.count);
+      }
+      const freshOutdated = doc.getElementById("regenOutdated");
+      if (freshOutdated && regenOutdated) {
+        setCounterButton(regenOutdated, "Regenerate outdated", freshOutdated.dataset.count);
+      }
+      applyEpisodeFilters();
+      scheduleEpisodePoll();
+    } catch {
+      // Transient refresh failure: polling will pick up updates on next tick.
+    }
+  }
 
   $("rotateToken").addEventListener("click", async () => {
     const ok = await askConfirm("Make a new feed URL? The current one stops working in every podcast app straight away. Previously fetched audio links remain accessible until account suspension.", {

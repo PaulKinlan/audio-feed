@@ -6,13 +6,14 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { parseHTML } from "npm:linkedom@0.18.12";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { safeNext } from "../src/routes/login.ts";
 import { jsonForScript } from "../src/routes/html.ts";
-import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { User } from "../src/types.ts";
 import {
   CANONICAL_PROOF_ORIGIN,
@@ -946,5 +947,674 @@ Deno.test(
     );
     assertStringIncludes(block, "setRowStatus");
     assertStringIncludes(block, "pollEpisodeStatuses");
+  },
+);
+
+/** Extract non-speculationrules inline scripts from an HTML document and verify syntax. */
+function extractInlineScripts(html: string): string[] {
+  const scripts = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)]
+    .filter((m) => !m[0].includes('type="speculationrules"'))
+    .map((m) => m[1] ?? "");
+  for (const body of scripts) {
+    new Function(body);
+  }
+  return scripts;
+}
+
+/**
+ * Mount the server-rendered `/account` HTML inside a `linkedom` document and run its
+ * shipped inline `<script>` against a caller-supplied `fetch` implementation.
+ */
+function mountAccountScript(
+  html: string,
+  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>,
+  opts: { hash?: string; search?: string } = {},
+) {
+  const scripts = extractInlineScripts(html);
+  assert(scripts.length >= 1, "expected inline account script");
+  const accountScript = scripts.find((s) => s.includes("briefingForm")) ?? scripts[scripts.length - 1]!;
+  const parsed = parseHTML(html);
+  const { window: win, document: doc } = parsed;
+
+  let reloadCount = 0;
+  let assignedUrl: string | null = null;
+  const mockLocation = {
+    pathname: "/account",
+    search: opts.search ?? "",
+    hash: opts.hash ?? "",
+    reload: () => {
+      reloadCount++;
+    },
+    assign: (url: string) => {
+      assignedUrl = url;
+    },
+  };
+  const mockHistory = {
+    replaceState: (_state: unknown, _title: string, url?: string | URL | null) => {
+      if (typeof url === "string") {
+        const hashIdx = url.indexOf("#");
+        mockLocation.hash = hashIdx >= 0 ? url.slice(hashIdx) : "";
+      }
+    },
+  };
+  // linkedom's HTMLSelectElement exposes a getter-only `.value`; polyfill the standard browser setter.
+  const selectProto = win.HTMLSelectElement?.prototype;
+  if (selectProto) {
+    const desc = Object.getOwnPropertyDescriptor(selectProto, "value");
+    if (!desc || !desc.set) {
+      Object.defineProperty(selectProto, "value", {
+        configurable: true,
+        get(this: HTMLSelectElement) {
+          const opts = [...this.querySelectorAll("option")];
+          const chosen = opts.find((o) => o.hasAttribute("selected")) ?? opts[0];
+          return chosen ? chosen.getAttribute("value") ?? chosen.textContent ?? "" : "";
+        },
+        set(this: HTMLSelectElement, next: string) {
+          const target = String(next);
+          for (const opt of this.querySelectorAll("option")) {
+            const val = opt.getAttribute("value") ?? opt.textContent ?? "";
+            if (val === target) opt.setAttribute("selected", "");
+            else opt.removeAttribute("selected");
+          }
+        },
+      });
+    }
+  }
+  const optionProto = (win as unknown as { HTMLOptionElement?: { prototype: object } })
+    .HTMLOptionElement?.prototype;
+  if (optionProto) {
+    const selDesc = Object.getOwnPropertyDescriptor(optionProto, "selected");
+    if (!selDesc || !selDesc.set) {
+      Object.defineProperty(optionProto, "selected", {
+        configurable: true,
+        get(this: HTMLOptionElement) {
+          return this.hasAttribute("selected");
+        },
+        set(this: HTMLOptionElement, flag: boolean) {
+          if (flag) this.setAttribute("selected", "");
+          else this.removeAttribute("selected");
+        },
+      });
+    }
+  }
+
+  // linkedom's HTMLFormElement.elements may not implement namedItem; shim cleanly if missing.
+  const ensureFormElements = (root: Document) => {
+    for (const form of root.querySelectorAll("form")) {
+      const f = form as unknown as {
+        elements?: { namedItem?: (name: string) => Element | null };
+        reset?: () => void;
+      };
+      if (!f.elements || typeof f.elements.namedItem !== "function") {
+        Object.defineProperty(form, "elements", {
+          configurable: true,
+          get: () => ({
+            namedItem: (name: string) => form.querySelector(`[name="${name}"]`),
+          }),
+        });
+      }
+      if (typeof f.reset !== "function") {
+        f.reset = () => {};
+      }
+    }
+  };
+  ensureFormElements(doc);
+
+  // Polyfill `importNode` if linkedom's Document returns raw nodes or needs cross-doc clone.
+  const origImportNode = typeof doc.importNode === "function" ? doc.importNode.bind(doc) : null;
+  if (!origImportNode) {
+    (doc as unknown as { importNode: (node: Node, deep?: boolean) => Node }).importNode = (
+      node: Node,
+      deep?: boolean,
+    ) => node.cloneNode(Boolean(deep));
+  }
+
+  class MockDOMParser {
+    parseFromString(markup: string, _mime: string) {
+      return parseHTML(markup).document;
+    }
+  }
+
+  const timers: Array<ReturnType<typeof setInterval>> = [];
+  const trackedSetInterval = (fn: () => void, ms: number) => {
+    const id = setInterval(fn, ms);
+    timers.push(id);
+    return id;
+  };
+
+  const runner = new Function(
+    "window",
+    "document",
+    "location",
+    "history",
+    "fetch",
+    "DOMParser",
+    "Element",
+    "HTMLElement",
+    "HTMLButtonElement",
+    "HTMLFormElement",
+    "HTMLSelectElement",
+    "HTMLDialogElement",
+    "addEventListener",
+    "removeEventListener",
+    "navigator",
+    "setInterval",
+    "clearInterval",
+    accountScript,
+  );
+
+  // linkedom constructs <form> as generic HTMLElement; provide a spec-accurate instanceof check.
+  const FormCtor = {
+    [Symbol.hasInstance]: (el: unknown) =>
+      el instanceof win.HTMLElement && (el as HTMLElement).tagName === "FORM",
+  };
+
+  runner(
+    win,
+    doc,
+    mockLocation,
+    mockHistory,
+    fetchImpl,
+    MockDOMParser,
+    win.Element,
+    win.HTMLElement,
+    win.HTMLButtonElement,
+    FormCtor,
+    win.HTMLSelectElement,
+    (win as unknown as { HTMLDialogElement?: unknown }).HTMLDialogElement ?? win.HTMLElement,
+    win.addEventListener.bind(win),
+    win.removeEventListener.bind(win),
+    { clipboard: { writeText: () => Promise.resolve() } },
+    trackedSetInterval,
+    clearInterval,
+  );
+
+  const flush = () => new Promise((r) => setTimeout(r, 25));
+  const cleanup = () => {
+    for (const id of timers) clearInterval(id);
+    timers.length = 0;
+  };
+
+  return {
+    doc,
+    win,
+    flush,
+    cleanup,
+    ensureFormElements: () => ensureFormElements(doc),
+    getReloadCount: () => reloadCount,
+    getAssignedUrl: () => assignedUrl,
+  };
+}
+
+Deno.test(
+  "GET /account renders Morning Briefing card in Settings tab with server-rendered state, strict CSP, and balanced layout",
+  async () => {
+    const { fetch, stores } = app();
+    const configured = await seed(stores, {
+      id: "user-briefing-cfg",
+      email: "briefing@example.com",
+      status: "approved",
+      briefing: {
+        schedule: "weekly",
+        hourUtc: 14,
+        mode: "deepdive",
+        maxArticles: 10,
+        lastGeneratedDate: "2026-11-23",
+      },
+    });
+    const customMax = await seed(stores, {
+      id: "user-briefing-custom",
+      email: "custom@example.com",
+      status: "approved",
+      briefing: {
+        schedule: "daily",
+        hourUtc: 6,
+        mode: "direct",
+        maxArticles: 5,
+      },
+    });
+    const pendingUser = await seed(stores, {
+      id: "user-briefing-pending",
+      email: "pending@example.com",
+      status: "pending",
+    });
+
+    const res = await get(fetch, "/account?tab=settings", stores, configured.id);
+    assertEquals(res.status, 200);
+    const html = await res.text();
+
+    // Strict CSP, JS syntax, tag nesting, and exact 6 section.panel layout invariants
+    assertEquals(tagNestingProblems(html), [], "/account markup must nest cleanly");
+    assert(!/\bstyle\s*=/i.test(html), "zero inline style attributes");
+    assertEquals(/\.innerHTML\s*=/.test(html), false, "zero .innerHTML assignments");
+    assertEquals(/\son(?:click|change|submit|input)=/i.test(html), false, "zero inline handlers");
+    extractInlineScripts(html);
+
+    const wrapRegion = html.slice(html.indexOf('<div class="wrap">'), html.indexOf("</main>"));
+    assertEquals(
+      [...wrapRegion.matchAll(/<section class="panel(?:\s|")/g)].length,
+      6,
+      "Morning Briefing card must preserve the exact 6 section.panel layout",
+    );
+
+    // Morning Briefing card sits inside Settings tab panel with server-rendered selections
+    const settingsStart = html.indexOf('id="panel-settings"');
+    assert(settingsStart > 0, "expected Settings tab panel");
+    const settingsSlice = html.slice(settingsStart);
+    assertStringIncludes(settingsSlice, 'id="briefingCard"');
+    assertStringIncludes(settingsSlice, '<h2 id="briefing-h">Morning Briefing</h2>');
+    assertStringIncludes(settingsSlice, 'id="briefingForm"');
+    assertStringIncludes(settingsSlice, "Weekly (Mon) · 14:00 UTC");
+    assertStringIncludes(settingsSlice, "Last briefing generated 2026-11-23.");
+    assertStringIncludes(settingsSlice, '<option value="weekly" selected>Weekly (Mondays)</option>');
+    assertStringIncludes(settingsSlice, '<option value="14" selected>14:00 UTC</option>');
+    assertStringIncludes(settingsSlice, '<option value="0">00:00 UTC</option>');
+    assertStringIncludes(settingsSlice, '<option value="23">23:00 UTC</option>');
+    assertStringIncludes(
+      settingsSlice,
+      '<option value="deepdive" selected>Two-host Deep Dive</option>',
+    );
+    assertStringIncludes(settingsSlice, '<option value="10" selected>10 stories</option>');
+    for (const preset of [4, 6, 8, 10, 12]) {
+      assertStringIncludes(settingsSlice, `value="${preset}"`);
+    }
+    assertStringIncludes(settingsSlice, 'id="saveBriefingBtn"');
+    assertStringIncludes(settingsSlice, 'id="generateBriefingBtn">Generate briefing now</button>');
+
+    // Non-preset saved maxArticles (5) is preserved in the dropdown
+    const customHtml = await (await get(fetch, "/account", stores, customMax.id)).text();
+    assertStringIncludes(customHtml, '<option value="5" selected>5 stories</option>');
+    assertStringIncludes(customHtml, "Daily · 06:00 UTC");
+
+    // Pending user cannot trigger on-demand briefing synthesis
+    const pendingHtml = await (await get(fetch, "/account", stores, pendingUser.id)).text();
+    assertStringIncludes(
+      pendingHtml,
+      'id="generateBriefingBtn" disabled>Generate briefing now</button>',
+    );
+  },
+);
+
+Deno.test(
+  "GET /account Morning Briefing UI wires GET/POST /api/account/briefing and /generate in-place with zero reload",
+  async () => {
+    const { fetch, stores } = app();
+    const me = await seed(stores, {
+      id: "user-briefing-live",
+      email: "live@example.com",
+      status: "approved",
+    });
+    const cookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, me.id)}`;
+
+    // Seed two recent unread articles + episodes so daily briefing has 2 eligible stories
+    const nowIso = new Date().toISOString();
+    await stores.metadata.putSource(
+      makeSource({ id: "tech-src", userId: me.id, title: "Tech Daily" }),
+    );
+    for (const idx of [1, 2]) {
+      await stores.metadata.putArticle(
+        makeArticle({
+          id: `art-live-${idx}`,
+          userId: me.id,
+          sourceId: "tech-src",
+          url: `https://example.com/story-${idx}`,
+          title: `Headline Story ${idx}`,
+          content: `Story ${idx} brings major improvements to web standards and performance.`,
+          ingestedAt: nowIso,
+          publishedAt: nowIso,
+        }),
+      );
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `ep-live-${idx}`,
+          userId: me.id,
+          sourceId: "tech-src",
+          sourceTitle: "Tech Daily",
+          articleId: `art-live-${idx}`,
+          title: `Headline Story ${idx}`,
+          status: "ready",
+          createdAt: nowIso,
+        }),
+      );
+    }
+
+    const pageRes = await get(fetch, "/account", stores, me.id);
+    assertEquals(pageRes.status, 200);
+    const html = await pageRes.text();
+
+    const calls: Array<{ method: string; path: string }> = [];
+    const liveFetch = async (input: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ method, path: input });
+      const headers = new Headers(init?.headers ?? {});
+      headers.set("cookie", cookie);
+      if (method === "GET") {
+        headers.set("sec-fetch-site", "same-origin");
+      } else {
+        headers.set("origin", BASE);
+      }
+      return await fetch(new Request(`${BASE}${input}`, { method, headers, body: init?.body }));
+    };
+
+    const mounted = mountAccountScript(html, liveFetch);
+    try {
+      const { doc, win, flush } = mounted;
+
+      // 1. Opening Settings tab lazily loads GET /api/account/briefing and shows eligible count
+      const settingsTab = doc.getElementById("tab-settings") as HTMLElement;
+      settingsTab.dispatchEvent(new win.Event("click", { bubbles: true }));
+      await flush();
+
+      assert(
+        calls.some((c) => c.method === "GET" && c.path === "/api/account/briefing"),
+        "activating Settings tab must fetch GET /api/account/briefing",
+      );
+      const eligibilityText = doc.getElementById("briefingEligibility")?.textContent ?? "";
+      assertStringIncludes(eligibilityText, "2 unread stories eligible in the past 24 hours");
+
+      // 2. Saving briefing preferences hits POST /api/account/briefing with zero page reload
+      (doc.getElementById("briefingSchedule") as HTMLSelectElement).value = "daily";
+      (doc.getElementById("briefingHour") as HTMLSelectElement).value = "9";
+      (doc.getElementById("briefingMode") as HTMLSelectElement).value = "deepdive";
+      (doc.getElementById("briefingMaxArticles") as HTMLSelectElement).value = "6";
+      doc.getElementById("briefingForm")?.dispatchEvent(
+        new win.Event("submit", { bubbles: true, cancelable: true }),
+      );
+      await flush();
+
+      const updatedUser = await stores.metadata.getUser(me.id);
+      assertEquals(updatedUser?.briefing?.schedule, "daily");
+      assertEquals(updatedUser?.briefing?.hourUtc, 9);
+      assertEquals(updatedUser?.briefing?.mode, "deepdive");
+      assertEquals(updatedUser?.briefing?.maxArticles, 6);
+      assertEquals(
+        doc.getElementById("briefingScheduleBadge")?.textContent,
+        "Daily · 09:00 UTC",
+      );
+      assertStringIncludes(
+        doc.getElementById("briefingFeedback")?.textContent ?? "",
+        "Briefing settings saved",
+      );
+      assertEquals(mounted.getReloadCount(), 0, "saving briefing settings must never reload");
+
+      // 3. Clicking "Generate briefing now" hits POST /api/account/briefing/generate -> 202 queued
+      //    and refreshes #episodesList in place with the new Morning Briefing episode
+      const beforeRows = doc.querySelectorAll("#episodesList li[data-episode-id]").length;
+      assertEquals(beforeRows, 2);
+
+      doc.getElementById("generateBriefingBtn")?.dispatchEvent(
+        new win.Event("click", { bubbles: true }),
+      );
+      await flush();
+      await flush();
+
+      assertStringIncludes(
+        doc.getElementById("briefingFeedback")?.textContent ?? "",
+        "Morning briefing queued (2 stories)",
+      );
+      const afterRows = doc.querySelectorAll("#episodesList li[data-episode-id]");
+      assertEquals(afterRows.length, 3, "new Morning Briefing episode must be added in place");
+      assertStringIncludes(afterRows[0]?.textContent ?? "", "Morning Briefing");
+      assertEquals(mounted.getReloadCount(), 0, "generating briefing must never reload");
+
+      // 4. Clicking "Generate briefing now" again same day handles 200 exists cleanly
+      doc.getElementById("generateBriefingBtn")?.dispatchEvent(
+        new win.Event("click", { bubbles: true }),
+      );
+      await flush();
+
+      assertStringIncludes(
+        doc.getElementById("briefingFeedback")?.textContent ?? "",
+        "already exists",
+      );
+    } finally {
+      mounted.cleanup();
+    }
+
+    // 5. Deep-linking via #briefing activates Settings tab without TDZ, loads GET /api/account/briefing,
+    //    and handles 200 empty cleanly when no unread articles exist
+    const emptyUser = await seed(stores, {
+      id: "user-briefing-empty",
+      email: "empty@example.com",
+      status: "approved",
+    });
+    const emptyCookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, emptyUser.id)}`;
+    const emptyHtml = await (await get(fetch, "/account", stores, emptyUser.id)).text();
+    const emptyMounted = mountAccountScript(
+      emptyHtml,
+      async (input, init) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        const headers = new Headers(init?.headers ?? {});
+        headers.set("cookie", emptyCookie);
+        if (method === "GET") headers.set("sec-fetch-site", "same-origin");
+        else headers.set("origin", BASE);
+        return await fetch(new Request(`${BASE}${input}`, { method, headers, body: init?.body }));
+      },
+      { hash: "#briefing" },
+    );
+    try {
+      await emptyMounted.flush();
+      assertEquals(
+        emptyMounted.doc.getElementById("tab-settings")?.getAttribute("aria-selected"),
+        "true",
+        "#briefing hash must activate the Settings tab",
+      );
+      assertStringIncludes(
+        emptyMounted.doc.getElementById("briefingEligibility")?.textContent ?? "",
+        "0 unread stories eligible",
+      );
+      emptyMounted.doc.getElementById("generateBriefingBtn")?.dispatchEvent(
+        new emptyMounted.win.Event("click", { bubbles: true }),
+      );
+      await emptyMounted.flush();
+      assertStringIncludes(
+        emptyMounted.doc.getElementById("briefingFeedback")?.textContent ?? "",
+        "No new unread articles found",
+      );
+    } finally {
+      emptyMounted.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "GET /account renders Narration Style selectors across Send URL, Add Feed, prefill, and per-feed prefs",
+  async () => {
+    const { fetch, stores } = app();
+    const me = await seed(stores, {
+      id: "user-styles-ui",
+      email: "styles@example.com",
+      status: "approved",
+    });
+    await stores.metadata.putSource(
+      makeSource({
+        id: "src-walkthrough",
+        userId: me.id,
+        title: "Engineering Blog",
+        ...({ narrationStyle: "walkthrough" } as Record<string, unknown>),
+      }),
+    );
+    await stores.metadata.putSource(
+      makeSource({
+        id: "src-default-style",
+        userId: me.id,
+        title: "General News",
+      }),
+    );
+
+    const res = await get(fetch, "/account", stores, me.id);
+    assertEquals(res.status, 200);
+    const html = await res.text();
+
+    assertEquals(tagNestingProblems(html), [], "/account markup must nest cleanly");
+    assert(!/\bstyle\s*=/i.test(html), "zero inline style attributes");
+    assertEquals(/\.innerHTML\s*=/.test(html), false, "zero .innerHTML assignments");
+    assertEquals(/\son(?:click|change|submit|input)=/i.test(html), false, "zero inline handlers");
+    extractInlineScripts(html);
+
+    // Send URL form + Add Feed form + per-feed prefs all carry narrationStyle <select>
+    assertStringIncludes(html, 'id="sendNarrationStyle" name="narrationStyle"');
+    assertStringIncludes(html, 'id="sourceNarrationStyle" name="narrationStyle"');
+    assertStringIncludes(html, 'id="src-style-0" name="narrationStyle"');
+    assertStringIncludes(html, 'id="src-style-1" name="narrationStyle"');
+
+    // All three presets render with expected values and labels
+    assertStringIncludes(html, '<option value="standard" selected>Full Narration</option>');
+    assertStringIncludes(html, '<option value="brief">3-Min Brief</option>');
+    assertStringIncludes(html, '<option value="walkthrough">Technical Walkthrough</option>');
+
+    // Source with saved narrationStyle="walkthrough" preselects it and surfaces it in summary
+    assertStringIncludes(
+      html,
+      '<option value="walkthrough" selected>Technical Walkthrough</option>',
+    );
+    assertStringIncludes(
+      html,
+      '<span class="source-prefs-meta" data-customized="true">Technical Walkthrough</span>',
+    );
+    assertStringIncludes(
+      html,
+      '<span class="source-prefs-meta" data-customized="false">Account defaults</span>',
+    );
+
+    // Prefill bookmarklet / share card also renders Narration Style selector
+    const prefillHtml = await (
+      await get(fetch, "/account?url=https%3A%2F%2Fexample.com%2Fcode-post", stores, me.id)
+    ).text();
+    assertEquals(tagNestingProblems(prefillHtml), [], "prefill /account markup must nest cleanly");
+    assertStringIncludes(prefillHtml, 'id="quickNarrationStyle" name="narrationStyle"');
+  },
+);
+
+Deno.test(
+  "GET /account submits narrationStyle from Send URL, Add Feed, and per-feed prefs with zero reload",
+  async () => {
+    const { fetch, stores } = app();
+    const me = await seed(stores, {
+      id: "user-styles-submit",
+      email: "styles-submit@example.com",
+      status: "approved",
+    });
+    await stores.metadata.putSource(
+      makeSource({ id: "src-1", userId: me.id, title: "Existing Blog", modes: ["direct"] }),
+    );
+
+    const html = await (await get(fetch, "/account", stores, me.id)).text();
+    const sent: Array<{ method: string; path: string; body: Record<string, unknown> | null }> = [];
+
+    const mockFetch = async (input: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const body = typeof init?.body === "string"
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : null;
+      sent.push({ method, path: input, body });
+
+      if (input === "/api/ingest") {
+        return Response.json({ article: { title: "Briefed Article" } }, { status: 202 });
+      }
+      if (input === "/api/account/sources") {
+        return Response.json(
+          {
+            source: {
+              id: "src-new",
+              title: String(body?.title || "Systems Notes"),
+              feedUrl: String(body?.feedUrl || "https://systems.example.com/feed.xml"),
+              modes: body?.modes ?? ["direct"],
+              narrationStyle: body?.narrationStyle ?? "standard",
+            },
+            poll: { queued: 0 },
+          },
+          { status: 201 },
+        );
+      }
+      if (input === "/api/account/sources/src-1/preferences") {
+        return Response.json({
+          ok: true,
+          source: {
+            id: "src-1",
+            title: "Existing Blog",
+            voice: null,
+            playbackRate: null,
+            modes: ["direct"],
+            codeHandling: "skip",
+            narrationStyle: body?.narrationStyle ?? "standard",
+          },
+        });
+      }
+      if (input.startsWith("/account")) {
+        return new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+      }
+      return Response.json({ ok: true });
+    };
+
+    const mounted = mountAccountScript(html, mockFetch);
+    try {
+      const { doc, win, flush } = mounted;
+
+      // 1. Send URL form submits narrationStyle: "brief"
+      (doc.getElementById("sendUrl") as HTMLInputElement).value = "https://example.com/long-essay";
+      (doc.getElementById("sendNarrationStyle") as HTMLSelectElement).value = "brief";
+      doc.getElementById("sendForm")?.dispatchEvent(
+        new win.Event("submit", { bubbles: true, cancelable: true }),
+      );
+      await flush();
+
+      const ingestReq = sent.find((r) => r.path === "/api/ingest");
+      assert(ingestReq, "Send URL form must POST /api/ingest");
+      assertEquals(ingestReq.body?.narrationStyle, "brief");
+      assertEquals(ingestReq.body?.url, "https://example.com/long-essay");
+
+      // 2. Add Feed form submits narrationStyle: "walkthrough" and creates dynamic feed card with zero reload
+      (doc.getElementById("sourceUrl") as HTMLInputElement).value =
+        "https://systems.example.com/feed.xml";
+      (doc.getElementById("sourceTitle") as HTMLInputElement).value = "Systems Notes";
+      (doc.getElementById("sourceNarrationStyle") as HTMLSelectElement).value = "walkthrough";
+      doc.getElementById("addSourceForm")?.dispatchEvent(
+        new win.Event("submit", { bubbles: true, cancelable: true }),
+      );
+      await flush();
+
+      const addReq = sent.find((r) => r.path === "/api/account/sources");
+      assert(addReq, "Add Feed form must POST /api/account/sources");
+      assertEquals(addReq.body?.narrationStyle, "walkthrough");
+
+      const dynamicRow = doc.querySelector('#sourcesList li[data-source-id="src-new"]');
+      assert(dynamicRow, "Add Feed must insert the new source card dynamically without reload");
+      const dynamicStyleSelect = dynamicRow.querySelector(
+        'select[name="narrationStyle"]',
+      ) as HTMLSelectElement | null;
+      assert(dynamicStyleSelect, "dynamic source card must include narrationStyle dropdown");
+      assertEquals(dynamicStyleSelect.value, "walkthrough");
+      assertEquals(
+        dynamicRow.querySelector(".source-prefs-meta")?.textContent,
+        "Technical Walkthrough",
+      );
+      assertEquals(mounted.getReloadCount(), 0, "adding a feed must not reload the page");
+
+      // 3. Per-feed <details class="source-prefs"> submits narrationStyle: "brief" with zero reload
+      const prefsForm = doc.querySelector('form[data-source-prefs="src-1"]') as HTMLFormElement;
+      const prefsStyle = prefsForm.querySelector(
+        'select[name="narrationStyle"]',
+      ) as HTMLSelectElement;
+      prefsStyle.value = "brief";
+      prefsForm.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+      await flush();
+
+      const prefsReq = sent.find((r) => r.path === "/api/account/sources/src-1/preferences");
+      assert(prefsReq, "source-prefs form must POST /api/account/sources/:sourceId/preferences");
+      assertEquals(prefsReq.body?.narrationStyle, "brief");
+      const existingRow = doc.querySelector('#sourcesList li[data-source-id="src-1"]');
+      assertStringIncludes(
+        existingRow?.querySelector(".source-prefs-meta")?.textContent ?? "",
+        "3-Min Brief",
+      );
+      assertEquals(
+        existingRow?.querySelector(".source-prefs-feedback")?.textContent,
+        "Saved.",
+      );
+      assertEquals(mounted.getReloadCount(), 0, "saving source prefs must not reload the page");
+    } finally {
+      mounted.cleanup();
+    }
   },
 );
